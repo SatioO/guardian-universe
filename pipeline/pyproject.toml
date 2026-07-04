@@ -10,6 +10,9 @@ dependencies = [
     "requests>=2.32",
 ]
 
+[project.scripts]
+guardian-pipeline = "pipeline.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
