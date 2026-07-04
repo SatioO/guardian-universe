@@ -53,7 +53,7 @@ jobs:
         run: |
           gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true
           body="data-daily FAILED on $(date -u +%F). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number')
+          n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number' || true)
           if [ -z "$n" ]; then
             gh issue create --title "Data pipeline: data-daily failed" --label pipeline-failure --body "$body"
           else

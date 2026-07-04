@@ -28,8 +28,11 @@ def publish_release(
 ) -> None:
     if not data_files:
         raise UnexpectedFailure("refusing to publish: no data files (empty store)")
+    # Idempotent create: fails (non-zero) if the release already exists — ignore it.
     runner(["gh", "release", "create", tag, "--repo", repo, "--title", tag,
             "--notes", "automated data release"])
+    # Upload data files, then diagnostic extras, then the manifest LAST (approximate
+    # atomicity: a client polling the manifest only sees it after the data it references).
     for f in [*data_files, *extra_files, manifest_path]:
         rc = runner(["gh", "release", "upload", tag, str(f), "--clobber", "--repo", repo])
         if rc != 0:
