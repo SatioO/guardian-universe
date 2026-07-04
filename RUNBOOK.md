@@ -15,9 +15,18 @@ cd pipeline && uv run python -m pipeline publish
 Uploads `data/ohlc/ohlc_*.parquet` + `data/meta/manifest.json` to the `data-latest`
 release. Clients read `manifest.json`, verify each file's `sha256`, then download.
 
+## Manual daily run (single day)
+Ingest one trading day (defaults to today) — the same pipeline as backfill, one date:
+```
+cd pipeline && uv run python -m pipeline daily [--date YYYY-MM-DD]
+```
+Non-trading days skip cleanly; an already-ingested day is an idempotent no-op.
+
 ## Alerts
 - Row-count deviation / format break → run exits non-zero (fail-closed).
 - Corrupt day (all rows quarantined) → `status: failed`, nothing written, retryable.
 
 ## Yearly
-- Refresh `pipeline/data/meta/holidays.json` from NSE's published holiday calendar.
+- Refresh `pipeline/data/meta/holidays.json` from NSE's published trading-holiday
+  calendar (https://www.nseindia.com/resources/exchange-communication-holidays).
+  Format: `{"YYYY": ["YYYY-MM-DD", ...]}` — one array of ISO dates per year.
