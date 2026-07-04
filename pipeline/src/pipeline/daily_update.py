@@ -48,28 +48,39 @@ def run_daily(
     except UnexpectedFailure as e:
         return RunStatus("failed", target, message=str(e))
 
-    df = normalize_equity_bhavcopy(raw)
-
-    trailing = _trailing_counts(base, target, holidays)
+    # Post-fetch processing is fully guarded: run_daily must ALWAYS return a
+    # RunStatus, never raise. Expected data-quality failures (UnexpectedFailure,
+    # SchemaError) AND unexpected ones (a malformed frame -> KeyError, a store
+    # OSError, ...) all map to a "failed" status so the scheduler never crashes.
     try:
+        df = normalize_equity_bhavcopy(raw)
+        trailing = _trailing_counts(base, target, holidays)
+        # NOTE: the deviation gate compares today's PRE-quarantine row count
+        # against the POST-quarantine counts of stored days; the difference is
+        # negligible in steady state (few rows are ever quarantined).
         validate.check_rowcount(len(df), trailing)
-    except UnexpectedFailure as e:
-        return RunStatus("failed", target, message=str(e))
-
-    clean, bad = validate.quarantine_bad_rows(df)
-    try:
+        clean, bad = validate.quarantine_bad_rows(df)
+        if len(clean) == 0 and len(df) > 0:
+            # A day where every row is corrupt is a data failure, not a
+            # successful no-op — return "failed" so it is NOT recorded as done
+            # (has_day stays False; the day can be retried).
+            return RunStatus(
+                "failed", target, quarantined_count=len(bad),
+                message=f"all {len(df)} rows failed quarantine",
+            )
         clean = validate_ohlc(clean)  # runtime contract gate (same schema as tests)
-    except SchemaError as e:
-        return RunStatus("failed", target, message=f"schema validation failed: {e}")
-
-    store.append_day(clean, base)
-    return RunStatus(
-        status="success",
-        date=target,
-        symbol_count=len(clean),
-        quarantined_count=len(bad),
-        source="nse-udiff",
-    )
+        store.append_day(clean, base)
+        return RunStatus(
+            status="success",
+            date=target,
+            symbol_count=len(clean),
+            quarantined_count=len(bad),
+            source="nse-udiff",
+        )
+    except (UnexpectedFailure, SchemaError) as e:
+        return RunStatus("failed", target, message=str(e))
+    except Exception as e:  # boundary guard: run_daily must never raise
+        return RunStatus("failed", target, message=f"unexpected pipeline error: {e}")
 
 
 def _trailing_counts(base: Path, target: date, holidays: set[date]) -> list[int]:

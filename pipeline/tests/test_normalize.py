@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from pipeline import config
 from pipeline.normalize import normalize_equity_bhavcopy
@@ -54,3 +55,10 @@ def test_colmap_keys_are_valid_udiff_columns():
     # Every raw column the normalizer maps must exist in the source's declared
     # column set — a rename/removal upstream then fails loudly here.
     assert set(_COLMAP).issubset(set(UDIFF_COLUMNS))
+
+
+def test_missing_required_column_raises():
+    from pipeline.errors import UnexpectedFailure
+    raw = pd.DataFrame([{"TradDt": "2026-07-03", "TckrSymb": "X"}])  # missing most cols
+    with pytest.raises(UnexpectedFailure):
+        normalize_equity_bhavcopy(raw)

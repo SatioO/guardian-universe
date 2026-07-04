@@ -4,6 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from pipeline import config
+from pipeline.errors import UnexpectedFailure
 
 _FINAL_SESSIONS = {"F1", "F2"}
 
@@ -23,8 +24,14 @@ _COLMAP = {
     "TtlNbOfTxsExctd": "trades",
 }
 
+# Raw columns this normalizer depends on (filters + mapped columns).
+_REQUIRED_RAW = set(_COLMAP) | {"FinInstrmTp", "SctySrs", "SsnId"}
+
 
 def normalize_equity_bhavcopy(raw: pd.DataFrame, source: str = "nse-udiff") -> pd.DataFrame:
+    missing = _REQUIRED_RAW - set(raw.columns)
+    if missing:
+        raise UnexpectedFailure(f"bhavcopy missing required columns: {sorted(missing)}")
     df = raw[
         (raw["FinInstrmTp"] == "STK")
         & (raw["SctySrs"] == "EQ")
