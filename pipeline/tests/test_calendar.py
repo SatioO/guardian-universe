@@ -1,0 +1,37 @@
+import json
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from pipeline import calendar as cal
+
+
+@pytest.fixture
+def holidays(tmp_path: Path) -> set[date]:
+    p = tmp_path / "holidays.json"
+    p.write_text(json.dumps({"2026": ["2026-01-26", "2026-08-15"]}))
+    return cal.load_holidays(p)
+
+
+def test_weekend_is_not_a_trading_day(holidays: set[date]):
+    assert cal.is_trading_day(date(2026, 7, 4), holidays) is False  # Saturday
+    assert cal.is_trading_day(date(2026, 7, 5), holidays) is False  # Sunday
+
+
+def test_holiday_is_not_a_trading_day(holidays: set[date]):
+    assert cal.is_trading_day(date(2026, 1, 26), holidays) is False
+
+
+def test_normal_weekday_is_a_trading_day(holidays: set[date]):
+    assert cal.is_trading_day(date(2026, 7, 3), holidays) is True  # Friday
+
+
+def test_previous_trading_day_skips_weekend(holidays: set[date]):
+    # Monday 2026-07-06 -> previous trading day is Friday 2026-07-03
+    assert cal.previous_trading_day(date(2026, 7, 6), holidays) == date(2026, 7, 3)
+
+
+def test_trading_days_back_counts_trading_days_only(holidays: set[date]):
+    days = cal.trading_days_back(date(2026, 7, 3), 3, holidays)
+    assert days == [date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)]
