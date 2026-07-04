@@ -1,0 +1,36 @@
+name: pipeline-ci
+
+on:
+  push:
+    paths: ["pipeline/**", ".github/workflows/pipeline-ci.yml"]
+  pull_request:
+    paths: ["pipeline/**", ".github/workflows/pipeline-ci.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: pipeline
+    steps:
+      - uses: actions/checkout@v4  # pin to SHA before go-live (P2)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Types
+        run: mypy
+      - name: Tests
+        run: pytest -v --cov=pipeline --cov-report=term-missing
