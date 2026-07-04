@@ -23,8 +23,10 @@ CANON_COLUMNS: list[str] = [
     "source",
 ]
 
-# Validation thresholds.
-ROWCOUNT_ABS_RANGE: tuple[int, int] = (1800, 2200)
+# Validation thresholds. The real NSE EQ universe is ~2384 symbols (2026); the abs
+# range is only a coarse full-market sanity bound (a truncated file is far smaller) —
+# the deviation gate does the fine day-to-day anomaly detection.
+ROWCOUNT_ABS_RANGE: tuple[int, int] = (1800, 3000)
 ROWCOUNT_DEVIATION: float = 0.15
 
 # Project root = the pipeline/ directory (two parents up from this file's src/pipeline/).

@@ -16,7 +16,7 @@ def test_rowcount_below_absolute_floor_fails():
 
 
 def test_rowcount_deviation_over_threshold_fails():
-    # count 1800 is INSIDE the abs range [1800, 2200] but deviates ~18% (400/2200)
+    # count 1800 is INSIDE the abs range [1800, 3000] but deviates ~18% (400/2200)
     # from the trailing mean of 2200 -> must fail on the DEVIATION check, not abs-range.
     with pytest.raises(UnexpectedFailure):
         check_rowcount(1800, [2200, 2200, 2200])
@@ -24,7 +24,7 @@ def test_rowcount_deviation_over_threshold_fails():
 
 def test_rowcount_above_absolute_ceiling_fails():
     with pytest.raises(UnexpectedFailure):
-        check_rowcount(2500, [2000, 2000])
+        check_rowcount(3500, [2000, 2000])
 
 
 def test_rowcount_nonpositive_trailing_mean_fails():
@@ -34,7 +34,7 @@ def test_rowcount_nonpositive_trailing_mean_fails():
 
 
 def test_rowcount_empty_trailing_uses_abs_range_only():
-    check_rowcount(1900, [])  # no raise (within 1800..2200)
+    check_rowcount(1900, [])  # no raise (within 1800..3000)
 
 
 def _row(**over) -> dict:
