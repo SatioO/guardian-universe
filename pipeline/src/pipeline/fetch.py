@@ -4,6 +4,7 @@ Source order: NSE UDiFF (primary) -> injected fallbacks (e.g. jugaad-data).
 HTTP + retry + session-warming live here so business logic stays pure."""
 from __future__ import annotations
 
+import contextlib
 import io
 import time
 import zipfile
@@ -52,8 +53,11 @@ class NseUdiffFetcher:
             return self._fetch_fallbacks(d)
 
     def _fetch_primary(self, d: date) -> pd.DataFrame:
-        # Warm the session (NSE rejects cold archive requests).
-        self._session.get("https://www.nseindia.com/", timeout=_TIMEOUT)
+        # Best-effort warm-up: NSE deposits anti-bot cookies on the session here.
+        # A transient warm-up failure is non-fatal — proceed to the archive GET,
+        # which has its own retry loop and ultimately the fallback chain.
+        with contextlib.suppress(requests.RequestException):
+            self._session.get("https://www.nseindia.com/", timeout=_TIMEOUT)
         url = nse_udiff.build_udiff_url(d)
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
@@ -63,7 +67,8 @@ class NseUdiffFetcher:
             if resp.status_code == 200:
                 return _unzip_to_df(resp.content)
             last_exc = RuntimeError(f"HTTP {resp.status_code}")
-            time.sleep(2**attempt)  # 1s, 2s, 4s
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(2**attempt)  # 1s, then 2s (no sleep after the final attempt)
         raise UnexpectedFailure(f"primary exhausted for {d.isoformat()}: {last_exc}")
 
     def _fetch_fallbacks(self, d: date) -> pd.DataFrame:
@@ -77,6 +82,8 @@ class NseUdiffFetcher:
 
 def _unzip_to_df(zip_bytes: bytes) -> pd.DataFrame:
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        name = zf.namelist()[0]
-        with zf.open(name) as fh:
+        names = zf.namelist()
+        if not names:
+            raise UnexpectedFailure("downloaded archive is empty")
+        with zf.open(names[0]) as fh:
             return pd.read_csv(fh)

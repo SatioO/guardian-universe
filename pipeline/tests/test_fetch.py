@@ -4,8 +4,10 @@ from datetime import date
 
 import pandas as pd
 import pytest
+import requests
 import responses
 
+from pipeline import fetch
 from pipeline.errors import NotYetPublished, UnexpectedFailure
 from pipeline.fetch import NseUdiffFetcher
 from pipeline.sources import nse_udiff
@@ -21,6 +23,12 @@ def _zip_bytes(csv_text: str, name: str = "BhavCopy.csv") -> bytes:
 CSV = "TradDt,TckrSymb,ClsPric\n2026-07-03,RELIANCE,3000\n"
 
 
+@pytest.fixture(autouse=True)
+def _no_backoff_sleep(monkeypatch):
+    """Backoff sleeps are real wall-clock time; neutralize them for fast tests."""
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_a, **_k: None)
+
+
 @responses.activate
 def test_fetch_raw_warms_session_then_downloads_and_unzips():
     responses.add(responses.GET, "https://www.nseindia.com/", status=200)
@@ -34,6 +42,8 @@ def test_fetch_raw_warms_session_then_downloads_and_unzips():
     df = NseUdiffFetcher().fetch_raw(date(2026, 7, 3))
     assert list(df.columns) == ["TradDt", "TckrSymb", "ClsPric"]
     assert df.iloc[0]["TckrSymb"] == "RELIANCE"
+    assert responses.calls[0].request.url.startswith("https://www.nseindia.com/")
+    assert responses.calls[1].request.url == nse_udiff.build_udiff_url(date(2026, 7, 3))
 
 
 @responses.activate
@@ -79,3 +89,18 @@ def test_fetch_raw_all_sources_exhausted_raises_unexpected():
 
     with pytest.raises(UnexpectedFailure):
         NseUdiffFetcher(fallbacks=(bad_fallback,)).fetch_raw(date(2026, 7, 3))
+
+
+@responses.activate
+def test_warmup_failure_still_allows_archive_fetch():
+    # A transient warm-up failure must NOT abort — the archive GET still runs.
+    responses.add(responses.GET, "https://www.nseindia.com/", body=requests.ConnectionError("dns"))
+    responses.add(
+        responses.GET,
+        nse_udiff.build_udiff_url(date(2026, 7, 3)),
+        body=_zip_bytes(CSV),
+        status=200,
+        content_type="application/zip",
+    )
+    df = NseUdiffFetcher().fetch_raw(date(2026, 7, 3))
+    assert df.iloc[0]["TckrSymb"] == "RELIANCE"
