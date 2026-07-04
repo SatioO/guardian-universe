@@ -1,0 +1,40 @@
+[project]
+name = "traderview-pipeline"
+version = "0.1.0"
+description = "EOD data producer for the traderview scanner"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.2,<2.3",
+    "pyarrow>=16",
+    "pandera>=0.20",
+    "requests>=2.32",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "responses>=0.25",
+    "freezegun>=1.5",
+    "mypy>=1.10",
+    "ruff>=0.6",
+    "pandas-stubs",
+    "types-requests",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra -q"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+packages = ["pipeline"]
