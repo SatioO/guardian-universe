@@ -21,7 +21,7 @@ jobs:
       run:
         working-directory: pipeline
     steps:
-      - uses: actions/checkout@v4  # pin to SHA before go-live (P2)
+      - uses: actions/checkout@v7  # TODO: SHA-pin for supply-chain hardening
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
