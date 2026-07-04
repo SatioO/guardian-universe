@@ -1,0 +1,42 @@
+name: data-monitor
+
+on:
+  schedule:
+    - cron: "0 2 * * *"   # 07:30 IST — after both evening ingest windows
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: pipeline
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: Check dataset freshness
+        id: fresh
+        run: python -m pipeline check-freshness
+      - name: Open/append staleness issue
+        if: failure() && steps.fresh.conclusion == 'failure'
+        working-directory: ${{ github.workspace }}
+        run: |
+          gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true
+          body="Dataset is STALE as of $(date -u +%F). Monitor run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number')
+          if [ -z "$n" ]; then
+            gh issue create --title "Data pipeline: dataset stale" --label pipeline-failure --body "$body"
+          else
+            gh issue comment "$n" --body "$body"
+          fi
