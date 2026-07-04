@@ -21,6 +21,21 @@ def test_parser_reads_daily_date():
     assert args.cmd == "daily" and args.date == "2026-07-03"
 
 
+def test_main_publish_returns_1_on_failure(monkeypatch):
+    def _boom(**_kw):
+        from pipeline.errors import UnexpectedFailure
+        raise UnexpectedFailure("no data")
+    monkeypatch.setattr(cli, "cmd_publish", _boom)
+    assert cli.main(["publish"]) == 1
+
+
+def test_main_publish_returns_0_on_success(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(cli, "cmd_publish", lambda **kw: calls.update(kw))
+    assert cli.main(["publish"]) == 0
+    assert calls["repo"] == config.GITHUB_REPO and calls["tag"] == config.RELEASE_TAG
+
+
 def test_cmd_publish_writes_manifest_and_uploads(tmp_path: Path):
     ohlc = tmp_path / "ohlc"
     meta = tmp_path / "meta"

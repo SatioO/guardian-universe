@@ -25,6 +25,8 @@ def publish_release(
     repo: str,
     runner: Runner,
 ) -> None:
+    if not data_files:
+        raise UnexpectedFailure("refusing to publish: no data files (empty store)")
     # Idempotent create: fails (non-zero) if the release already exists — ignore it.
     runner(["gh", "release", "create", tag, "--repo", repo, "--title", tag,
             "--notes", "automated data release"])

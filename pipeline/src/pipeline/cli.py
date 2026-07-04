@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from pipeline import backfill as backfill_mod
 from pipeline import calendar as cal
 from pipeline import config, manifest, publish
 from pipeline.daily_update import run_daily
+from pipeline.errors import UnexpectedFailure
 from pipeline.fetch import NseUdiffFetcher
 
 
@@ -54,15 +56,17 @@ def cmd_publish(
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    holidays = cal.load_holidays(config.META_DIR / "holidays.json")
-    fetcher = NseUdiffFetcher()
     if args.cmd == "daily":
+        holidays = cal.load_holidays(config.META_DIR / "holidays.json")
+        fetcher = NseUdiffFetcher()
         target = date.fromisoformat(args.date) if args.date else datetime.now(UTC).date()
         st = run_daily(target, fetcher=fetcher, holidays=holidays, base=config.OHLC_DIR)
         print(manifest.status_to_dict(st))
         return 0 if st.status in ("success", "skipped_holiday", "skipped_idempotent",
                                   "not_yet") else 1
     if args.cmd == "backfill":
+        holidays = cal.load_holidays(config.META_DIR / "holidays.json")
+        fetcher = NseUdiffFetcher()
         results = backfill_mod.backfill(
             datetime.now(UTC).date(), args.days,
             fetcher=fetcher, holidays=holidays, base=config.OHLC_DIR,
@@ -72,10 +76,14 @@ def main(argv: list[str] | None = None) -> int:
             for r in results
         ) else 1
     # publish
-    cmd_publish(
-        ohlc_dir=config.OHLC_DIR, meta_dir=config.META_DIR,
-        repo=config.GITHUB_REPO, tag=config.RELEASE_TAG,
-        runner=publish.subprocess_runner,
-        generated_at=datetime.now(UTC).isoformat(),
-    )
+    try:
+        cmd_publish(
+            ohlc_dir=config.OHLC_DIR, meta_dir=config.META_DIR,
+            repo=config.GITHUB_REPO, tag=config.RELEASE_TAG,
+            runner=publish.subprocess_runner,
+            generated_at=datetime.now(UTC).isoformat(),
+        )
+    except UnexpectedFailure as e:
+        print(f"publish failed: {e}", file=sys.stderr)
+        return 1
     return 0

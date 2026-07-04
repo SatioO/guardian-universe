@@ -51,3 +51,10 @@ def test_publish_raises_when_an_upload_fails(tmp_path: Path):
     r = FakeRunner(fail_on="ohlc_2026")  # the data upload fails
     with pytest.raises(UnexpectedFailure):
         publish.publish_release([a], m, tag="data-latest", repo="o/r", runner=r)
+
+
+def test_publish_release_refuses_empty_data(tmp_path: Path):
+    m = tmp_path / "manifest.json"
+    m.write_text("{}")
+    with pytest.raises(UnexpectedFailure):
+        publish.publish_release([], m, tag="data-latest", repo="o/r", runner=FakeRunner())
