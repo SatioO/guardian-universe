@@ -1,8 +1,8 @@
 from datetime import date
 
 import pandas as pd
-import pandera as pa
 import pytest
+from pandera.errors import SchemaError
 
 from pipeline import config
 from pipeline.schema import validate_ohlc
@@ -37,7 +37,7 @@ def test_negative_volume_is_rejected():
     row = _good_row()
     row["volume"] = -5
     df = pd.DataFrame([row])[config.CANON_COLUMNS]
-    with pytest.raises(pa.errors.SchemaError):
+    with pytest.raises(SchemaError):
         validate_ohlc(df)
 
 
@@ -45,5 +45,5 @@ def test_missing_instrument_key_is_rejected():
     row = _good_row()
     row["instrument_key"] = None
     df = pd.DataFrame([row])[config.CANON_COLUMNS]
-    with pytest.raises(pa.errors.SchemaError):
+    with pytest.raises(SchemaError):
         validate_ohlc(df)
