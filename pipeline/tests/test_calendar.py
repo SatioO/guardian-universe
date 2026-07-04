@@ -35,3 +35,20 @@ def test_previous_trading_day_skips_weekend(holidays: set[date]):
 def test_trading_days_back_counts_trading_days_only(holidays: set[date]):
     days = cal.trading_days_back(date(2026, 7, 3), 3, holidays)
     assert days == [date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)]
+
+
+def test_previous_trading_day_skips_holiday(holidays: set[date]):
+    # Tue 2026-01-27: the previous weekday is Mon 2026-01-26 (a holiday) -> skip it
+    # and the weekend -> Fri 2026-01-23.
+    assert cal.previous_trading_day(date(2026, 1, 27), holidays) == date(2026, 1, 23)
+
+
+def test_trading_days_back_when_end_is_non_trading_day(holidays: set[date]):
+    # Sat 2026-07-04 is non-trading; counting starts from Fri 2026-07-03.
+    days = cal.trading_days_back(date(2026, 7, 4), 2, holidays)
+    assert days == [date(2026, 7, 2), date(2026, 7, 3)]
+
+
+def test_trading_days_back_rejects_non_positive_n(holidays: set[date]):
+    with pytest.raises(ValueError):
+        cal.trading_days_back(date(2026, 7, 3), 0, holidays)
