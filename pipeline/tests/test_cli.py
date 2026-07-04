@@ -50,3 +50,25 @@ def test_cmd_publish_writes_manifest_and_uploads(tmp_path: Path):
     uploads = [c for c in calls if "upload" in c]
     assert any("ohlc_2026.parquet" in " ".join(c) for c in uploads)
     assert str(meta / "manifest.json") in uploads[-1]  # manifest last
+
+
+def test_parser_has_sync():
+    args = cli.build_parser().parse_args(["sync"])
+    assert args.cmd == "sync"
+
+
+def test_cmd_sync_downloads_ohlc_pattern(tmp_path: Path):
+    calls: list[list[str]] = []
+    rc = cli.cmd_sync(ohlc_dir=tmp_path / "ohlc", repo="o/r", tag="data-latest",
+                      runner=lambda cmd: (calls.append(cmd), 0)[1])
+    assert rc == 0
+    cmd = calls[0]
+    assert cmd[:4] == ["gh", "release", "download", "data-latest"]
+    assert "ohlc_*.parquet" in cmd and "--clobber" in cmd
+
+
+def test_cmd_sync_tolerates_missing_release(tmp_path: Path):
+    # First run: no release yet -> gh returns non-zero -> cmd_sync must NOT raise.
+    rc = cli.cmd_sync(ohlc_dir=tmp_path / "ohlc", repo="o/r", tag="data-latest",
+                      runner=lambda _cmd: 1)
+    assert rc == 1  # returned, not raised

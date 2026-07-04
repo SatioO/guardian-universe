@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     b = sub.add_parser("backfill")
     b.add_argument("--days", type=int, required=True)
     sub.add_parser("publish")
+    sub.add_parser("sync")
     return p
 
 
@@ -33,6 +34,17 @@ def _latest_trading_date(ohlc_dir: Path) -> date:
         col = pd.to_datetime(pd.read_parquet(p, columns=["date"])["date"])
         latest = max(latest, col.max().date())
     return latest
+
+
+def cmd_sync(*, ohlc_dir: Path, repo: str, tag: str, runner: publish.Runner) -> int:
+    # Download the current published parquet(s) so a fresh runner appends TODAY to
+    # accumulated history. A missing release (first ever run) is tolerated: the
+    # non-zero exit is returned, not raised — daily+publish will then create it.
+    ohlc_dir.mkdir(parents=True, exist_ok=True)
+    return runner([
+        "gh", "release", "download", tag, "--repo", repo,
+        "--pattern", "ohlc_*.parquet", "--dir", str(ohlc_dir), "--clobber",
+    ])
 
 
 def cmd_publish(
@@ -75,6 +87,10 @@ def main(argv: list[str] | None = None) -> int:
             r.status in ("success", "skipped_holiday", "skipped_idempotent", "not_yet")
             for r in results
         ) else 1
+    if args.cmd == "sync":
+        cmd_sync(ohlc_dir=config.OHLC_DIR, repo=config.GITHUB_REPO,
+                 tag=config.RELEASE_TAG, runner=publish.subprocess_runner)
+        return 0
     # publish
     try:
         cmd_publish(
