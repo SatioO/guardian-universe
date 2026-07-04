@@ -38,3 +38,8 @@ def ohlc_path(year: int, base: Path | None = None) -> Path:
     """Path to the year-partitioned OHLC parquet file."""
     root = (base if base is not None else OHLC_DIR)
     return root / f"ohlc_{year}.parquet"
+
+
+# Distribution (P1a): rolling GitHub Release served by GitHub's CDN.
+GITHUB_REPO = "SatioO/guardian-universe"
+RELEASE_TAG = "data-latest"
