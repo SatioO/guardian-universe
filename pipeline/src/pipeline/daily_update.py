@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from pandera.errors import SchemaError
+
 from pipeline import calendar as cal
 from pipeline import store, validate
 from pipeline.errors import NotYetPublished, UnexpectedFailure
@@ -55,7 +57,10 @@ def run_daily(
         return RunStatus("failed", target, message=str(e))
 
     clean, bad = validate.quarantine_bad_rows(df)
-    clean = validate_ohlc(clean)  # runtime contract gate (same schema as tests)
+    try:
+        clean = validate_ohlc(clean)  # runtime contract gate (same schema as tests)
+    except SchemaError as e:
+        return RunStatus("failed", target, message=f"schema validation failed: {e}")
 
     store.append_day(clean, base)
     return RunStatus(
