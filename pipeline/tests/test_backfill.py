@@ -1,0 +1,52 @@
+from datetime import date
+from pathlib import Path
+
+import pandas as pd
+
+from pipeline import store
+from pipeline.backfill import backfill
+
+HOLIDAYS: set[date] = set()
+RAW = pd.read_csv(Path(__file__).parent / "fixtures" / "bhavcopy_normal.csv")
+
+
+class StubFetcher:
+    def __init__(self):
+        self.dates: list[date] = []
+
+    def fetch_raw(self, d: date) -> pd.DataFrame:
+        self.dates.append(d)
+        # Tag rows with the target date so each day is stored under its own date,
+        # matching run_daily's idempotency check (has_day uses the stored TradDt).
+        df = RAW.copy()
+        df["TradDt"] = d.isoformat()
+        return df
+
+
+def _no_sleep(_s: float) -> None:
+    return None
+
+
+def test_backfill_ingests_n_trading_days(tmp_path: Path, monkeypatch):
+    from pipeline import config
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    f = StubFetcher()
+    out = backfill(date(2026, 7, 3), 3, fetcher=f, holidays=HOLIDAYS, base=tmp_path,
+                   sleep=_no_sleep)
+    assert [s.status for s in out] == ["success", "success", "success"]
+    assert len(f.dates) == 3  # fetched once per day, ascending
+    assert f.dates == sorted(f.dates)
+
+
+def test_backfill_is_resumable(tmp_path: Path, monkeypatch):
+    from pipeline import config
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    backfill(date(2026, 7, 3), 3, fetcher=StubFetcher(), holidays=HOLIDAYS,
+             base=tmp_path, sleep=_no_sleep)
+    # Second run: every day already present -> idempotent skips, no refetch.
+    f2 = StubFetcher()
+    out = backfill(date(2026, 7, 3), 3, fetcher=f2, holidays=HOLIDAYS, base=tmp_path,
+                   sleep=_no_sleep)
+    assert [s.status for s in out] == ["skipped_idempotent"] * 3
+    assert f2.dates == []
+    assert store.has_day(tmp_path, date(2026, 7, 3))
