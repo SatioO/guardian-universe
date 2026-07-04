@@ -52,3 +52,14 @@ def test_write_json_roundtrips(tmp_path: Path):
     p = tmp_path / "m.json"
     manifest.write_json({"a": 1}, p)
     assert json.loads(p.read_text()) == {"a": 1}
+
+
+def test_write_status_writes_last_run_status(tmp_path: Path):
+    from pipeline.daily_update import RunStatus
+    p = manifest.write_status(
+        RunStatus("success", date(2026, 7, 3), symbol_count=2406, source="nse-udiff"),
+        tmp_path,
+    )
+    assert p == tmp_path / "last_run_status.json"
+    import json
+    assert json.loads(p.read_text())["symbol_count"] == 2406

@@ -5,7 +5,7 @@ production uses `subprocess_runner`."""
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from pipeline.errors import UnexpectedFailure
@@ -24,15 +24,13 @@ def publish_release(
     tag: str,
     repo: str,
     runner: Runner,
+    extra_files: Sequence[Path] = (),
 ) -> None:
     if not data_files:
         raise UnexpectedFailure("refusing to publish: no data files (empty store)")
-    # Idempotent create: fails (non-zero) if the release already exists — ignore it.
     runner(["gh", "release", "create", tag, "--repo", repo, "--title", tag,
             "--notes", "automated data release"])
-    # Upload DATA files first, then the manifest LAST (approximate atomicity:
-    # clients that poll the manifest only see it after the data it references).
-    for f in [*data_files, manifest_path]:
+    for f in [*data_files, *extra_files, manifest_path]:
         rc = runner(["gh", "release", "upload", tag, str(f), "--clobber", "--repo", repo])
         if rc != 0:
             raise UnexpectedFailure(f"gh release upload failed ({rc}) for {f.name}")

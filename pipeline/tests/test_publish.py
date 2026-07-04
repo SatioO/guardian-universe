@@ -58,3 +58,18 @@ def test_publish_release_refuses_empty_data(tmp_path: Path):
     m.write_text("{}")
     with pytest.raises(UnexpectedFailure):
         publish.publish_release([], m, tag="data-latest", repo="o/r", runner=FakeRunner())
+
+
+def test_publish_uploads_extra_files_before_manifest(tmp_path: Path):
+    a = tmp_path / "ohlc_2026.parquet"
+    a.write_text("x")
+    s = tmp_path / "last_run_status.json"
+    s.write_text("{}")
+    m = tmp_path / "manifest.json"
+    m.write_text("{}")
+    r = FakeRunner()
+    publish.publish_release([a], m, tag="t", repo="o/r", runner=r, extra_files=[s])
+    uploads = [c for c in r.calls if "upload" in c]
+    assert len(uploads) == 3
+    assert str(m) in uploads[-1]                       # manifest still LAST
+    assert any(str(s) in u for u in uploads[:-1])      # status uploaded before it

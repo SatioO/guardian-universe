@@ -63,7 +63,10 @@ def cmd_publish(
     manifest_path = meta_dir / "manifest.json"
     manifest.write_json(m, manifest_path)
     data_files = sorted(ohlc_dir.glob("ohlc_*.parquet"))
-    publish.publish_release(data_files, manifest_path, tag=tag, repo=repo, runner=runner)
+    status_path = meta_dir / "last_run_status.json"
+    extra = [status_path] if status_path.exists() else []
+    publish.publish_release(data_files, manifest_path, tag=tag, repo=repo,
+                            runner=runner, extra_files=extra)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -73,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         fetcher = NseUdiffFetcher()
         target = date.fromisoformat(args.date) if args.date else datetime.now(UTC).date()
         st = run_daily(target, fetcher=fetcher, holidays=holidays, base=config.OHLC_DIR)
+        manifest.write_status(st, config.META_DIR)
         print(manifest.status_to_dict(st))
         return 0 if st.status in ("success", "skipped_holiday", "skipped_idempotent",
                                   "not_yet") else 1
