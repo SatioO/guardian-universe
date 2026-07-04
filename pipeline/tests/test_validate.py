@@ -16,9 +16,21 @@ def test_rowcount_below_absolute_floor_fails():
 
 
 def test_rowcount_deviation_over_threshold_fails():
-    # mean(trailing)=2000; 2000*0.15=300; 1600 deviates by 400 -> fail
+    # count 1800 is INSIDE the abs range [1800, 2200] but deviates ~18% (400/2200)
+    # from the trailing mean of 2200 -> must fail on the DEVIATION check, not abs-range.
     with pytest.raises(UnexpectedFailure):
-        check_rowcount(1600, [2000, 2000, 2000])
+        check_rowcount(1800, [2200, 2200, 2200])
+
+
+def test_rowcount_above_absolute_ceiling_fails():
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount(2500, [2000, 2000])
+
+
+def test_rowcount_nonpositive_trailing_mean_fails():
+    # trailing present but all-zero mean -> fail-closed, not a silent skip.
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount(2000, [0, 0, 0])
 
 
 def test_rowcount_empty_trailing_uses_abs_range_only():
@@ -44,7 +56,16 @@ def test_quarantine_separates_bad_rows():
         _row(symbol="NEGVOL", volume=-1),
         _row(symbol="HILO", high=10.0, low=20.0),
         _row(symbol="CLOSEOOB", close=9999.0),
+        _row(symbol="NOKEY", instrument_key=None),
+        _row(symbol="EMPTYKEY", instrument_key=""),
     ])[config.CANON_COLUMNS]
     clean, bad = quarantine_bad_rows(df)
     assert set(clean["symbol"]) == {"GOOD"}
-    assert set(bad["symbol"]) == {"NEGVOL", "HILO", "CLOSEOOB"}
+    assert set(bad["symbol"]) == {"NEGVOL", "HILO", "CLOSEOOB", "NOKEY", "EMPTYKEY"}
+
+
+def test_quarantine_handles_empty_frame():
+    empty = pd.DataFrame([_row()])[config.CANON_COLUMNS].iloc[0:0]
+    clean, bad = quarantine_bad_rows(empty)
+    assert len(clean) == 0
+    assert len(bad) == 0
