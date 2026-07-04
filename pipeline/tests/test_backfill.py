@@ -34,8 +34,9 @@ def test_backfill_ingests_n_trading_days(tmp_path: Path, monkeypatch):
     out = backfill(date(2026, 7, 3), 3, fetcher=f, holidays=HOLIDAYS, base=tmp_path,
                    sleep=_no_sleep)
     assert [s.status for s in out] == ["success", "success", "success"]
-    assert len(f.dates) == 3  # fetched once per day, ascending
-    assert f.dates == sorted(f.dates)
+    # exact 3 trading days ending 2026-07-03 (Fri), ascending — pins the window,
+    # not just non-decreasing order.
+    assert f.dates == [date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)]
 
 
 def test_backfill_is_resumable(tmp_path: Path, monkeypatch):
@@ -49,4 +50,5 @@ def test_backfill_is_resumable(tmp_path: Path, monkeypatch):
                    sleep=_no_sleep)
     assert [s.status for s in out] == ["skipped_idempotent"] * 3
     assert f2.dates == []
-    assert store.has_day(tmp_path, date(2026, 7, 3))
+    for d in (date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)):
+        assert store.has_day(tmp_path, d)  # all 3 days persisted, not just the last
