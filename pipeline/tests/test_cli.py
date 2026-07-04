@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -72,3 +73,25 @@ def test_cmd_sync_tolerates_missing_release(tmp_path: Path):
     rc = cli.cmd_sync(ohlc_dir=tmp_path / "ohlc", repo="o/r", tag="data-latest",
                       runner=lambda _cmd: 1)
     assert rc == 1  # returned, not raised
+
+
+def test_parser_has_check_freshness():
+    assert cli.build_parser().parse_args(["check-freshness"]).cmd == "check-freshness"
+
+
+def test_cmd_check_freshness_reads_manifest_and_reports_fresh(tmp_path: Path):
+    import json
+    (tmp_path / "manifest.json").write_text(json.dumps({"latest_trading_date": "2026-07-03"}))
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(),
+        today=date(2026, 7, 6), runner=lambda _cmd: 0, work_dir=tmp_path,
+    )
+    assert rc == 0  # Fri 2026-07-03 published, today Mon -> fresh
+
+
+def test_cmd_check_freshness_flags_missing_release(tmp_path: Path):
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(),
+        today=date(2026, 7, 6), runner=lambda _cmd: 1, work_dir=tmp_path,
+    )
+    assert rc == 1  # download failed -> treated as stale/missing

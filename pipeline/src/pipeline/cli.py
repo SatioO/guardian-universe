@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import tempfile
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -10,7 +12,7 @@ import pandas as pd
 
 from pipeline import backfill as backfill_mod
 from pipeline import calendar as cal
-from pipeline import config, manifest, publish
+from pipeline import config, freshness, manifest, publish
 from pipeline.daily_update import run_daily
 from pipeline.errors import UnexpectedFailure
 from pipeline.fetch import NseUdiffFetcher
@@ -25,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--days", type=int, required=True)
     sub.add_parser("publish")
     sub.add_parser("sync")
+    sub.add_parser("check-freshness")
     return p
 
 
@@ -45,6 +48,25 @@ def cmd_sync(*, ohlc_dir: Path, repo: str, tag: str, runner: publish.Runner) -> 
         "gh", "release", "download", tag, "--repo", repo,
         "--pattern", "ohlc_*.parquet", "--dir", str(ohlc_dir), "--clobber",
     ])
+
+
+def cmd_check_freshness(
+    *,
+    repo: str,
+    tag: str,
+    holidays: set[date],
+    today: date,
+    runner: publish.Runner,
+    work_dir: Path,
+) -> int:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    rc = runner(["gh", "release", "download", tag, "--repo", repo,
+                 "--pattern", "manifest.json", "--dir", str(work_dir), "--clobber"])
+    manifest_path = work_dir / "manifest.json"
+    if rc != 0 or not manifest_path.exists():
+        return 1  # no release / download failed -> stale
+    latest = date.fromisoformat(json.loads(manifest_path.read_text())["latest_trading_date"])
+    return 1 if freshness.is_stale(latest, today, holidays) else 0
 
 
 def cmd_publish(
@@ -95,6 +117,14 @@ def main(argv: list[str] | None = None) -> int:
         cmd_sync(ohlc_dir=config.OHLC_DIR, repo=config.GITHUB_REPO,
                  tag=config.RELEASE_TAG, runner=publish.subprocess_runner)
         return 0
+    if args.cmd == "check-freshness":
+        holidays = cal.load_holidays(config.META_DIR / "holidays.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            return cmd_check_freshness(
+                repo=config.GITHUB_REPO, tag=config.RELEASE_TAG, holidays=holidays,
+                today=datetime.now(UTC).date(), runner=publish.subprocess_runner,
+                work_dir=Path(tmp),
+            )
     # publish
     try:
         cmd_publish(
