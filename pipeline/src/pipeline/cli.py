@@ -28,8 +28,19 @@ Runner = Callable[[list[str]], int]
 # partial still matches BUILDERS' `Callable[[DatasetSpec, date], RunStatus]`
 # signature -- source_spec is filled in, leaving exactly the (spec, target)
 # two positional params _run_builder calls with.
+#
+# WARNING: this binds source_spec to the REAL registry spec at *import time*
+# (whatever datasets.DATASETS[datasets.DATASET_ORDER[0]] resolves to when this
+# module is first imported) -- not at call time. Tests that want a builder
+# run against tmp dirs must monkeypatch `cli.builders.BUILDERS` directly
+# (replace the entry with a fresh partial bound to a tmp-scoped spec);
+# monkeypatching `datasets.DATASETS` alone will NOT redirect the source_spec
+# already captured here. See the matching warning in builders.py's docstring.
 builders.BUILDERS["reference"] = functools.partial(
     builders.build_reference, source_spec=datasets.DATASETS[datasets.DATASET_ORDER[0]]
+)
+builders.BUILDERS["ca_flags"] = functools.partial(
+    builders.build_ca_flags, source_spec=datasets.DATASETS[datasets.DATASET_ORDER[0]]
 )
 
 

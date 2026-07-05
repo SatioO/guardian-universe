@@ -44,7 +44,13 @@ DATA_DIR: Path = PROJECT_ROOT / "data"
 OHLC_DIR: Path = DATA_DIR / "ohlc"
 INDICES_DIR: Path = DATA_DIR / "indices"
 REFERENCE_DIR: Path = DATA_DIR / "reference"
+CA_FLAGS_DIR: Path = DATA_DIR / "ca_flags"
 META_DIR: Path = DATA_DIR / "meta"
+
+# Corporate-action ex-date detector (G1b task 7): flag an instrument when
+# abs(prevclose_today / close_prev - 1) exceeds this fraction -- a split,
+# bonus, or other ex-date discontinuity, not ordinary price movement.
+CA_DISCONTINUITY_THRESHOLD: float = 0.005
 
 
 def dataset_path(year: int, base: Path, *, prefix: str = "ohlc") -> Path:

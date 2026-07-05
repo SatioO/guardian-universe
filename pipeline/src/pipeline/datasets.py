@@ -80,10 +80,21 @@ REFERENCE = DatasetSpec(
     derived=True,
 )
 
+CA_FLAGS = DatasetSpec(
+    key="ca_flags", file_prefix="ca_flags", base_dir=config.CA_FLAGS_DIR,
+    source_label="derived",
+    normalizer=lambda df: df,  # identity: builders.build_ca_flags shapes rows itself
+    make_fetcher=_no_fetcher,
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="ca_flags", schema_version=1,
+    derived=True,
+)
+
 DATASETS: dict[str, DatasetSpec] = {
     "equities": EQUITIES, "indices": INDICES, "reference": REFERENCE,
+    "ca_flags": CA_FLAGS,
 }
-DATASET_ORDER: list[str] = ["equities", "indices", "reference"]
+DATASET_ORDER: list[str] = ["equities", "indices", "reference", "ca_flags"]
 
 # publish.py resolves specs by manifest_name (by_manifest_name); manifest_name
 # must be unique across the registry or that resolution would be ambiguous.

@@ -17,7 +17,7 @@ def test_equities_spec_fields():
     # NSE: sentinel keys introduced -- a client-visible ohlc dataset change.
     assert s.manifest_name == "ohlc" and s.schema_version == 2
     assert datasets.DATASETS["equities"] is s
-    assert datasets.DATASET_ORDER == ["equities", "indices", "reference"]
+    assert datasets.DATASET_ORDER == ["equities", "indices", "reference", "ca_flags"]
 
 
 def test_equities_normalizer_source_bound_via_partial():
@@ -54,7 +54,9 @@ def test_manifest_names_are_unique():
 
 
 def test_all_specs_follows_dataset_order():
-    assert datasets.all_specs() == [datasets.EQUITIES, datasets.INDICES, datasets.REFERENCE]
+    assert datasets.all_specs() == [
+        datasets.EQUITIES, datasets.INDICES, datasets.REFERENCE, datasets.CA_FLAGS,
+    ]
 
 
 def test_derived_defaults_false_for_existing_specs():
