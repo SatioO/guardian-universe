@@ -123,7 +123,7 @@ def test_failed_sync_then_publish_cannot_wipe_history(tmp_path: Path):
     fake.ops = 0
     fake.fail_after = 1  # exists() ok, manifest download dies
     with pytest.raises(ReleaseError):
-        sync_store(fake, ohlc_dir=ohlc2, meta_dir=meta2, work_dir=runner2 / "work")
+        sync_store(fake, meta_dir=meta2, work_dir=runner2 / "work")
     fake.fail_after = None
 
     # Even if an operator force-runs publish afterwards, guards refuse:

@@ -91,8 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
         with tempfile.TemporaryDirectory() as tmp:
             try:
-                sync_store(client, ohlc_dir=config.OHLC_DIR, meta_dir=config.META_DIR,
-                           work_dir=Path(tmp))
+                sync_store(client, meta_dir=config.META_DIR, work_dir=Path(tmp))
             except (ReleaseError, UnexpectedFailure) as e:
                 print(f"sync failed: {e}", file=sys.stderr)
                 return 1
