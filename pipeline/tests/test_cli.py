@@ -1285,3 +1285,193 @@ def test_continuity_year_boundary_window_downloads_previous_year_asset(
         runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
     )
     assert rc == 0
+
+
+# -- continuity clamp to available history (Critical fix) --
+#
+# THE BUG: the continuity window (fixed at 10 trading days) was diffed
+# against `dates_present` with NO floor at the dataset's own earliest stored
+# date. A live store with only a few days of history (e.g. 3 days) reported
+# every expected day before its own first day as a false "hole" -- 7 false
+# alarms/morning, exit 1, until depth reaches the window (or a backfill).
+# THE FIX: `freshness.missing_days` clamps `expected` to days
+# `>= min(dates_present)`; `_check_dataset_continuity` prints an
+# informational (not alarming) note when the clamp actually truncated the
+# window, so the reduced-coverage state stays visible rather than silently
+# looking identical to a full 10-day-verified pass.
+
+def test_continuity_clamps_to_available_history_reproduces_real_3day_store(
+    monkeypatch, tmp_path, capsys,
+):
+    """THE REPRODUCTION: mirrors the real live store's shape at the time
+    this bug was found -- a 3-day-old equities baseline ({2026-07-01..03}),
+    today = 2026-07-06, full manifest. Pre-fix: 7 false holes predating the
+    store, exit 1, every morning until depth reaches 10. Post-fix: exit 0,
+    an informational 'verified over 3 of 10 days' note printed, NO holes."""
+    _continuity_registry(monkeypatch, tmp_path)
+    real_store_dates = [date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)]
+    window = _window_dates()  # indices stays fully seeded -- isolates the equities repro
+    fake = FakeReleaseClient(exists=True)
+    manifest_datasets: list[dict] = []
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="ohlc",
+                            file_prefix="ohlc", year=2026, dates=real_store_dates)
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="indices",
+                            file_prefix="indices", year=2026, dates=window)
+    _seed_manifest_and_client(fake, manifest_datasets, work_dir=tmp_path / "work",
+                               latest_trading_date=date(2026, 7, 3))
+
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(), today=_TODAY,
+        runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "check-freshness: dataset" not in out  # no hole line for equities
+    assert "continuity: ohlc verified over 3 of 10 days" in out
+    assert "2026-07-01" in out  # names the earliest available date
+
+
+def test_continuity_hole_within_available_depth_still_exits_1_after_clamp(
+    monkeypatch, tmp_path, capsys,
+):
+    """The clamp must never hide a REAL hole inside the dataset's own
+    available depth -- only days predating the earliest stored date are
+    excused. A young store missing a day strictly AFTER its own earliest
+    date is a genuine hole and must still fail the check by name."""
+    _continuity_registry(monkeypatch, tmp_path)
+    window = _window_dates()
+    # 4-day-deep store: earliest + latest present, one real day between them
+    # missing (a hole squarely within the store's own depth, not before it).
+    d_early, d_mid, d_late = window[-4], window[-2], window[-1]
+    equities_dates = [d for d in [d_early, d_mid, d_late] if d != d_mid]
+    fake = FakeReleaseClient(exists=True)
+    manifest_datasets: list[dict] = []
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="ohlc",
+                            file_prefix="ohlc", year=2026, dates=equities_dates)
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="indices",
+                            file_prefix="indices", year=2026, dates=window)
+    _seed_manifest_and_client(fake, manifest_datasets, work_dir=tmp_path / "work",
+                               latest_trading_date=d_late)
+
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(), today=_TODAY,
+        runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert d_mid.isoformat() in out
+    assert "ohlc" in out
+    # Days strictly before d_early must NOT appear -- clamp still applies.
+    for d in window:
+        if d < d_early:
+            assert d.isoformat() not in out
+
+
+def test_continuity_empty_in_window_dates_exits_0_staleness_governs(
+    monkeypatch, tmp_path, capsys,
+):
+    """A baseline asset that resolves to ZERO dates at all (nothing
+    verifiable) must not be treated as "everything is missing" -- an empty
+    `dates_present` clamps to an empty expected set (there is no earliest
+    date to floor against), so `missing_days` returns `[]`. Continuity's job
+    ends there; lag is independently governed by the pre-existing STALENESS
+    check (`is_stale`, off `latest_trading_date`), which stays exit-0 as
+    long as the manifest's own latest date is current.
+
+    Seeded by hand (not via `_seed_dataset_baseline`, which derives
+    `latest_date` via `max(dates)` and cannot express a zero-row baseline) --
+    an empty-but-present baseline parquet, with `latest_date` supplied
+    independently since it is a distinct manifest field, not derived from
+    the (empty) baseline content in this fixture."""
+    _continuity_registry(monkeypatch, tmp_path)
+    window = _window_dates()
+    fake = FakeReleaseClient(exists=True)
+    manifest_datasets: list[dict] = []
+    data = _baseline_parquet_bytes([])  # zero-row baseline, valid parquet shape
+    sha = hashlib.sha256(data).hexdigest()
+    name = "ohlc_2026.parquet"
+    asset = asset_name(name, sha)
+    fake.seed(asset, data)
+    manifest_datasets.append({
+        "name": "ohlc", "schema_version": 1,
+        "latest_date": date(2026, 7, 3).isoformat(),
+        "baseline": [{"name": name, "asset": asset, "sha256": sha,
+                      "bytes": len(data), "rows": 0}],
+        "deltas": [],
+    })
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="indices",
+                            file_prefix="indices", year=2026, dates=window)
+    _seed_manifest_and_client(fake, manifest_datasets, work_dir=tmp_path / "work")
+
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(), today=_TODAY,
+        runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "check-freshness: dataset 'ohlc' missing" not in out
+
+
+def test_continuity_year_boundary_young_store_no_prev_year_asset_exits_0(
+    monkeypatch, tmp_path,
+):
+    """SECOND TRIGGER of the same defect: at a year boundary, a dataset
+    less than a year old has no previous-year baseline asset at all -- it's
+    not that the asset is missing by accident, the dataset simply didn't
+    exist yet. Pre-fix, every previous-year expected day would be a false
+    hole. Post-fix: the clamp floors at the earliest PRESENT date (itself in
+    the current year), so the previous-year portion of the window is
+    excused, exactly like the plain year-boundary test above but with the
+    previous-year asset entirely ABSENT from the manifest (not just empty)."""
+    monkeypatch.setattr(cli.datasets, "DATASETS", {"equities": dataclasses.replace(
+        datasets.EQUITIES, base_dir=tmp_path / "ohlc")})
+    monkeypatch.setattr(cli.datasets, "DATASET_ORDER", ["equities"])
+
+    today = date(2026, 1, 5)  # window reaches back into December 2025
+    window = _window_dates(today=today)
+    assert window[0].year == 2025 and window[-1].year == 2026
+    current_year_dates = [d for d in window if d.year == 2026]
+    assert current_year_dates
+
+    fake = FakeReleaseClient(exists=True)
+    manifest_datasets: list[dict] = []
+    # ONLY the 2026 baseline is seeded -- no 2025 entry at all (young store).
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="ohlc",
+                            file_prefix="ohlc", year=2026, dates=current_year_dates)
+    _seed_manifest_and_client(fake, manifest_datasets, work_dir=tmp_path / "work",
+                               latest_trading_date=max(current_year_dates))
+
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(), today=today,
+        runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
+    )
+    assert rc == 0
+
+
+def test_continuity_release_error_on_asset_download_exits_1_clean_message(
+    monkeypatch, tmp_path, capsys,
+):
+    """Minor (from review): the continuity download loop must not crash with
+    a raw traceback when the manifest names an asset the release doesn't
+    actually have -- a manifest-listed-but-missing asset is a REAL alarm
+    (release/manifest inconsistency), not a crash. Wrapped in try/except
+    ReleaseError -> a clean 'cross-dataset' error message on stderr, exit 1."""
+    _continuity_registry(monkeypatch, tmp_path)
+    window = _window_dates()
+    fake = FakeReleaseClient(exists=True)
+    manifest_datasets: list[dict] = []
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="ohlc",
+                            file_prefix="ohlc", year=2026, dates=window)
+    _seed_manifest_and_client(fake, manifest_datasets, work_dir=tmp_path / "work")
+    # Sabotage: remove the just-seeded asset bytes so client.download raises
+    # ReleaseError("asset not found: ...") -- manifest still names it.
+    fake.assets.clear()
+
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(), today=_TODAY,
+        runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "cross-dataset" in err
+    assert "Traceback" not in err

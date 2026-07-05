@@ -8,6 +8,7 @@ import json
 import sys
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -329,6 +330,23 @@ def _dataset_manifest_entry(
     return None
 
 
+@dataclass(frozen=True)
+class ContinuityResult:
+    """One fetched dataset's continuity outcome. `holes` empty means clean
+    (subject to the same clamp `freshness.missing_days` applies -- a hole
+    predating the dataset's own earliest stored day is never in here).
+
+    `clamp_note` is set only when the trailing window was actually truncated
+    to less than the full `window` size (i.e. `min(dates_present)` sits
+    AFTER the window's own start) -- a young/still-catching-up dataset, not
+    an error condition. `None` means the dataset's history already reaches
+    the full window (the common/steady-state case) and nothing needs
+    calling out beyond the normal hole report, if any."""
+
+    holes: list[date]
+    clamp_note: str | None
+
+
 def _check_dataset_continuity(
     spec: datasets.DatasetSpec,
     manifest_obj: dict[str, Any],
@@ -338,13 +356,14 @@ def _check_dataset_continuity(
     today: date,
     holidays: set[date],
     special_sessions: set[date] | None,
-) -> list[date]:
+) -> ContinuityResult:
     """Downloads whichever baseline asset(s) cover the continuity window for
     one FETCHED dataset spec and returns its missing trading days (empty
-    when clean). Raises `ReleaseError` if the manifest names an asset that
-    the release doesn't actually have (a real inconsistency, distinct from
-    the dataset being absent from the manifest entirely -- see the
-    absent-dataset grace rule in the caller)."""
+    when clean) plus an informational clamp note when the dataset's own
+    history is shallower than the full window. Raises `ReleaseError` if the
+    manifest names an asset that the release doesn't actually have (a real
+    inconsistency, distinct from the dataset being absent from the manifest
+    entirely -- see the absent-dataset grace rule in the caller)."""
     ds = _dataset_manifest_entry(manifest_obj, spec.manifest_name)
     if ds is None:
         # Grace rule: a fetched dataset that has never appeared in the
@@ -369,7 +388,30 @@ def _check_dataset_continuity(
         col = pd.to_datetime(pd.read_parquet(got, columns=["date"])["date"])
         dates_present.update(d.date() for d in col)
 
-    return freshness.missing_days(dates_present, today, holidays, special_sessions)
+    holes = freshness.missing_days(dates_present, today, holidays, special_sessions)
+
+    # Clamp note: re-derive the SAME full-size expected window `missing_days`
+    # itself computes, so this stays in lockstep with the pure function's own
+    # windowing rather than re-implementing/duplicating it -- only the
+    # comparison against `dates_present`'s floor is new here, purely for the
+    # informational message (never for the hole computation above, which
+    # `missing_days` already owns end-to-end).
+    clamp_note: str | None = None
+    if dates_present:
+        window_size = 10  # mirrors `missing_days`'s own default -- see its docstring
+        full_expected = cal.trading_days_back(
+            cal.previous_trading_day(today, holidays, special_sessions),
+            window_size, holidays, special_sessions,
+        )
+        floor = min(dates_present)
+        if floor > full_expected[0]:
+            n_verified = sum(1 for d in full_expected if d >= floor)
+            clamp_note = (
+                f"continuity: {spec.manifest_name} verified over {n_verified} "
+                f"of {window_size} days (history begins {floor.isoformat()})"
+            )
+
+    return ContinuityResult(holes=holes, clamp_note=clamp_note)
 
 
 class _DatasetNotYetPublished(Exception):
@@ -409,6 +451,21 @@ def cmd_check_freshness(
        here -- they rebuild from the store, so a hole there is a symptom of
        an underlying fetched-dataset hole, not an independent fact.
 
+       CLAMPED TO AVAILABLE HISTORY (Critical fix): the window is never
+       expected to reach further back than a dataset's own first stored
+       day -- a young/still-catching-up dataset (depth < 10 trading days)
+       is NEVER treated as having holes for the portion of the window that
+       predates its own earliest day; see `freshness.missing_days`'s
+       docstring for the exact rule. When a dataset's window is truncated
+       this way, an informational (non-failing) "verified over N of 10
+       days (history begins ...)" line is printed so reduced coverage stays
+       visible -- this line is never itself a failure signal, and full
+       10-day verification is armed automatically as the dataset's history
+       accumulates past 10 trading days, with no code change or manual step
+       required. A manifest-listed-but-missing release asset (a real
+       release/manifest inconsistency, not absence-from-manifest) is caught
+       as a clean per-dataset error, never a raw traceback.
+
     ANY missing day in ANY fetched dataset exits 1, with each dataset's
     holes printed on their own line(s). A fetched dataset with NO manifest
     entry at all (never published yet) is a WARNING on stderr, not a
@@ -430,7 +487,7 @@ def cmd_check_freshness(
         if spec.derived:
             continue
         try:
-            holes = _check_dataset_continuity(
+            result = _check_dataset_continuity(
                 spec, manifest_obj, client=client, work_dir=work_dir,
                 today=today, holidays=holidays, special_sessions=special_sessions,
             )
@@ -442,9 +499,24 @@ def cmd_check_freshness(
                 file=sys.stderr,
             )
             continue
-        if holes:
+        except ReleaseError as e:
+            # A manifest-listed-but-missing asset is a REAL alarm (a
+            # release/manifest consistency break), not a crash -- never let a
+            # raw traceback surface here. Distinct from the absent-from-
+            # manifest grace rule above: this is the dataset's entry naming
+            # an asset the release itself doesn't actually have.
             ok = False
-            days = ", ".join(d.isoformat() for d in holes)
+            print(
+                f"check-freshness: cross-dataset consistency error for "
+                f"'{spec.manifest_name}': {e}",
+                file=sys.stderr,
+            )
+            continue
+        if result.clamp_note:
+            print(result.clamp_note)
+        if result.holes:
+            ok = False
+            days = ", ".join(d.isoformat() for d in result.holes)
             print(f"check-freshness: dataset '{spec.manifest_name}' missing "
                   f"trading day(s): {days}")
     return 0 if ok else 1

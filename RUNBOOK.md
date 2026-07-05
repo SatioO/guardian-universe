@@ -619,11 +619,60 @@ window straddles Jan 1 — the same year-selection logic
 `store.read_trailing_window` uses), reads just the `date` column, and calls
 `freshness.missing_days(dates_present, today, holidays, special_sessions)`
 — a pure function that re-derives the expected trading days ending at the
-last COMPLETED trading day before `today` and returns
-`sorted(expected - dates_present)`. **Any missing day in ANY fetched
-dataset** fails the check (exit 1), and each affected dataset's missing
-day(s) are printed on their own line so an operator can see immediately
-which dataset(s) and which day(s) are involved without digging through logs.
+last COMPLETED trading day before `today`, clamps that window to the
+dataset's own available history (see below), and returns
+`sorted(clamped_expected - dates_present)`. **Any missing day in ANY
+fetched dataset** fails the check (exit 1), and each affected dataset's
+missing day(s) are printed on their own line so an operator can see
+immediately which dataset(s) and which day(s) are involved without digging
+through logs.
+
+### Clamped to available history (Critical fix — never expect days before a dataset's first stored day)
+**The 10-trading-day window is intersected with days `>= min(dates_present)`
+before it is diffed against what's actually stored — a dataset is never
+expected to have data from before its own earliest stored day.** Without
+this clamp, a young or still-catching-up dataset (fewer than 10 trading
+days of history — e.g. right after a fresh bootstrap, or a new dataset a
+few days into its first week) reports every pre-existence day as a false
+"hole": a live store with only 3 days on record ({2026-07-01..03}) would
+report the 7 trading days *before* 2026-07-01 as missing every single
+morning — a false exit-1 alert with no real problem to fix, persisting for
+roughly two weeks until depth reaches 10 (or until a backfill runs). The
+exact same defect shows up a second way at a year boundary: a dataset less
+than a year old simply has no previous-year baseline asset at all (it
+didn't exist yet), and the pre-clamp window would treat that entire
+previous-year portion as missing too.
+
+**This clamp never hides a REAL hole inside a dataset's own available
+depth** — only days strictly *before* the dataset's earliest stored day are
+excused; a gap sitting between two stored days (e.g. day 3 present, day 5
+present, day 4 silently missing) still fails the check by name exactly as
+before. An empty `dates_present` (nothing stored/verifiable at all) has no
+floor to clamp against, so it reports zero holes — this is by design, not a
+blind spot: lag in that state is independently governed by the STALENESS
+check above (`is_stale`, driven off the manifest's own
+`latest_trading_date`), which stays exit-1 until the manifest's latest date
+itself catches up.
+
+**When the window is actually truncated this way** (the dataset's own
+history doesn't yet reach the full 10 trading days), `check-freshness`
+prints an informational, NON-failing note so the reduced-coverage state
+stays visible instead of looking identical to a full pass:
+```
+continuity: ohlc verified over 3 of 10 days (history begins 2026-07-01)
+```
+This line never affects the exit code by itself. As the dataset's history
+accumulates past 10 trading days, the clamp becomes a no-op automatically
+(the same behavior as before this fix) and the note stops appearing — full
+10-day verification arms itself with no code change or manual step
+required.
+
+**A manifest-listed-but-missing release asset** (the manifest names a
+baseline file that the release itself doesn't actually have — a real
+release/manifest consistency break, distinct from the dataset being absent
+from the manifest entirely) is caught and reported as a clean, named
+per-dataset error on stderr and fails the check (exit 1) — it is never
+allowed to crash the monitor with a raw traceback.
 
 ### The arming rule (read before panicking about a "missing" brand-new dataset)
 **A fetched dataset with NO entry in the manifest at all is a WARNING, not
@@ -652,12 +701,16 @@ to exist.
 cd pipeline && uv run python -m pipeline check-freshness
 ```
 Exit 0: both the staleness check and every fetched dataset's continuity
-check passed (or a not-yet-armed dataset only produced a warning). Exit 1:
-either the staleness check failed (the manifest's `latest_trading_date` is
-behind the last completed trading day), the release/manifest couldn't be
-downloaded at all, or at least one ARMED fetched dataset is missing at
-least one trading day inside its trailing window (printed explicitly,
-per-dataset).
+check passed (or a not-yet-armed dataset only produced a warning; or a
+young/still-catching-up dataset only produced the informational "verified
+over N of 10 days" note — neither a warning nor a note affects the exit
+code). Exit 1: either the staleness check failed (the manifest's
+`latest_trading_date` is behind the last completed trading day), the
+release/manifest couldn't be downloaded at all, at least one ARMED fetched
+dataset is missing at least one trading day inside its (possibly clamped)
+trailing window (printed explicitly, per-dataset), or a dataset's manifest
+entry names a release asset that doesn't actually exist (printed as a
+clean per-dataset error, never a traceback).
 
 ### Cron keep-alive (`.github/workflows/keepalive.yml`)
 GitHub automatically disables a scheduled workflow's cron trigger after 60
