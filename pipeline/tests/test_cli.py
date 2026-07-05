@@ -752,3 +752,159 @@ def test_daily_holiday_target_reports_that_days_skip_not_window_fallback(
     status = json.loads((tmp_path / "last_run_status.json").read_text())
     assert status["status"] == "skipped_holiday"
     assert status["date"] == target.isoformat()  # target's OWN date, not Friday's
+
+
+# --- G2 Task 6: weekly source cross-check -----------------------------------
+#
+# `cmd_cross_check` is driven by two injected raw-fetch callables (both
+# returning UDiFF-raw-shape frames -- the secondary side's stub stands in for
+# the real production wiring's secfull-fetch + shape-adapt-with-isin_map
+# composition), so these tests never touch the network and never construct a
+# real NseUdiffFetcher/secfull session.
+
+def _cross_check_raw(rows: list[tuple[str, str, float]], d: date) -> pd.DataFrame:
+    """A minimal, valid UDiFF-raw-shaped multi-symbol frame for date `d`:
+    rows are (isin, symbol, close) triples."""
+    return pd.DataFrame([
+        {
+            "TradDt": d.isoformat(), "FinInstrmTp": "STK", "ISIN": isin,
+            "TckrSymb": symbol, "SctySrs": "EQ", "SsnId": "F1",
+            "OpnPric": close, "HghPric": close, "LwPric": close, "ClsPric": close,
+            "PrvsClsgPric": close, "TtlTradgVol": 1000, "TtlTrfVal": 100000,
+            "TtlNbOfTxsExctd": 10,
+        }
+        for isin, symbol, close in rows
+    ])
+
+
+_CROSS_CHECK_ROWS: list[tuple[str, str, float]] = [
+    ("INE001A01001", "AAA", 100.0),
+    ("INE002A01002", "BBB", 200.0),
+    ("INE003A01003", "CCC", 300.0),
+]
+
+
+def test_parser_has_cross_check():
+    args = cli.build_parser().parse_args(["cross-check"])
+    assert args.cmd == "cross-check"
+    assert args.date is None
+
+
+def test_parser_cross_check_reads_date():
+    args = cli.build_parser().parse_args(["cross-check", "--date", "2026-07-03"])
+    assert args.date == "2026-07-03"
+
+
+def test_cmd_cross_check_sources_agree_exits_0():
+    target = date(2026, 7, 3)
+
+    def fetch_primary(d: date) -> pd.DataFrame:
+        return _cross_check_raw(_CROSS_CHECK_ROWS, d)
+
+    def fetch_secondary(d: date) -> pd.DataFrame:
+        return _cross_check_raw(_CROSS_CHECK_ROWS, d)
+
+    rc = cli.cmd_cross_check(
+        target, fetch_primary_raw=fetch_primary, fetch_secondary_raw=fetch_secondary,
+    )
+    assert rc == 0
+
+
+def test_cmd_cross_check_divergence_exits_1_and_prints_table(capsys):
+    target = date(2026, 7, 3)
+    diverging_rows = [
+        ("INE001A01001", "AAA", 100.0),
+        ("INE002A01002", "BBB", 400.0),  # 100% divergence vs primary's 200.0
+        ("INE003A01003", "CCC", 300.0),
+    ]
+
+    def fetch_primary(d: date) -> pd.DataFrame:
+        return _cross_check_raw(_CROSS_CHECK_ROWS, d)
+
+    def fetch_secondary(d: date) -> pd.DataFrame:
+        return _cross_check_raw(diverging_rows, d)
+
+    rc = cli.cmd_cross_check(
+        target, fetch_primary_raw=fetch_primary, fetch_secondary_raw=fetch_secondary,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "INE002A01002" in out  # the diverging key appears in the printed table
+    assert "200" in out and "400" in out
+
+
+def test_cmd_cross_check_one_source_down_exits_1_with_clear_message(capsys):
+    target = date(2026, 7, 3)
+
+    def fetch_primary(d: date) -> pd.DataFrame:
+        return _cross_check_raw(_CROSS_CHECK_ROWS, d)
+
+    def fetch_secondary(d: date) -> pd.DataFrame:
+        raise RuntimeError("secfull endpoint unreachable")
+
+    rc = cli.cmd_cross_check(
+        target, fetch_primary_raw=fetch_primary, fetch_secondary_raw=fetch_secondary,
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "cross-check" in err
+    assert "secfull endpoint unreachable" in err
+
+
+def test_cmd_cross_check_primary_source_down_exits_1_with_clear_message(capsys):
+    target = date(2026, 7, 3)
+
+    def fetch_primary(d: date) -> pd.DataFrame:
+        raise RuntimeError("udiff endpoint unreachable")
+
+    def fetch_secondary(d: date) -> pd.DataFrame:
+        return _cross_check_raw(_CROSS_CHECK_ROWS, d)
+
+    rc = cli.cmd_cross_check(
+        target, fetch_primary_raw=fetch_primary, fetch_secondary_raw=fetch_secondary,
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "cross-check" in err
+    assert "udiff endpoint unreachable" in err
+
+
+def test_main_cross_check_defaults_date_to_previous_trading_day(monkeypatch, tmp_path):
+    """`main(["cross-check"])` with no --date must resolve to the previous
+    trading day (via the real calendar), not today."""
+    import json
+
+    from pipeline import config
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    seen_dates = []
+
+    def fake_cmd_cross_check(target, **kw):
+        seen_dates.append(target)
+        return 0
+
+    monkeypatch.setattr(cli, "cmd_cross_check", fake_cmd_cross_check)
+    monkeypatch.setattr(cli, "_today_for_cli", lambda: date(2026, 7, 6))  # a Monday
+    rc = cli.main(["cross-check"])
+    assert rc == 0
+    assert seen_dates == [date(2026, 7, 3)]  # previous trading day (Friday)
+
+
+def test_main_cross_check_explicit_date_bypasses_default(monkeypatch, tmp_path):
+    import json
+
+    from pipeline import config
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    seen_dates = []
+
+    def fake_cmd_cross_check(target, **kw):
+        seen_dates.append(target)
+        return 0
+
+    monkeypatch.setattr(cli, "cmd_cross_check", fake_cmd_cross_check)
+    rc = cli.main(["cross-check", "--date", "2026-07-01"])
+    assert rc == 0
+    assert seen_dates == [date(2026, 7, 1)]

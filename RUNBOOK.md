@@ -466,3 +466,83 @@ source. **Zero edits to `cli.py`** — it only ever imports the `sources`
 package as a whole and never names a broker; `--via`'s choices and
 provenance labels (`"<id>-rebuild"`) are derived from the registry
 automatically. Proof: `grep -i kite src/pipeline/cli.py` returns nothing.
+
+## G2: weekly source cross-check (silent-divergence detector)
+
+### Why this exists
+Both NSE sources (the UDiFF primary and the `sec_bhavdata_full` fallback)
+individually pass their own gates (rowcount deviation, quarantine, schema),
+so a source that is **subtly, silently wrong** — a corrupted/stale bhavcopy
+file that is still well-formed and within normal rowcount range — produces
+no signal today: two "healthy" sources agreeing with themselves each is not
+the same as the two sources agreeing with *each other*. The weekly
+cross-check closes exactly this gap by comparing a deterministic sample of
+`close` prices between the two **independent** endpoints, fetched **in
+isolation** (each constructed with no fallback chain — see
+`cli._cross_check_fetch_primary_raw` / `_cross_check_fetch_secondary_raw`),
+so a divergence can only mean the two sources actually disagree, not that
+one silently fell back to the other.
+
+### What it compares
+`pipeline/src/pipeline/crosscheck.py`'s `compare_sources(primary_df,
+secondary_df, *, sample_n=50, tolerance=0.001)` joins the two CANONICAL
+frames on `instrument_key` (inner join — see coverage limitation below),
+samples deterministically (sorted keys, every k-th where `k = max(1,
+len(joined) // sample_n)` — **no randomness anywhere in this path**, so the
+same two inputs always produce the identical sampled set and result), and
+flags a pair as a mismatch when its relative divergence (`|primary_close -
+secondary_close| / |primary_close|`) exceeds `tolerance`. The result
+(`CrossCheckResult`) reports `compared` (sample size), `mismatched` (count
+over tolerance), and `worst` (up to 5 worst mismatches by relative
+divergence, descending, as `(instrument_key, primary_close,
+secondary_close)` tuples).
+
+**Coverage limitation — read before trusting a "clean" (mismatched=0)
+result.** The secondary (secfull) side has no ISIN column of its own; its
+`instrument_key` is resolved via the same `isin_map`
+(`datasets._load_isin_map`, symbol → ISIN from the `reference/instruments`
+store) used by the real secfull fallback path, so keys align with the
+primary side's real-ISIN keys. A symbol **missing from that map** gets an
+`"NSE:" + symbol` **sentinel** key instead — which essentially never equals
+the primary side's real-ISIN key for the same instrument, so that row
+**silently drops out of the inner join**. It is not "compared and found to
+agree" — it is simply never compared. The cross-check therefore only
+covers the **mapped intersection** of the two sources (whatever
+`reference/instruments` currently maps to a real ISIN); that is the
+meaningful set for this check, but a clean result says nothing about
+instruments outside that mapped intersection.
+
+### Weekly cadence
+`.github/workflows/data-crosscheck.yml` runs Saturday 03:00 UTC (+
+`workflow_dispatch` for on-demand runs), invoking `python -m pipeline
+cross-check` against the previous trading day. No store writes — this is
+pure detection, never ingestion, and never touches `data/`.
+
+### What a divergence alert means
+The CLI exits 1 whenever `mismatched > 0` (printing a small table of the
+worst divergences first) **or** whenever the cross-check itself couldn't
+run at all (either source's fetch/normalize failed) — a cross-check that
+can't run is itself alert-worthy on its own weekly cadence, since it means
+the safety net wasn't actually checked that week. The workflow's
+alert-on-failure step opens/appends to the standard `pipeline-failure`-
+labeled issue (same dedupe shape as `data-monitor.yml`/`data-daily.yml`).
+
+**Investigate BOTH sources before trusting either.** A divergence alone
+does not tell you which source is wrong — it only tells you they disagree.
+Do not assume the primary (UDiFF) is automatically correct just because
+it's the primary in the daily ingest chain; cross-check both against a
+third reference (e.g. the exchange's own website for a couple of the
+flagged symbols, or a manual `rebuild-day --via kite` comparison) before
+deciding which source to trust or route around. If a real divergence is
+confirmed, treat the daily pipeline's currently-stored days for the
+affected instrument(s) as suspect until the root cause is identified.
+
+### Running manually
+```
+cd pipeline && uv run python -m pipeline cross-check [--date YYYY-MM-DD]
+```
+`--date` defaults to the previous trading day (via the same trading
+calendar + special-sessions logic used elsewhere); exit 0 means the sampled
+comparison found no divergence beyond tolerance, exit 1 means either a
+divergence was found (see the printed table) or the cross-check itself
+failed to run (see the printed error naming which source failed).

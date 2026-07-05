@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import io
 import json
 import sys
 import tempfile
@@ -11,6 +12,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 from pipeline import backfill as backfill_mod
 
@@ -30,11 +32,14 @@ from pipeline import (
     sources,  # noqa: F401  # broker-source registration side-effects
 )
 from pipeline import calendar as cal
+from pipeline.crosscheck import CrossCheckResult, compare_sources
 from pipeline.daily_update import RunStatus, run_daily
 from pipeline.errors import ReleaseError, UnexpectedFailure
-from pipeline.fetch import FetchResult
+from pipeline.fetch import _BROWSER_UA, FetchResult, NseUdiffFetcher, _fetch_with_retry
+from pipeline.normalize import normalize_equity_bhavcopy
 from pipeline.publish import publish_dataset
 from pipeline.release import GhReleaseClient
+from pipeline.sources.nse_secfull import build_secfull_url, secfull_to_udiff_shape
 from pipeline.sync import sync_store
 
 Runner = Callable[[list[str]], int]
@@ -84,6 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
     # choices derived from the registry (populated by this module's broker
     # self-registration imports above) -- never a hardcoded broker-name list.
     r.add_argument("--via", choices=[*rebuild.REBUILDERS], default=None)
+    x = sub.add_parser("cross-check")
+    x.add_argument("--date", default=None)
     return p
 
 
@@ -188,6 +195,94 @@ def cmd_rebuild_day(target: date, *, holidays: set[date],
 
     ok = ("success", "skipped_holiday", "skipped_idempotent", "not_yet")
     return 0 if status.status in ok else 1
+
+
+def _today_for_cli() -> date:
+    """Extracted so cross-check's --date default (and any future
+    default-to-today CLI path) can be monkeypatched in tests without faking
+    the whole `datetime` module."""
+    return datetime.now(UTC).date()
+
+
+def _cross_check_fetch_primary_raw(d: date) -> pd.DataFrame:
+    """Production primary fetch for `cross-check`: the SAME NseUdiffFetcher
+    used by the daily pipeline, but constructed WITHOUT fallbacks
+    (`fallbacks=()`) -- cross-check tests the primary NSE endpoint in total
+    isolation, never silently falling through to the secondary if the
+    primary is down (that fallthrough would defeat the entire point of an
+    independent cross-check)."""
+    result = NseUdiffFetcher(fallbacks=()).fetch_raw(d)
+    return result.frame
+
+
+def _cross_check_fetch_secondary_raw(d: date) -> pd.DataFrame:
+    """Production secondary fetch for `cross-check`: the sec_bhavdata_full
+    endpoint, fetched and shape-adapted independently of the primary chain
+    (mirrors `datasets._secfull_fallback`'s logic exactly, but is never
+    routed through the primary's fallback list here -- this IS the isolated
+    secondary source cross-check tests against). Uses the SAME isin_map
+    loader (`datasets._load_isin_map`) as the real fallback path, so
+    instrument_key values align with the primary side's ISIN keys."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": _BROWSER_UA})
+    url = build_secfull_url(d)
+    raw = _fetch_with_retry(session, url, d, parse=_secfull_csv_to_df)
+    isin_map = datasets._load_isin_map()
+    return secfull_to_udiff_shape(raw, isin_map=isin_map)
+
+
+def _secfull_csv_to_df(csv_bytes: bytes) -> pd.DataFrame:
+    return pd.read_csv(io.BytesIO(csv_bytes))
+
+
+def _print_cross_check_table(result: CrossCheckResult) -> None:
+    print(f"cross-check: compared={result.compared} mismatched={result.mismatched}")
+    if result.worst:
+        print(f"{'instrument_key':<20}{'primary_close':>16}{'secondary_close':>18}")
+        for key, primary_close, secondary_close in result.worst:
+            print(f"{key:<20}{primary_close:>16.4f}{secondary_close:>18.4f}")
+
+
+def cmd_cross_check(
+    target: date,
+    *,
+    fetch_primary_raw: Callable[[date], pd.DataFrame],
+    fetch_secondary_raw: Callable[[date], pd.DataFrame],
+    sample_n: int = 50,
+    tolerance: float = 0.001,
+) -> int:
+    """Weekly source cross-check: fetch `target` from BOTH independent NSE
+    endpoints (isolated -- no fallback chain on either side), normalize both
+    to canonical, and compare a deterministic sample of closes.
+
+    No store writes -- this command is pure detection, never ingestion.
+
+    Any fetch/normalize failure on EITHER source is itself alert-worthy (a
+    cross-check that can't run is a signal on its own weekly cadence) -- it
+    is caught here and reported as a clear, exit-1 error rather than
+    propagating a raw traceback.
+    """
+    try:
+        primary_raw = fetch_primary_raw(target)
+        primary_canon = normalize_equity_bhavcopy(primary_raw, source="nse-udiff")
+    except Exception as e:  # noqa: BLE001 - any primary failure is alert-worthy
+        print(f"cross-check: primary source failed for {target.isoformat()}: {e}",
+              file=sys.stderr)
+        return 1
+
+    try:
+        secondary_raw = fetch_secondary_raw(target)
+        secondary_canon = normalize_equity_bhavcopy(secondary_raw, source="nse-secfull")
+    except Exception as e:  # noqa: BLE001 - any secondary failure is alert-worthy
+        print(f"cross-check: secondary source failed for {target.isoformat()}: {e}",
+              file=sys.stderr)
+        return 1
+
+    result = compare_sources(
+        primary_canon, secondary_canon, sample_n=sample_n, tolerance=tolerance
+    )
+    _print_cross_check_table(result)
+    return 1 if result.mismatched > 0 else 0
 
 
 def cmd_check_freshness(
@@ -345,6 +440,18 @@ def main(argv: list[str] | None = None) -> int:
         special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
         target = date.fromisoformat(args.date)
         return cmd_rebuild_day(target, holidays=holidays, special_sessions=special, via=args.via)
+    if args.cmd == "cross-check":
+        holidays = cal.load_holidays(config.META_DIR / "holidays.json")
+        special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
+        target = (
+            date.fromisoformat(args.date) if args.date
+            else cal.previous_trading_day(_today_for_cli(), holidays, special)
+        )
+        return cmd_cross_check(
+            target,
+            fetch_primary_raw=_cross_check_fetch_primary_raw,
+            fetch_secondary_raw=_cross_check_fetch_secondary_raw,
+        )
     # publish
     client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
     try:
