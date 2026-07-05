@@ -39,6 +39,37 @@ def test_sync_downloads_verifies_and_writes_state(tmp_path: Path):
     assert state["generated_at"] == "2026-07-04T16:00:00+00:00"
 
 
+def test_sync_reads_v2_manifest_with_baseline_key(tmp_path: Path):
+    # v2 manifests (publish.py now emits) key each dataset's files under
+    # "baseline" instead of "files" -- sync must read via dataset_files()
+    # rather than indexing ds["files"] directly, or it fails closed with a
+    # bare KeyError on every real publish.
+    data = b"PARQUETDATA"
+    sha = hashlib.sha256(data).hexdigest()
+    manifest = {
+        "manifest_version": 2,
+        "generated_at": "2026-07-04T16:00:00+00:00",
+        "latest_trading_date": "2026-07-03",
+        "datasets": [{"name": "ohlc", "schema_version": 1, "latest_date": "2026-07-03",
+                      "baseline": [{
+                          "name": "ohlc_2026.parquet",
+                          "asset": asset_name("ohlc_2026.parquet", sha),
+                          "sha256": sha, "bytes": len(data), "rows": 1,
+                      }], "deltas": []}],
+    }
+    fake = FakeReleaseClient(exists=True)
+    fake.seed("manifest.json", json.dumps(manifest).encode())
+    fake.seed(asset_name("ohlc_2026.parquet", sha), data)
+
+    got = sync_store(fake, ohlc_dir=tmp_path / "ohlc", meta_dir=tmp_path / "meta",
+                     work_dir=tmp_path / "work")
+
+    assert got is not None and got["generated_at"] == "2026-07-04T16:00:00+00:00"
+    assert (tmp_path / "ohlc" / "ohlc_2026.parquet").read_bytes() == b"PARQUETDATA"
+    state = json.loads((tmp_path / "meta" / SYNCED_STATE).read_text())
+    assert state["generated_at"] == "2026-07-04T16:00:00+00:00"
+
+
 def test_sync_no_release_writes_empty_state_and_returns_none(tmp_path: Path):
     fake = FakeReleaseClient(exists=False)
     got = sync_store(fake, ohlc_dir=tmp_path / "ohlc", meta_dir=tmp_path / "meta",

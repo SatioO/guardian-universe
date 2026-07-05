@@ -50,17 +50,28 @@ def check_cas(live: dict[str, Any] | None, synced: dict[str, Any]) -> None:
 def check_no_shrink(new: dict[str, Any], live: dict[str, Any] | None) -> None:
     if live is None:
         return
-    new_files = {f["name"]: f for f in dataset_files(new["datasets"][0])}
-    for lf in dataset_files(live["datasets"][0]):
-        nf = new_files.get(lf["name"])
-        if nf is None:
-            raise UnexpectedFailure(
-                f"shrink-guard: {lf['name']} is on the live release but missing locally"
-            )
-        if "rows" in lf and nf["rows"] < lf["rows"]:
-            raise UnexpectedFailure(
-                f"shrink-guard: {lf['name']} rows {nf['rows']} < live {lf['rows']}"
-            )
+    new_by_name = {ds["name"]: ds for ds in new["datasets"]}
+    for live_ds in live["datasets"]:
+        live_files = dataset_files(live_ds)
+        new_ds = new_by_name.get(live_ds["name"])
+        if new_ds is None:
+            if live_files:
+                raise UnexpectedFailure(
+                    f"shrink-guard: dataset {live_ds['name']!r} is on the live "
+                    "release but missing locally"
+                )
+            continue
+        new_files = {f["name"]: f for f in dataset_files(new_ds)}
+        for lf in live_files:
+            nf = new_files.get(lf["name"])
+            if nf is None:
+                raise UnexpectedFailure(
+                    f"shrink-guard: {lf['name']} is on the live release but missing locally"
+                )
+            if "rows" in lf and nf["rows"] < lf["rows"]:
+                raise UnexpectedFailure(
+                    f"shrink-guard: {lf['name']} rows {nf['rows']} < live {lf['rows']}"
+                )
     if new["latest_trading_date"] < live["latest_trading_date"]:
         raise UnexpectedFailure("shrink-guard: latest_trading_date would regress")
 
@@ -101,7 +112,11 @@ def _verify(client: ReleaseClient, new_manifest: dict[str, Any], work: Path) -> 
         raise UnexpectedFailure(
             "post-publish verification failed: live manifest is not the one just published"
         )
-    files = [e for ds in new_manifest["datasets"] for e in dataset_files(ds)]
+    files = [
+        e
+        for ds in new_manifest["datasets"]
+        for e in [*dataset_files(ds), *ds.get("deltas", [])]
+    ]
     smallest = min(files, key=lambda e: int(e["bytes"]))
     client.download([smallest["asset"]], work)
     sha, _ = file_digest(work / smallest["asset"])
@@ -190,12 +205,21 @@ def publish_dataset(
 
     # Upload new content-addressed data assets (immutable: no clobber).
     by_name = {p.name: p for p in data_files}
+    # Pre-Task-8 shim: deltas for every dataset live under the single
+    # ohlc_dir's "deltas" subdirectory (Task 8 threads real per-dataset dirs).
+    deltas_dir = ohlc_dir / "deltas"
     for ds in new_manifest["datasets"]:
         for entry in dataset_files(ds):
             if entry["asset"] in existing:
                 continue
             staged = stage_dir / entry["asset"]
             shutil.copyfile(by_name[entry["name"]], staged)
+            client.upload(staged)
+        for entry in ds.get("deltas", []):
+            if entry["asset"] in existing:
+                continue
+            staged = stage_dir / entry["asset"]
+            shutil.copyfile(deltas_dir / entry["name"], staged)
             client.upload(staged)
 
     status_path = meta_dir / "last_run_status.json"

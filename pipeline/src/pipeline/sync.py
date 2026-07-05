@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.errors import UnexpectedFailure
-from pipeline.manifest import file_digest, write_json
+from pipeline.manifest import dataset_files, file_digest, write_json
 from pipeline.release import ReleaseClient
 
 SYNCED_STATE = "synced_manifest.json"
@@ -47,7 +47,7 @@ def sync_store(
         for ds in manifest.get("datasets", []):
             if ds.get("name") != "ohlc":
                 continue
-            for entry in ds["files"]:
+            for entry in dataset_files(ds):
                 asset = entry.get("asset", entry["name"])
                 client.download([asset], work_dir)
                 got = work_dir / asset

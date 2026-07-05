@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from pipeline import config
+from pipeline import config, store
 from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.manifest import dataset_files, write_json
 from pipeline.publish import (
@@ -90,6 +90,44 @@ def test_shrink_guard_blocks_missing_year_and_date_regression():
         {"name": "ohlc_2025.parquet", "rows": 1, "sha256": "s", "bytes": 1, "asset": "a"}]}]}
     with pytest.raises(UnexpectedFailure, match="regress"):
         check_no_shrink(new_regress, live)
+
+
+def test_shrink_guard_matches_datasets_by_name_not_position():
+    # Live has TWO datasets ("reference" first, "ohlc" second). Positional
+    # indexing (live["datasets"][0]) would compare "reference" against the
+    # new manifest's "ohlc" entry and silently miss a real ohlc regression --
+    # matching must be by dataset "name" across ALL live datasets.
+    live = {"latest_trading_date": "2026-07-03", "datasets": [
+        {"name": "reference", "files": [
+            {"name": "instruments.parquet", "sha256": "r", "bytes": 1}]},
+        {"name": "ohlc", "files": [
+            {"name": "ohlc_2026.parquet", "rows": 5000, "sha256": "t", "bytes": 9}]},
+    ]}
+    new = {"latest_trading_date": "2026-07-03", "datasets": [
+        {"name": "reference", "files": [
+            {"name": "instruments.parquet", "sha256": "r", "bytes": 1}]},
+        {"name": "ohlc", "files": [
+            {"name": "ohlc_2026.parquet", "rows": 1, "sha256": "s", "bytes": 1, "asset": "a"}]},
+    ]}
+    with pytest.raises(UnexpectedFailure, match="shrink"):
+        check_no_shrink(new, live)
+
+
+def test_shrink_guard_blocks_missing_live_dataset_dropped_entirely():
+    # A live dataset with non-empty files that's absent from the new manifest
+    # entirely (not just shrunk) must also trip the shrink guard.
+    live = {"latest_trading_date": "2026-07-03", "datasets": [
+        {"name": "ohlc", "files": [
+            {"name": "ohlc_2026.parquet", "rows": 5000, "sha256": "t", "bytes": 9}]},
+        {"name": "reference", "files": [
+            {"name": "instruments.parquet", "sha256": "r", "bytes": 1}]},
+    ]}
+    new = {"latest_trading_date": "2026-07-03", "datasets": [
+        {"name": "ohlc", "files": [
+            {"name": "ohlc_2026.parquet", "rows": 5000, "sha256": "t", "bytes": 9, "asset": "a"}]},
+    ]}
+    with pytest.raises(UnexpectedFailure, match="shrink"):
+        check_no_shrink(new, live)
 
 
 def test_shrink_guard_tolerates_legacy_live_without_rows():
@@ -218,6 +256,31 @@ def test_manifest_upload_is_always_last(tmp_path: Path, monkeypatch):
     data_asset_indices = [i for i, name in enumerate(uploads) if name != "manifest.json"]
     assert data_asset_indices, "expected at least one data-asset upload"
     assert all(i < manifest_index for i in data_asset_indices)
+
+
+def test_publish_uploads_manifest_listed_deltas(tmp_path: Path):
+    ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
+    _synced(meta, None)
+
+    # Write a real delta artifact via store.write_delta -- this is what
+    # build_manifest's per-dataset "deltas" list is populated from.
+    rows = {c: ["x"] for c in config.CANON_COLUMNS}
+    delta_df = pd.DataFrame(rows)
+    delta_df["date"] = pd.to_datetime(["2026-07-03"])
+    delta_df["instrument_key"] = ["INE0"]
+    store.write_delta(delta_df, ohlc, date(2026, 7, 3))
+
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
+    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
+                    schema_version=1, generated_at="2026-07-05T16:00:00+00:00", now=NOW)
+
+    assert_release_consistent(fake)
+    live = json.loads(fake.assets["manifest.json"])
+    ohlc_ds = next(d for d in live["datasets"] if d["name"] == "ohlc")
+    assert ohlc_ds["deltas"], "expected at least one delta entry in the manifest"
+    delta_asset = ohlc_ds["deltas"][0]["asset"]
+    assert delta_asset.startswith("delta_ohlc_")
+    assert delta_asset in fake.assets
 
 
 def test_latest_trading_date_raises_on_empty_store(tmp_path: Path):
