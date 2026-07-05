@@ -80,6 +80,133 @@ def test_idempotent_rerun_is_a_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert st.status == "skipped_idempotent"
 
 
+# G2 Task 5: completeness-aware idempotency. `has_day` alone (">=1 row
+# exists") used to lock a partial day in forever -- a short day (a mid-fetch
+# truncation, a fallback that only partially served the universe, etc.) would
+# never be topped up because the very presence of any row short-circuited
+# every subsequent run. These tests exercise the upgraded gate: present-but-
+# short (vs trailing history) -> re-fetch and merge; present-and-complete ->
+# still a free, zero-fetch skip; no trailing history yet -> present always
+# skips (nothing to compare against).
+
+def test_short_stored_day_reingests_and_tops_up_to_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    target = date(2026, 7, 3)
+    # RAW (the shared fixture) re-serves 2 EQ rows (RELIANCE, INFY) + 1 BE row
+    # (HDFCBANK) -- seed EQ-only trailing history so the pre-existing
+    # per-series deviation gate (unrelated to this test) doesn't also fire:
+    # trailing EQ mean 2 matches RAW's own EQ count, and BE is a brand-new
+    # series today with no trailing data, which the gate exempts outright.
+    for d in ("2026-06-30", "2026-07-01", "2026-07-02"):
+        store.append_day(_canon_rows(d, 2), tmp_path)
+    # Pre-seed the target day itself, truncated to JUST the RELIANCE row (real
+    # ISIN INE002A01018, matching what RAW itself will re-fetch) -- well under
+    # (1 - 0.15) * 2 == 1.7 -- a partial day that must NOT be treated as done.
+    # Using RAW's actual key (not a synthetic one) exercises the REAL merge:
+    # append_keyed's keep="last" dedupe overwrites this one row in place while
+    # INFY + HDFCBANK are newly added -- proving the top-up is a true merge,
+    # not an append-alongside-orphaned-rows artifact.
+    truncated = pd.DataFrame([{
+        "date": pd.Timestamp(target.isoformat()), "instrument_key": "INE002A01018",
+        "isin": "INE002A01018", "symbol": "RELIANCE", "series": "EQ",
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "prevclose": 1.0,
+        "volume": 1, "value": 1.0, "trades": 1, "source": "seed",
+    }])[config.CANON_COLUMNS]
+    store.append_day(truncated, tmp_path)
+    assert store.day_symbol_count(tmp_path, target) == 1
+
+    st = _run(target, StubFetcher(RAW), tmp_path)  # RAW re-serves the full day
+    assert st.status == "success"
+    assert "re-ingested short day" in st.message
+    assert "stored 1" in st.message
+    assert store.day_symbol_count(tmp_path, target) == 3  # merged up to full (2 EQ + 1 BE)
+    out = pd.read_parquet(base_year(tmp_path))
+    reliance = out[(out["date"] == pd.Timestamp(target)) & (out["symbol"] == "RELIANCE")]
+    assert len(reliance) == 1
+    assert reliance.iloc[0]["close"] != 1.0  # the stale seeded price was overwritten by RAW's
+
+
+def test_complete_stored_day_skips_without_fetching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    target = date(2026, 7, 3)
+    for d in ("2026-06-30", "2026-07-01", "2026-07-02"):
+        store.append_day(_canon_rows(d, 3), tmp_path)
+    store.append_day(_canon_rows(target.isoformat(), 3), tmp_path)  # full, matches mean
+
+    st = _run(target, StubFetcher(exc=AssertionError("must not refetch")), tmp_path)
+    assert st.status == "skipped_idempotent"
+
+
+def test_complete_stored_day_within_shortfall_tolerance_skips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Within the 15% shortfall tolerance (not exactly full) must still be a
+    # free skip -- only a day BELOW the tolerance band re-ingests.
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    target = date(2026, 7, 3)
+    for d in ("2026-06-30", "2026-07-01", "2026-07-02"):
+        store.append_day(_canon_rows(d, 100), tmp_path)  # trailing mean 100
+    store.append_day(_canon_rows(target.isoformat(), 90), tmp_path)  # 90 >= 85
+
+    st = _run(target, StubFetcher(exc=AssertionError("must not refetch")), tmp_path)
+    assert st.status == "skipped_idempotent"
+
+
+def test_present_day_with_empty_trailing_skips_without_fetching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Fresh store: the day is present but there is no trailing history at all
+    # (no prior days ingested) -- nothing to compare against, so any stored
+    # rows count as complete and the day skips exactly as it did pre-Task-5.
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    target = date(2026, 7, 3)
+    store.append_day(_canon_rows(target.isoformat(), 1), tmp_path)  # just 1 row, no history
+
+    st = _run(target, StubFetcher(exc=AssertionError("must not refetch")), tmp_path)
+    assert st.status == "skipped_idempotent"
+
+
+def test_short_day_reingest_still_applies_wrong_date_guard_and_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Combined property: the re-ingest path is NOT a special case that
+    # bypasses the rest of run_daily's pipeline -- it re-enters the exact same
+    # fetch -> normalize -> wrong-date guard -> quarantine -> schema -> append
+    # sequence as a normal day. Two rows this time: RELIANCE clean, INFY fails
+    # quarantine (high < low) -- proves both the wrong-date guard has already
+    # passed (same target date throughout) and quarantine still fires on the
+    # re-ingest path, while the clean row still tops up the stored count.
+    monkeypatch.setattr(config, "META_DIR", tmp_path / "meta")
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    target = date(2026, 7, 3)
+    for d in ("2026-06-30", "2026-07-01", "2026-07-02"):
+        store.append_day(_canon_rows(d, 2), tmp_path)  # trailing mean 2
+    store.append_day(_canon_rows(target.isoformat(), 1), tmp_path)  # short: 1 < 0.85*2
+
+    dirty_frame = pd.DataFrame([{
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE002A01018",
+        "TckrSymb": "RELIANCE", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 2990,
+        "HghPric": 3010, "LwPric": 2985, "ClsPric": 3000, "PrvsClsgPric": 2980,
+        "TtlTradgVol": 1000000, "TtlTrfVal": 3000000000, "TtlNbOfTxsExctd": 50000,
+    }, {
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE009A01021",
+        "TckrSymb": "INFY", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 1500,
+        "HghPric": 1480, "LwPric": 1510, "ClsPric": 1490, "PrvsClsgPric": 1495,
+        "TtlTradgVol": 500000, "TtlTrfVal": 750000000, "TtlNbOfTxsExctd": 20000,
+    }])
+    st = _run(target, StubFetcher(dirty_frame), tmp_path)
+    assert st.status == "success"
+    assert st.quarantined_count == 1
+    assert "re-ingested short day" in st.message
+    qfile = tmp_path / "meta" / "quarantine" / "ohlc_2026-07-03.parquet"
+    assert qfile.exists()
+    assert len(pd.read_parquet(qfile)) == 1
+
+
 def test_not_yet_published_is_reported_not_raised(tmp_path: Path):
     st = _run(date(2026, 7, 3), StubFetcher(exc=NotYetPublished("404")), tmp_path)
     assert st.status == "not_yet"

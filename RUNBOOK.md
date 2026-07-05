@@ -329,6 +329,28 @@ over a week, or a hole predates this mechanism entirely — is NOT
 self-healed by `daily`; use `backfill --days N` (with N covering the gap) or,
 if both NSE sources are down for that day, `rebuild-day` (see below).
 
+**Short days self-repair too (`config.COMPLETENESS_SHORTFALL = 0.15`).**
+Before this, `has_day` alone (">=1 row present") permanently locked in
+whatever the first successful run happened to store — a day truncated by a
+mid-fetch failure or a fallback that only partially served the universe
+would sit there forever, "present" but incomplete, immune to every future
+catch-up revisit. Now, when a window day is present, `run_daily` also
+compares its stored row total against the trailing history (sum of
+per-series trailing means; no trailing history at all — a fresh store, or
+every trailing day itself missing — makes any stored count count as
+complete, same as before this change) before deciding to skip. A day at or
+above `(1 - COMPLETENESS_SHORTFALL)` of that trailing mean skips exactly as
+today; a day below it is **re-fetched and merged**, not just re-fetched from
+scratch — `append_keyed`'s existing `keep="last"` dedupe on `(date,
+instrument_key)` means rows already stored are simply refreshed by the new
+fetch and rows the short fetch missed the first time are newly added. A
+successful top-up shows up in the status message, e.g. `"re-ingested short
+day (stored 1800 vs trailing mean 2400)"`, so a short-day repair is
+distinguishable in logs from an ordinary first-time ingest. This applies to
+every day the catch-up loop revisits (all 7, not just the target), so a
+short day up to 6 trading days back self-heals the same way a fully missing
+day does.
+
 ## G2: manual day-rebuild (recovery)
 
 ### When to use this

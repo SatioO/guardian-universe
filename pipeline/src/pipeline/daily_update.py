@@ -40,8 +40,46 @@ def run_daily(
     if not cal.is_trading_day(target, holidays, special_sessions=special_sessions):
         return RunStatus("skipped_holiday", target, message="non-trading day")
 
+    # G2 Task 5: completeness-aware idempotency. `has_day` alone ("*>=1* row
+    # present") used to lock a partial day in forever -- a short day (mid-fetch
+    # truncation, a fallback that only partially served the universe, etc.)
+    # would never be topped up because the mere PRESENCE of any row
+    # short-circuited every later run, including the catch-up loop's (T4)
+    # nightly re-visits. Cost-conscious ordering: the stored total is one
+    # cheap year-read, checked FIRST -- the (up to 10-year-read) trailing
+    # computation only runs for a day that is actually present, never for an
+    # absent day (an absent day falls through to fetch exactly as before, at
+    # zero extra idempotency-gate cost; its own trailing read for the
+    # per-series gate below is unaffected and unchanged).
+    topup_note = ""
     if store.has_day(spec.base_dir, target, prefix=spec.file_prefix):
-        return RunStatus("skipped_idempotent", target, message="already present")
+        stored_total = store.day_symbol_count(spec.base_dir, target, prefix=spec.file_prefix)
+        completeness_trailing = _trailing_series_counts(
+            spec, target, holidays, special_sessions
+        )
+        # sum of per-series trailing MEANS (not a flat total-row-count mean) --
+        # consistent with the per-series gate's own per-series means below
+        # (a separate call further down, at its original post-fetch site: an
+        # absent day must not pay this cost at all here, so the two branches
+        # each compute their own trailing dict rather than sharing one).
+        trailing_total_mean = sum(
+            sum(c) / len(c) for c in completeness_trailing.values() if c
+        )
+        # No trailing history at all (fresh store, or every trailing day was a
+        # miss) -- nothing to compare the stored day against, so any stored
+        # rows count as complete: preserves pre-Task-5 behavior exactly.
+        if not trailing_total_mean or stored_total >= (
+            1 - config.COMPLETENESS_SHORTFALL
+        ) * trailing_total_mean:
+            return RunStatus("skipped_idempotent", target, message="already present")
+        # Short day: fall through to re-fetch. append_keyed's keep="last"
+        # dedupe (on date, instrument_key) makes the merge safe -- rows already
+        # stored are simply overwritten by the freshly re-fetched copy, and
+        # rows the short fetch missed the first time are newly added.
+        topup_note = (
+            f"re-ingested short day (stored {stored_total} vs "
+            f"trailing mean {trailing_total_mean:.0f})"
+        )
 
     try:
         res = fetcher.fetch_raw(target)
@@ -133,6 +171,7 @@ def run_daily(
             symbol_count=len(clean),
             quarantined_count=len(bad),
             source=res.source,
+            message=topup_note,
         )
     except (UnexpectedFailure, SchemaError) as e:
         return RunStatus("failed", target, message=str(e))

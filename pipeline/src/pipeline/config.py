@@ -45,6 +45,17 @@ INDICES_ROWCOUNT_ABS_RANGE: tuple[int, int] = (50, 500)
 # permanent hole. Present days cost one cheap `has_day` idempotent-skip read.
 CATCHUP_WINDOW_DAYS: int = 7
 
+# G2 Task 5: completeness-aware idempotency. `has_day` alone ("*>=1* row
+# exists for this day") used to lock a partial day in forever -- a short day
+# (mid-fetch truncation, a fallback that only partially served the universe,
+# etc.) would never be topped up because ANY stored row short-circuited every
+# subsequent run. A present day now only skips when its stored total is
+# within this fraction of the trailing total mean (sum of per-series trailing
+# means); short days fall through to re-fetch instead, and append_keyed's
+# keep="last" dedupe merges the top-up in safely. 0.15 mirrors
+# ROWCOUNT_DEVIATION's existing tolerance band.
+COMPLETENESS_SHORTFALL: float = 0.15
+
 # Project root = the pipeline/ directory (two parents up from this file's src/pipeline/).
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 DATA_DIR: Path = PROJECT_ROOT / "data"
