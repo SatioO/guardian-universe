@@ -9,7 +9,10 @@ Two-phase materialization: phase 1 downloads and sha-verifies every file into
 verified file into its dataset's `base_dir` under its logical name. This
 guarantees that a failure partway through (download error, checksum mismatch,
 or a malformed manifest) never leaves a dataset's store in a hybrid old/new
-state -- either every file lands, or none do.
+state -- either every file lands, or none do. This atomicity guarantee is
+scoped to ALL datasets in a single `sync_store` call together (whole-manifest
+atomicity), not per-dataset: one call either materializes every dataset's
+verified files or materializes none of them.
 
 Each manifest dataset is routed to its registered DatasetSpec via
 `datasets.by_manifest_name`; a dataset the registry doesn't recognize is

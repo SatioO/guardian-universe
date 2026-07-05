@@ -14,7 +14,6 @@ from pipeline import calendar as cal
 from pipeline import config, datasets, freshness, manifest
 from pipeline.daily_update import run_daily
 from pipeline.errors import ReleaseError, UnexpectedFailure
-from pipeline.fetch import NseUdiffFetcher
 from pipeline.publish import publish_dataset
 from pipeline.release import GhReleaseClient
 from pipeline.sync import sync_store
@@ -32,8 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("daily")
     d.add_argument("--date", default=None)
+    d.add_argument("--dataset", choices=[*datasets.DATASETS, "all"], default="all")
     b = sub.add_parser("backfill")
     b.add_argument("--days", type=int, required=True)
+    b.add_argument("--dataset", choices=[*datasets.DATASETS, "all"], default="all")
     sub.add_parser("publish")
     sub.add_parser("sync")
     sub.add_parser("check-freshness")
@@ -62,31 +63,33 @@ def cmd_check_freshness(
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    ok = ("success", "skipped_holiday", "skipped_idempotent", "not_yet")
     if args.cmd == "daily":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
         special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
-        fetcher = NseUdiffFetcher()
         target = date.fromisoformat(args.date) if args.date else datetime.now(UTC).date()
-        st = run_daily(
-            datasets.EQUITIES, target, fetcher=fetcher, holidays=holidays,
-            special_sessions=special,
-        )
-        manifest.write_status(st, config.META_DIR)
-        print(manifest.status_to_dict(st))
-        return 0 if st.status in ("success", "skipped_holiday", "skipped_idempotent",
-                                  "not_yet") else 1
+        keys = datasets.DATASET_ORDER if args.dataset == "all" else [args.dataset]
+        statuses = []
+        for key in keys:
+            spec = datasets.DATASETS[key]
+            st = run_daily(spec, target, fetcher=spec.make_fetcher(), holidays=holidays,
+                           special_sessions=special)
+            statuses.append(st)
+            print(manifest.status_to_dict(st))
+        manifest.write_status(statuses[0], config.META_DIR)  # primary drives monitor/publish gate
+        return 0 if all(s.status in ok for s in statuses) else 1
     if args.cmd == "backfill":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
         special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
-        fetcher = NseUdiffFetcher()
-        results = backfill_mod.backfill(
-            datasets.EQUITIES, datetime.now(UTC).date(), args.days,
-            fetcher=fetcher, holidays=holidays, special_sessions=special,
-        )
-        return 0 if all(
-            r.status in ("success", "skipped_holiday", "skipped_idempotent", "not_yet")
-            for r in results
-        ) else 1
+        keys = datasets.DATASET_ORDER if args.dataset == "all" else [args.dataset]
+        all_results = []
+        for key in keys:
+            spec = datasets.DATASETS[key]
+            all_results.extend(backfill_mod.backfill(
+                spec, datetime.now(UTC).date(), args.days,
+                fetcher=spec.make_fetcher(), holidays=holidays, special_sessions=special,
+            ))
+        return 0 if all(r.status in ok for r in all_results) else 1
     if args.cmd == "sync":
         client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
         with tempfile.TemporaryDirectory() as tmp:

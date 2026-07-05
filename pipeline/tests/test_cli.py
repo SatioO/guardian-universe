@@ -17,6 +17,35 @@ def test_parser_reads_backfill_days():
     assert args.cmd == "backfill" and args.days == 42
 
 
+def test_parser_backfill_dataset_choices():
+    args = cli.build_parser().parse_args(["backfill", "--days", "1", "--dataset", "equities"])
+    assert args.dataset == "equities"
+    assert cli.build_parser().parse_args(["backfill", "--days", "1"]).dataset == "all"
+    import pytest
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["backfill", "--days", "1", "--dataset", "bogus"])
+
+
+def test_main_backfill_runs_all_registered_specs(monkeypatch, tmp_path):
+    import json
+    from datetime import date
+
+    from pipeline import config
+    from pipeline.daily_update import RunStatus
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    seen = []
+
+    def fake_backfill(spec, end, n, **kw):
+        seen.append(spec.key)
+        return [RunStatus("success", date(2026, 7, 3), source=spec.source_label)]
+
+    monkeypatch.setattr(cli.backfill_mod, "backfill", fake_backfill)
+    assert cli.main(["backfill", "--days", "1"]) == 0
+    assert seen == ["equities"]  # DATASET_ORDER today; G1b extends this
+
+
 def test_parser_reads_daily_date():
     args = cli.build_parser().parse_args(["daily", "--date", "2026-07-03"])
     assert args.cmd == "daily" and args.date == "2026-07-03"
@@ -77,3 +106,33 @@ def test_cmd_check_freshness_flags_missing_release(tmp_path: Path):
         today=date(2026, 7, 6), runner=lambda _cmd: 1, work_dir=tmp_path,
     )
     assert rc == 1  # download failed -> treated as stale/missing
+
+
+def test_parser_daily_dataset_choices():
+    args = cli.build_parser().parse_args(["daily", "--dataset", "equities"])
+    assert args.dataset == "equities"
+    assert cli.build_parser().parse_args(["daily"]).dataset == "all"
+    import pytest
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["daily", "--dataset", "bogus"])
+
+
+def test_main_daily_runs_all_registered_specs(monkeypatch, tmp_path):
+    import json
+    from datetime import date
+
+    from pipeline import config
+    from pipeline.daily_update import RunStatus
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    seen = []
+
+    def fake_run_daily(spec, target, **kw):
+        seen.append(spec.key)
+        return RunStatus("success", date(2026, 7, 3), source=spec.source_label)
+
+    monkeypatch.setattr(cli, "run_daily", fake_run_daily)
+    assert cli.main(["daily", "--date", "2026-07-03"]) == 0
+    assert seen == ["equities"]  # DATASET_ORDER today; G1b extends this
+    assert (tmp_path / "last_run_status.json").exists()

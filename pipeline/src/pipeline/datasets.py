@@ -22,6 +22,9 @@ class DatasetSpec:
     source_label: str           # provenance recorded in RunStatus.source
     normalizer: Callable[[pd.DataFrame], pd.DataFrame]
     make_fetcher: Callable[[], Fetcher]
+    # NOTE: bound at spec-construction (import) time — this reads config.* when
+    # the module-level DatasetSpec instances below are built, so editing the
+    # underlying config value at runtime requires a fresh process to take effect.
     abs_rowcount_range: tuple[int, int]
     manifest_name: str          # dataset name in manifest.json
     schema_version: int
