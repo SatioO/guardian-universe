@@ -34,6 +34,11 @@ class DatasetSpec:
     abs_rowcount_range: tuple[int, int]
     manifest_name: str          # dataset name in manifest.json
     schema_version: int
+    # Derived datasets are built from other datasets already in the store
+    # (via builders.BUILDERS) rather than fetched from an external source.
+    # normalizer/make_fetcher are never invoked by the CLI for these specs —
+    # additive field, default False preserves all existing constructions.
+    derived: bool = False
 
 
 EQUITIES = DatasetSpec(

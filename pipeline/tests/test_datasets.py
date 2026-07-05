@@ -1,5 +1,7 @@
 import functools
 
+import pytest
+
 from pipeline import config, datasets
 from pipeline.fetch import NseIndicesFetcher
 from pipeline.normalize import normalize_equity_bhavcopy
@@ -53,3 +55,25 @@ def test_manifest_names_are_unique():
 
 def test_all_specs_follows_dataset_order():
     assert datasets.all_specs() == [datasets.EQUITIES, datasets.INDICES]
+
+
+def test_derived_defaults_false_for_existing_specs():
+    assert datasets.EQUITIES.derived is False
+    assert datasets.INDICES.derived is False
+
+
+def test_dataset_spec_accepts_derived_true():
+    from pipeline import config
+
+    def _raiser() -> object:
+        raise RuntimeError("derived dataset has no fetcher")
+
+    spec = datasets.DatasetSpec(
+        key="fake_derived", file_prefix="fake", base_dir=config.DATA_DIR / "fake",
+        source_label="derived", normalizer=lambda df: df, make_fetcher=_raiser,
+        abs_rowcount_range=(0, 10**9), manifest_name="fake", schema_version=1,
+        derived=True,
+    )
+    assert spec.derived is True
+    with pytest.raises(RuntimeError, match="derived dataset has no fetcher"):
+        spec.make_fetcher()

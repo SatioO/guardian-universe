@@ -10,9 +10,9 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from pipeline import backfill as backfill_mod
+from pipeline import builders, config, datasets, freshness, manifest
 from pipeline import calendar as cal
-from pipeline import config, datasets, freshness, manifest
-from pipeline.daily_update import run_daily
+from pipeline.daily_update import RunStatus, run_daily
 from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.publish import publish_dataset
 from pipeline.release import GhReleaseClient
@@ -41,6 +41,19 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _run_builder(spec: datasets.DatasetSpec, target: date) -> RunStatus:
+    """Run a derived spec's builder, guarded so a builder bug never crashes
+    the CLI: any exception, or a missing BUILDERS entry, maps to a failed
+    RunStatus instead of propagating."""
+    build = builders.BUILDERS.get(spec.key)
+    if build is None:
+        return RunStatus("failed", target, message=f"no builder registered for '{spec.key}'")
+    try:
+        return build(spec, target)
+    except Exception as e:  # boundary guard: builders must never crash the CLI
+        return RunStatus("failed", target, message=f"builder error for '{spec.key}': {e}")
+
+
 def cmd_check_freshness(
     *,
     repo: str,
@@ -65,19 +78,48 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     ok = ("success", "skipped_holiday", "skipped_idempotent", "not_yet")
     if args.cmd == "daily":
+        if args.dataset != "all" and datasets.DATASETS[args.dataset].derived:
+            print("derived datasets build automatically after a successful "
+                  "`--dataset all` run", file=sys.stderr)
+            return 2
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
         special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
         target = date.fromisoformat(args.date) if args.date else datetime.now(UTC).date()
         keys = datasets.DATASET_ORDER if args.dataset == "all" else [args.dataset]
-        statuses = []
+        primary_key = datasets.DATASET_ORDER[0]
+
+        # Phase 1: FETCHED specs (never touch derived specs' normalizer/make_fetcher).
+        statuses: dict[str, RunStatus] = {}
         for key in keys:
             spec = datasets.DATASETS[key]
+            if spec.derived:
+                continue
             st = run_daily(spec, target, fetcher=spec.make_fetcher(), holidays=holidays,
                            special_sessions=special)
-            statuses.append(st)
+            statuses[key] = st
             print(manifest.status_to_dict(st))
-        manifest.write_status(statuses[0], config.META_DIR)  # primary drives monitor/publish gate
-        return 0 if all(s.status in ok for s in statuses) else 1
+
+        # Phase 2: DERIVED specs -- only for a full `all` run, and only when
+        # the primary fetched status is healthy.
+        if args.dataset == "all" and statuses.get(primary_key) is not None \
+                and statuses[primary_key].status in ok:
+            for key in datasets.DATASET_ORDER:
+                spec = datasets.DATASETS[key]
+                if not spec.derived:
+                    continue
+                st = _run_builder(spec, target)
+                statuses[key] = st
+                print(manifest.status_to_dict(st))
+
+        for key, st in statuses.items():
+            if key == primary_key:
+                manifest.write_status(st, config.META_DIR)  # drives monitor/publish gate
+            else:
+                manifest.write_status(st, config.META_DIR, filename=f"last_run_status_{key}.json")
+
+        if primary_key in statuses:
+            return 0 if statuses[primary_key].status in ok else 1
+        return 0 if all(s.status in ok for s in statuses.values()) else 1
     if args.cmd == "backfill":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
         special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
@@ -85,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
         all_results = []
         for key in keys:
             spec = datasets.DATASETS[key]
+            if spec.derived:
+                continue  # derived datasets are never fetched/backfilled
             all_results.extend(backfill_mod.backfill(
                 spec, datetime.now(UTC).date(), args.days,
                 fetcher=spec.make_fetcher(), holidays=holidays, special_sessions=special,

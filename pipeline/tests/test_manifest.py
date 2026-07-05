@@ -107,6 +107,17 @@ def test_write_status_writes_last_run_status(tmp_path: Path):
     assert json.loads(p.read_text())["symbol_count"] == 2406
 
 
+def test_write_status_accepts_custom_filename(tmp_path: Path):
+    from pipeline.daily_update import RunStatus
+    p = manifest.write_status(
+        RunStatus("success", date(2026, 7, 3), symbol_count=12, source="derived"),
+        tmp_path, filename="last_run_status_reference.json",
+    )
+    assert p == tmp_path / "last_run_status_reference.json"
+    import json
+    assert json.loads(p.read_text())["symbol_count"] == 12
+
+
 def test_asset_name_inserts_sha8_before_extension():
     from pipeline.manifest import asset_name
     sha = "a1b2c3d4" + "0" * 56
