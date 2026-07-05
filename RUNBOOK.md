@@ -370,11 +370,13 @@ figures for any day rebuilt this way.
 Implement `rebuild.RebuildSource` (`id`, `available()`, `day_frame()`
 returning the same PRIMARY-RAW UDiFF shape as the Kite/secfull adapters —
 see `fetch.py`'s fallback-contract docstring) in a new module under
-`pipeline/src/pipeline/sources/`, and self-register it at import time
-(`rebuild.register(YourBroker.from_env())`, mirroring
-`kite_rebuild.py`'s bottom-of-file registration). Import that module once,
-for its registration side effect, from `cli.py` (the one allowed
-broker-naming edge — see the comment above the Kite import there). No other
-edits to `cli.py`, `rebuild.py`, or `cmd_rebuild_day` are needed: `--via`'s
-choices and provenance labels (`"<id>-rebuild"`) are derived from the
-registry automatically.
+`pipeline/src/pipeline/sources/<broker>_rebuild.py`, and self-register it at
+import time with a module-bottom `rebuild.register(YourBroker.from_env())`
+call (mirroring `kite_rebuild.py`'s bottom-of-file registration). Add **one**
+import line for that module to `pipeline/src/pipeline/sources/__init__.py`
+(the broker-source registration aggregator — broker names belong there, and
+only there) so it runs at import time alongside every other registered
+source. **Zero edits to `cli.py`** — it only ever imports the `sources`
+package as a whole and never names a broker; `--via`'s choices and
+provenance labels (`"<id>-rebuild"`) are derived from the registry
+automatically. Proof: `grep -i kite src/pipeline/cli.py` returns nothing.

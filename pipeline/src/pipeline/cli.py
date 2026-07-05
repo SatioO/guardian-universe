@@ -13,21 +13,28 @@ from pathlib import Path
 import pandas as pd
 
 from pipeline import backfill as backfill_mod
-from pipeline import builders, config, datasets, freshness, manifest, rebuild
+
+# `rebuild.py` stays fully broker-neutral: importing `pipeline.sources` here
+# triggers every registered RebuildSource's import-time self-registration
+# side effect (see sources/__init__.py, the broker-source registration
+# aggregator -- broker names live there, never here). Never construct or call
+# a concrete RebuildSource implementation directly below -- always go through
+# rebuild.resolve()/rebuild.REBUILDERS.
+from pipeline import (
+    builders,
+    config,
+    datasets,
+    freshness,
+    manifest,
+    rebuild,
+    sources,  # noqa: F401  # broker-source registration side-effects
+)
 from pipeline import calendar as cal
 from pipeline.daily_update import RunStatus, run_daily
 from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.fetch import FetchResult
 from pipeline.publish import publish_dataset
 from pipeline.release import GhReleaseClient
-
-# cli is the allowed name edge (see the builders.BUILDERS binding below for
-# the precedent): `rebuild.py` stays fully broker-neutral, so importing a
-# concrete RebuildSource module (here, Kite) purely for its import-time
-# self-registration side effect happens here, not inside rebuild.py or in any
-# dispatch logic. Never call kite_rebuild.KiteDayRebuilder directly below --
-# always go through rebuild.resolve()/rebuild.REBUILDERS.
-from pipeline.sources import kite_rebuild  # noqa: F401
 from pipeline.sync import sync_store
 
 Runner = Callable[[list[str]], int]
@@ -172,8 +179,8 @@ def cmd_rebuild_day(target: date, *, holidays: set[date],
                         special_sessions=special_sessions)
     print(manifest.status_to_dict(status))
     # RebuildSource itself only guarantees id/available/day_frame; a
-    # `failures` list is a (currently universal, Kite included) convention,
-    # not a Protocol requirement, so read it defensively.
+    # `failures` list is a (currently universal across every registered
+    # source) convention, not a Protocol requirement, so read it defensively.
     failures = getattr(source, "failures", [])
     print(f"per-symbol failures: {len(failures)}", file=sys.stderr)
     for f in failures:

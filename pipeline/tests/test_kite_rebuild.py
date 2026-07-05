@@ -390,6 +390,47 @@ def test_from_env_never_raises_with_missing_credentials(monkeypatch):
     assert rebuilder.available() is False
 
 
+def test_import_safe_with_env_unset_and_resolve_reports_no_available_source(monkeypatch):
+    """Broader than the from_env()-level check above: with BOTH credential
+    env vars removed, (re)importing the whole registration chain -- fresh
+    `pipeline.sources` import plus an `importlib.reload` of `kite_rebuild`
+    itself (re-running its bottom-of-module `rebuild.register(...)` call) --
+    must not raise anything, and `rebuild.resolve(None)` must then report a
+    clean no-available-source `ValueError` rather than crashing or silently
+    returning something unusable. Guards the exact failure mode the
+    broker-agnostic registration refactor could introduce: a module-import-time
+    side effect that blows up (or otherwise behaves badly) when credentials
+    simply aren't in the environment yet, which is the normal state for any
+    process that hasn't exported Kite credentials (e.g. a fresh `import
+    pipeline.cli` in CI or a clean interpreter)."""
+    import importlib
+
+    from pipeline import rebuild
+    from pipeline import sources as sources_pkg
+    from pipeline.sources import kite_rebuild as kr_mod
+
+    monkeypatch.delenv("KITE_API_KEY", raising=False)
+    monkeypatch.delenv("KITE_ACCESS_TOKEN", raising=False)
+
+    # Fresh import of the aggregator package must not raise with no
+    # credentials present.
+    importlib.reload(sources_pkg)
+
+    # Reloading the concrete module re-runs its self-registration side
+    # effect (`rebuild.register(KiteDayRebuilder.from_env())`) with the
+    # current (credential-less) environment -- must not raise, and the
+    # freshly-registered instance must honestly report unavailable.
+    importlib.reload(kr_mod)
+    assert "kite" in rebuild.REBUILDERS
+    assert rebuild.REBUILDERS["kite"].available() is False
+
+    # With no registered source currently available, resolve(None) must
+    # fail cleanly (a clear ValueError), never raise something else or
+    # return a source that isn't actually usable.
+    with pytest.raises(ValueError, match="no rebuild source is available"):
+        rebuild.resolve(None)
+
+
 def test_from_env_picks_up_live_credentials_for_actual_calls(monkeypatch):
     monkeypatch.setenv("KITE_API_KEY", "envkey")
     monkeypatch.setenv("KITE_ACCESS_TOKEN", "envtoken")
