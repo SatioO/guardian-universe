@@ -63,8 +63,27 @@ INDICES = DatasetSpec(
     manifest_name="indices", schema_version=1,
 )
 
-DATASETS: dict[str, DatasetSpec] = {"equities": EQUITIES, "indices": INDICES}
-DATASET_ORDER: list[str] = ["equities", "indices"]
+def _no_fetcher() -> Fetcher:
+    """Derived datasets are built from the store, not fetched -- this must
+    never be invoked; the CLI's phase-1 fetch loop always skips `derived`
+    specs before it can call make_fetcher()."""
+    raise RuntimeError("derived dataset has no fetcher")
+
+
+REFERENCE = DatasetSpec(
+    key="reference", file_prefix="instruments", base_dir=config.REFERENCE_DIR,
+    source_label="derived",
+    normalizer=lambda df: df,  # identity: builders.build_reference shapes rows itself
+    make_fetcher=_no_fetcher,
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="reference", schema_version=1,
+    derived=True,
+)
+
+DATASETS: dict[str, DatasetSpec] = {
+    "equities": EQUITIES, "indices": INDICES, "reference": REFERENCE,
+}
+DATASET_ORDER: list[str] = ["equities", "indices", "reference"]
 
 # publish.py resolves specs by manifest_name (by_manifest_name); manifest_name
 # must be unique across the registry or that resolution would be ambiguous.

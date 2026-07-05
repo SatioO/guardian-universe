@@ -43,6 +43,7 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 DATA_DIR: Path = PROJECT_ROOT / "data"
 OHLC_DIR: Path = DATA_DIR / "ohlc"
 INDICES_DIR: Path = DATA_DIR / "indices"
+REFERENCE_DIR: Path = DATA_DIR / "reference"
 META_DIR: Path = DATA_DIR / "meta"
 
 

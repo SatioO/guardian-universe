@@ -415,3 +415,59 @@ def test_daily_derived_missing_builder_entry_is_failed_status(monkeypatch, tmp_p
     assert rc == 0
     status = json.loads((tmp_path / "last_run_status_reference.json").read_text())
     assert status["status"] == "failed"
+
+
+def test_daily_derived_builder_runs_when_primary_idempotent_skip(monkeypatch, tmp_path):
+    """A `skipped_idempotent` primary status is in the "ok" set -- the
+    derived builder must still fire (T5 prerequisite carried into T6)."""
+    import json
+    from datetime import date
+
+    from pipeline import config
+    from pipeline.daily_update import RunStatus
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    _fake_registry(monkeypatch)
+    calls = []
+
+    def fake_run_daily(spec, target, **kw):
+        if spec.key == "equities":
+            return RunStatus("skipped_idempotent", date(2026, 7, 3), message="already present")
+        return RunStatus("success", date(2026, 7, 3), source=spec.source_label)
+
+    def fake_builder(spec, target):
+        calls.append(spec.key)
+        return RunStatus("success", target, symbol_count=5, source="derived")
+
+    monkeypatch.setattr(cli, "run_daily", fake_run_daily)
+    monkeypatch.setattr(cli.builders, "BUILDERS", {"reference": fake_builder})
+    rc = cli.main(["daily", "--date", "2026-07-03"])
+    assert rc == 0
+    assert calls == ["reference"]
+    status = json.loads((tmp_path / "last_run_status_reference.json").read_text())
+    assert status["status"] == "success"
+
+
+def test_daily_lone_secondary_failure_exits_1(monkeypatch, tmp_path):
+    """`--dataset indices` alone, with a failing indices run, must exit 1 --
+    its own status drives the exit code since the primary never ran (T5
+    prerequisite carried into T6)."""
+    import json
+    from datetime import date
+
+    from pipeline import config
+    from pipeline.daily_update import RunStatus
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    _fake_registry(monkeypatch, extra_derived=False)
+
+    def fake_run_daily(spec, target, **kw):
+        return RunStatus("failed", date(2026, 7, 3), message="boom")
+
+    monkeypatch.setattr(cli, "run_daily", fake_run_daily)
+    rc = cli.main(["daily", "--date", "2026-07-03", "--dataset", "indices"])
+    assert rc == 1
+    assert (tmp_path / "last_run_status_indices.json").exists()
+    assert not (tmp_path / "last_run_status.json").exists()

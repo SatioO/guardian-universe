@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import sys
 import tempfile
@@ -19,6 +20,17 @@ from pipeline.release import GhReleaseClient
 from pipeline.sync import sync_store
 
 Runner = Callable[[list[str]], int]
+
+# cli is the allowed name edge (per the derived-dataset mechanism's design):
+# builders.py stays name-free, so the source spec a builder reads from (here,
+# the primary/equities spec) is resolved by position (DATASET_ORDER[0]) and
+# bound in as a keyword-only argument via functools.partial. The bound
+# partial still matches BUILDERS' `Callable[[DatasetSpec, date], RunStatus]`
+# signature -- source_spec is filled in, leaving exactly the (spec, target)
+# two positional params _run_builder calls with.
+builders.BUILDERS["reference"] = functools.partial(
+    builders.build_reference, source_spec=datasets.DATASETS[datasets.DATASET_ORDER[0]]
+)
 
 
 def _plain_runner(cmd: list[str]) -> int:
