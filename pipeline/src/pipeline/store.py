@@ -11,6 +11,32 @@ import pandas as pd
 from pipeline import config
 
 
+class ReadCache:
+    """Opt-in in-process cache for _read_year, keyed by (base, year, prefix).
+
+    Every store read function accepts `cache: ReadCache | None = None`;
+    `None` (the default everywhere) preserves today's always-read-fresh
+    behavior exactly. A caller that expects to make many sequential reads
+    against the same growing file within one process (the 300-day backfill;
+    the nightly catch-up window) constructs ONE ReadCache and threads it
+    through every call, so each year-file is read from disk once per
+    *version* of that file rather than once per read call. `append_keyed`
+    invalidates the entry for whatever (base, year, prefix) it just wrote,
+    so a cached reader can never observe stale data within the same run."""
+
+    def __init__(self) -> None:
+        self._data: dict[tuple[str, int, str], pd.DataFrame] = {}
+
+    def get(self, base: Path, year: int, prefix: str) -> pd.DataFrame | None:
+        return self._data.get((str(base), year, prefix))
+
+    def put(self, base: Path, year: int, prefix: str, df: pd.DataFrame) -> None:
+        self._data[(str(base), year, prefix)] = df
+
+    def invalidate(self, base: Path, year: int, prefix: str) -> None:
+        self._data.pop((str(base), year, prefix), None)
+
+
 def sweep_orphan_tmp(base: Path, *, older_than_hours: float = 24) -> int:
     """Best-effort cleanup of orphaned crash-write `.tmp` siblings (G2 task 8
     hygiene). `append_keyed`'s own atomic-write pattern always writes to
@@ -54,18 +80,37 @@ def sweep_orphan_tmp(base: Path, *, older_than_hours: float = 24) -> int:
 
 
 def _read_year(
-    base: Path, year: int, prefix: str = "ohlc", *, columns: list[str] | None = None
+    base: Path,
+    year: int,
+    prefix: str = "ohlc",
+    *,
+    columns: list[str] | None = None,
+    cache: ReadCache | None = None,
 ) -> pd.DataFrame:
     """Read one year-partitioned file, or an empty frame if it doesn't exist yet.
 
     The empty-case columns come from the caller (`columns`), not a hardcoded
     schema -- `append_keyed` is column-agnostic (G1b task 7 generalization),
     so it passes the incoming frame's own columns; `append_day` still passes
-    `config.CANON_COLUMNS` explicitly to keep its existing contract."""
+    `config.CANON_COLUMNS` explicitly to keep its existing contract.
+
+    `cache` is opt-in (see `ReadCache`): `None` (the default) preserves the
+    always-read-fresh behavior above exactly. When a cache is given, a hit
+    returns the cached frame without touching disk; a miss reads as above
+    and populates the cache before returning."""
+    if cache is not None:
+        cached = cache.get(base, year, prefix)
+        if cached is not None:
+            return cached
     p = config.dataset_path(year, base, prefix=prefix)
-    if p.exists():
-        return pd.read_parquet(p)
-    return pd.DataFrame(columns=columns if columns is not None else config.CANON_COLUMNS)
+    df = (
+        pd.read_parquet(p)
+        if p.exists()
+        else pd.DataFrame(columns=columns if columns is not None else config.CANON_COLUMNS)
+    )
+    if cache is not None:
+        cache.put(base, year, prefix, df)
+    return df
 
 
 def append_keyed(
@@ -74,6 +119,7 @@ def append_keyed(
     *,
     prefix: str,
     key_cols: tuple[str, ...] = ("date", "instrument_key"),
+    cache: ReadCache | None = None,
 ) -> None:
     """Column-agnostic year-partitioned append+dedupe+atomic-write.
 
@@ -87,12 +133,18 @@ def append_keyed(
 
     G2 task 8 hygiene: sweeps orphaned crash-write `.tmp` siblings under
     `base` (see `sweep_orphan_tmp`) before doing anything else -- best-effort,
-    never raises, so a sweep hiccup never blocks this write."""
+    never raises, so a sweep hiccup never blocks this write.
+
+    `cache` is opt-in (see `ReadCache`): passed through to the internal
+    `_read_year` read, and -- once the atomic write below lands -- the
+    just-written (base, year, prefix) entry is invalidated so a cached
+    reader sharing this same `cache` can never observe stale data within
+    the same run."""
     sweep_orphan_tmp(base)
     base.mkdir(parents=True, exist_ok=True)
     key_cols_list = list(key_cols)
     for year, chunk in df.groupby(df["date"].dt.year):
-        existing = _read_year(base, int(year), prefix, columns=list(chunk.columns))
+        existing = _read_year(base, int(year), prefix, columns=list(chunk.columns), cache=cache)
         # Warning-free concat: skip concat entirely when existing is empty to avoid
         # pandas 2.x FutureWarning about concatenating empty/all-NA frames.
         combined = chunk if existing.empty else pd.concat([existing, chunk], ignore_index=True)
@@ -103,14 +155,18 @@ def append_keyed(
         tmp = target.with_suffix(".parquet.tmp")
         combined.to_parquet(tmp, compression="zstd", index=False)
         tmp.replace(target)
+        if cache is not None:
+            cache.invalidate(base, int(year), prefix)
 
 
-def append_day(df: pd.DataFrame, base: Path, *, prefix: str = "ohlc") -> None:
-    append_keyed(df, base, prefix=prefix, key_cols=("date", "instrument_key"))
+def append_day(
+    df: pd.DataFrame, base: Path, *, prefix: str = "ohlc", cache: ReadCache | None = None
+) -> None:
+    append_keyed(df, base, prefix=prefix, key_cols=("date", "instrument_key"), cache=cache)
 
 
-def has_day(base: Path, d: date, *, prefix: str = "ohlc") -> bool:
-    df = _read_year(base, d.year, prefix)
+def has_day(base: Path, d: date, *, prefix: str = "ohlc", cache: ReadCache | None = None) -> bool:
+    df = _read_year(base, d.year, prefix, cache=cache)
     if df.empty:
         return False
     return bool((df["date"] == pd.Timestamp(d)).any())
@@ -123,9 +179,11 @@ def day_symbol_count(base: Path, d: date, *, prefix: str = "ohlc") -> int:
     return int((df["date"] == pd.Timestamp(d)).sum())
 
 
-def day_series_counts(base: Path, d: date, *, prefix: str = "ohlc") -> dict[str, int]:
+def day_series_counts(
+    base: Path, d: date, *, prefix: str = "ohlc", cache: ReadCache | None = None
+) -> dict[str, int]:
     """Per-series row counts for one day (G1b task 4 per-series gate input)."""
-    df = _read_year(base, d.year, prefix)
+    df = _read_year(base, d.year, prefix, cache=cache)
     if df.empty:
         return {}
     day_df = df[df["date"] == pd.Timestamp(d)]
@@ -135,13 +193,18 @@ def day_series_counts(base: Path, d: date, *, prefix: str = "ohlc") -> dict[str,
 
 
 def read_trailing_window(
-    base: Path, end: date, n_rows_per_key: int, *, prefix: str = "ohlc"
+    base: Path,
+    end: date,
+    n_rows_per_key: int,
+    *,
+    prefix: str = "ohlc",
+    cache: ReadCache | None = None,
 ) -> pd.DataFrame:
     # Warning-free concat: drop empty year frames before concatenating to avoid
     # pandas 2.x FutureWarning about concatenating empty/all-NA frames.
     frames = [
         f
-        for f in (_read_year(base, y, prefix) for y in (end.year - 1, end.year))
+        for f in (_read_year(base, y, prefix, cache=cache) for y in (end.year - 1, end.year))
         if not f.empty
     ]
     if not frames:

@@ -396,3 +396,71 @@ def test_append_day_sweeps_stale_orphan_tmp_on_entry(tmp_path: Path):
     append_day(df, tmp_path)
 
     assert not stale.exists()
+
+
+def test_read_cache_serves_repeated_reads_without_touching_disk(tmp_path, monkeypatch):
+    from datetime import date
+
+    import pandas as pd
+
+    from pipeline import config, store
+
+    df = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+    df["date"] = pd.to_datetime(["2026-07-03"])
+    df["instrument_key"] = ["INE1"]
+    store.append_day(df, tmp_path)
+
+    cache = store.ReadCache()
+    assert store.has_day(tmp_path, date(2026, 7, 3), cache=cache)  # primes the cache
+
+    calls = {"n": 0}
+    real_read_parquet = pd.read_parquet
+
+    def counting_read_parquet(*a, **kw):
+        calls["n"] += 1
+        return real_read_parquet(*a, **kw)
+
+    monkeypatch.setattr(pd, "read_parquet", counting_read_parquet)
+    assert store.has_day(tmp_path, date(2026, 7, 3), cache=cache)
+    assert store.day_series_counts(tmp_path, date(2026, 7, 3), cache=cache)
+    assert calls["n"] == 0  # both served from cache, zero disk reads
+
+
+def test_read_cache_is_invalidated_by_append(tmp_path):
+    from datetime import date
+
+    import pandas as pd
+
+    from pipeline import config, store
+
+    def frame(day: str, key: str) -> pd.DataFrame:
+        df = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+        df["date"] = pd.to_datetime([day])
+        df["instrument_key"] = [key]
+        return df
+
+    cache = store.ReadCache()
+    store.append_day(frame("2026-07-03", "INE1"), tmp_path, cache=cache)
+    # Prime the cache with the one-row state, then append a second row under cache.
+    assert store.has_day(tmp_path, date(2026, 7, 3), cache=cache)
+    store.append_day(frame("2026-07-03", "INE2"), tmp_path, cache=cache)
+    # A read through the SAME cache after the second append must see both rows,
+    # not the stale one-row snapshot -- proving invalidation, not just a cold cache.
+    window = store.read_trailing_window(tmp_path, date(2026, 7, 3), 5, cache=cache)
+    assert sorted(window["instrument_key"]) == ["INE1", "INE2"]
+
+
+def test_read_cache_none_default_is_unchanged_behavior(tmp_path):
+    # No cache argument anywhere -- must behave exactly as before this task.
+    from datetime import date
+
+    import pandas as pd
+
+    from pipeline import config, store
+
+    df = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+    df["date"] = pd.to_datetime(["2026-07-03"])
+    df["instrument_key"] = ["INE1"]
+    store.append_day(df, tmp_path)
+    assert store.has_day(tmp_path, date(2026, 7, 3))
+    assert store.day_series_counts(tmp_path, date(2026, 7, 3))
