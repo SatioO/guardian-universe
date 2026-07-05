@@ -58,21 +58,19 @@ def test_parser_has_sync():
     assert args.cmd == "sync"
 
 
-def test_cmd_sync_downloads_ohlc_pattern(tmp_path: Path):
-    calls: list[list[str]] = []
-    rc = cli.cmd_sync(ohlc_dir=tmp_path / "ohlc", repo="o/r", tag="data-latest",
-                      runner=lambda cmd: (calls.append(cmd), 0)[1])
-    assert rc == 0
-    cmd = calls[0]
-    assert cmd[:4] == ["gh", "release", "download", "data-latest"]
-    assert "ohlc_*.parquet" in cmd and "--clobber" in cmd
+def test_main_sync_returns_1_on_failure(monkeypatch):
+    from pipeline.errors import ReleaseError
+
+    def _boom(*a, **kw):
+        raise ReleaseError("network down")
+
+    monkeypatch.setattr(cli, "sync_store", _boom)
+    assert cli.main(["sync"]) == 1
 
 
-def test_cmd_sync_tolerates_missing_release(tmp_path: Path):
-    # First run: no release yet -> gh returns non-zero -> cmd_sync must NOT raise.
-    rc = cli.cmd_sync(ohlc_dir=tmp_path / "ohlc", repo="o/r", tag="data-latest",
-                      runner=lambda _cmd: 1)
-    assert rc == 1  # returned, not raised
+def test_main_sync_returns_0_on_success(monkeypatch):
+    monkeypatch.setattr(cli, "sync_store", lambda *a, **kw: None)
+    assert cli.main(["sync"]) == 0
 
 
 def test_parser_has_check_freshness():

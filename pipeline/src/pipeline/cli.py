@@ -14,8 +14,10 @@ from pipeline import backfill as backfill_mod
 from pipeline import calendar as cal
 from pipeline import config, freshness, manifest, publish
 from pipeline.daily_update import run_daily
-from pipeline.errors import UnexpectedFailure
+from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.fetch import NseUdiffFetcher
+from pipeline.release import GhReleaseClient
+from pipeline.sync import sync_store
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,17 +39,6 @@ def _latest_trading_date(ohlc_dir: Path) -> date:
         col = pd.to_datetime(pd.read_parquet(p, columns=["date"])["date"])
         latest = max(latest, col.max().date())
     return latest
-
-
-def cmd_sync(*, ohlc_dir: Path, repo: str, tag: str, runner: publish.Runner) -> int:
-    # Download the current published parquet(s) so a fresh runner appends TODAY to
-    # accumulated history. A missing release (first ever run) is tolerated: the
-    # non-zero exit is returned, not raised — daily+publish will then create it.
-    ohlc_dir.mkdir(parents=True, exist_ok=True)
-    return runner([
-        "gh", "release", "download", tag, "--repo", repo,
-        "--pattern", "ohlc_*.parquet", "--dir", str(ohlc_dir), "--clobber",
-    ])
 
 
 def cmd_check_freshness(
@@ -114,8 +105,14 @@ def main(argv: list[str] | None = None) -> int:
             for r in results
         ) else 1
     if args.cmd == "sync":
-        cmd_sync(ohlc_dir=config.OHLC_DIR, repo=config.GITHUB_REPO,
-                 tag=config.RELEASE_TAG, runner=publish.subprocess_runner)
+        client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                sync_store(client, ohlc_dir=config.OHLC_DIR, meta_dir=config.META_DIR,
+                           work_dir=Path(tmp))
+            except (ReleaseError, UnexpectedFailure) as e:
+                print(f"sync failed: {e}", file=sys.stderr)
+                return 1
         return 0
     if args.cmd == "check-freshness":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
