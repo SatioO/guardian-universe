@@ -58,6 +58,24 @@ jobs:
       - name: Publish the updated dataset
         if: steps.decide.outputs.status == 'success'
         run: python -m pipeline publish
+      - name: Surface window (catch-up) failures
+        # G2 final-review fix (C1): a healthy TARGET day always publishes now
+        # (cli.py's `daily` no longer exits 1 for a past-day-in-window
+        # failure when the target itself is fine) -- so this step runs AFTER
+        # publish has already completed, purely to surface the alert signal
+        # cli.py persisted to data/meta/window_failures.json (primary or
+        # secondary dataset, never uploaded as a publish artifact -- it's a
+        # runner-local signal for this step only, see cli.py's own comment).
+        # Reds the job (firing "Alert on failure" below) without having
+        # blocked the publish that already ran.
+        if: always() && steps.decide.outputs.status == 'success'
+        run: |
+          f=data/meta/window_failures.json
+          [ -e "$f" ] || exit 0
+          jq -c '.failures[]' "$f" | while read -r entry; do
+            echo "::error::window failure: $entry"
+          done
+          exit 1
       - name: Surface secondary-dataset failures
         if: always() && steps.decide.outputs.status == 'success'
         run: |

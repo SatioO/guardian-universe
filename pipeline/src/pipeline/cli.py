@@ -558,6 +558,16 @@ def main(argv: list[str] | None = None) -> int:
         keys = datasets.DATASET_ORDER if args.dataset == "all" else [args.dataset]
         primary_key = datasets.DATASET_ORDER[0]
 
+        # G2 final-review fix (C1): a stale window_failures.json from a PRIOR
+        # run must never survive into this one -- a clean run has to actively
+        # clear yesterday's marker, not just skip re-writing it, otherwise a
+        # since-repaired hole would keep alerting forever via a leftover file
+        # nothing else ever cleans up. Removed unconditionally, before the
+        # fetch loop even starts, regardless of what this run's own outcome
+        # turns out to be.
+        _window_failures_path = config.META_DIR / "window_failures.json"
+        _window_failures_path.unlink(missing_ok=True)
+
         # Phase 1: FETCHED specs (never touch derived specs' normalizer/make_fetcher).
         #
         # G2 Task 4 (catch-up loop): each fetched spec is run not just for
@@ -575,13 +585,23 @@ def main(argv: list[str] | None = None) -> int:
         # The spec's status recorded into `statuses` (and therefore written
         # to its status file, and what Phase 2/the exit-code logic keys off)
         # is always the TARGET day's status -- catch-up days are a side
-        # channel. But a catch-up day's own `failed` must not be silently
-        # swallowed just because the target day succeeded: it's printed
-        # explicitly, and for the PRIMARY spec it forces the overall exit
-        # code to 1 -- a repaired hole that failed to repair must never look
-        # like a clean run.
+        # channel. A catch-up day's own `failed` (primary OR secondary spec)
+        # must not be silently swallowed just because the target day
+        # succeeded: it's printed explicitly AND collected here for
+        # persisting to window_failures.json below.
+        #
+        # G2 final-review fix (C1): window failures are DELIBERATELY never
+        # folded into the overall exit code anymore -- see the final return
+        # below. A permanent past-day archive hole used to force exit 1 even
+        # when the target day was perfectly healthy, and data-daily.yml's
+        # un-guarded "Ingest" step turned that into a skipped "Decide"/
+        # "Publish" (publishing never ran while the pipeline still reported
+        # the target healthy). The alert survives instead as this persisted
+        # marker file, checked by a separate AFTER-publish workflow step, so
+        # a healthy target always publishes and a real archive hole still
+        # reds the job (just after publish, not instead of it).
         statuses: dict[str, RunStatus] = {}
-        primary_window_failure = False
+        window_failures: list[dict[str, str]] = []
         for key in keys:
             spec = datasets.DATASETS[key]
             if spec.derived:
@@ -613,8 +633,9 @@ def main(argv: list[str] | None = None) -> int:
                         f"catch-up: {key} {d.isoformat()} failed: {st.message}",
                         file=sys.stderr,
                     )
-                    if key == primary_key:
-                        primary_window_failure = True
+                    window_failures.append(
+                        {"dataset": key, "date": d.isoformat(), "message": st.message}
+                    )
             assert st is not None  # window always has >=1 day (target itself)
             statuses[key] = st
             print(manifest.status_to_dict(st))
@@ -637,9 +658,16 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 manifest.write_status(st, config.META_DIR, filename=f"last_run_status_{key}.json")
 
+        # G2 final-review fix (C1): persist collected window failures (primary
+        # or secondary) ONLY when there are any -- written unconditionally as
+        # a side channel, never gating the return code below. This file is a
+        # runner-local signal consumed by a dedicated AFTER-publish step in
+        # data-daily.yml (never uploaded as a publish/release artifact -- see
+        # that workflow step's own comment for why scope stays minimal here).
+        if window_failures:
+            manifest.write_json({"failures": window_failures}, _window_failures_path)
+
         if primary_key in statuses:
-            if primary_window_failure:
-                return 1  # a repaired-hole failure must never silently pass
             return 0 if statuses[primary_key].status in ok else 1
         return 0 if all(s.status in ok for s in statuses.values()) else 1
     if args.cmd == "backfill":

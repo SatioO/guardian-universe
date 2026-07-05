@@ -1,5 +1,6 @@
 import dataclasses
 import hashlib
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
@@ -584,23 +585,49 @@ def _one_day_raw(d: date) -> pd.DataFrame:
     }])
 
 
+def _one_day_indices_raw(d: date) -> pd.DataFrame:
+    """A minimal, valid NSE-indices-shaped raw frame for exactly one date --
+    mirrors `tests/test_normalize_indices.py`'s `_raw()` shape (same required
+    columns/dtypes), just for a single index row, parameterized by date so
+    `RecordingFetcher(raw_fn=_one_day_indices_raw)` can serve the indices
+    (secondary dataset) spec's own catch-up window."""
+    return pd.DataFrame([{
+        "Index Name": "Nifty 50", "Index Date": d.strftime("%d-%m-%Y"),
+        "Open Index Value": 24500.10, "High Index Value": 24700.55,
+        "Low Index Value": 24450.00, "Closing Index Value": 24650.25,
+        "Points Change": 150.15, "Volume": 350000000.0,
+        "Turnover (Rs. Cr.)": 45000.50,
+    }])
+
+
 class RecordingFetcher:
     """Logs every requested date; serves `_one_day_raw(d)` by default, or
     raises `exceptions[d]` when that date has an override. A single instance
     is reused across an entire window's days (proving the fetcher-reuse
     contract) by having `make_fetcher` be a closure returning this same
     object every time it's invoked, while a separate counter proves
-    `make_fetcher` itself is called exactly once per spec per CLI run."""
+    `make_fetcher` itself is called exactly once per spec per CLI run.
 
-    def __init__(self, exceptions: dict[date, Exception] | None = None):
+    `raw_fn`/`source` are optional overrides (default: the pre-existing
+    UDiFF-shaped `_one_day_raw`/"nse-udiff") so the same stub can also serve
+    a non-equities spec (e.g. indices) whose normalizer expects a different
+    raw column shape -- see `_one_day_indices_raw`."""
+
+    def __init__(
+        self, exceptions: dict[date, Exception] | None = None, *,
+        raw_fn: Callable[[date], pd.DataFrame] = _one_day_raw,
+        source: str = "nse-udiff",
+    ):
         self.requested: list[date] = []
         self._exceptions = exceptions or {}
+        self._raw_fn = raw_fn
+        self._source = source
 
     def fetch_raw(self, d: date) -> FetchResult:
         self.requested.append(d)
         if d in self._exceptions:
             raise self._exceptions[d]
-        return FetchResult(_one_day_raw(d), "nse-udiff")
+        return FetchResult(self._raw_fn(d), self._source)
 
 
 def _catchup_registry(monkeypatch, tmp_path: Path, fetcher: RecordingFetcher):
@@ -672,14 +699,19 @@ def test_catchup_window_fetches_only_the_missing_middle_day(monkeypatch, tmp_pat
     assert status["date"] == target.isoformat()  # status file reflects the TARGET day
 
 
-def test_catchup_past_day_404_fails_and_forces_exit_1_while_target_still_ingests(
+def test_catchup_past_day_404_exits_0_and_writes_window_failures_marker(
     monkeypatch, tmp_path
 ):
-    """A past (non-target) day in the window that 404s must be reported as
-    'failed' (a hole, not lateness) and force the run's exit code to 1 for
-    the primary spec -- even though the target day itself succeeds and its
-    status file still shows success. This is the 'repaired-hole failure must
-    never silently pass' requirement."""
+    """G2 final-review fix (C1): a past (non-target) day in the window that
+    404s is still reported as 'failed' (a hole, not lateness) and the hole
+    stays a hole -- but it must NO LONGER force the run's exit code to 1 when
+    the TARGET day itself succeeds. A permanent past-day archive hole was
+    previously indistinguishable, at the gate level, from the TARGET day
+    itself being unhealthy -- which made data-daily.yml's un-guarded 'Ingest'
+    step fail the whole job and skip 'Decide'/'Publish' even though the
+    target was fine. The alert signal survives instead as a persisted
+    `data/meta/window_failures.json` marker (checked by a dedicated
+    after-publish workflow step), decoupled from the publish gate itself."""
     import json
 
     from pipeline import config, store
@@ -697,12 +729,167 @@ def test_catchup_past_day_404_fails_and_forces_exit_1_while_target_still_ingests
     equities = cli.datasets.DATASETS["equities"]
 
     rc = cli.main(["daily", "--date", target.isoformat()])
-    assert rc == 1  # a repaired-hole failure must never silently pass
+    assert rc == 0  # healthy target always publishes -- window failure is alert-only
     assert store.has_day(equities.base_dir, target)  # target day still ingested
     assert not store.has_day(equities.base_dir, past_day)  # the hole stays a hole
     status = json.loads((tmp_path / "last_run_status.json").read_text())
     assert status["status"] == "success"  # status FILE carries the TARGET day's status
     assert status["date"] == target.isoformat()
+
+    marker_path = tmp_path / "window_failures.json"
+    assert marker_path.exists()
+    marker = json.loads(marker_path.read_text())
+    failures = marker["failures"]
+    assert len(failures) == 1
+    assert failures[0]["dataset"] == "equities"
+    assert failures[0]["date"] == past_day.isoformat()
+    assert "archive missing" in failures[0]["message"]
+
+
+def test_daily_clean_run_writes_no_window_failures_marker(monkeypatch, tmp_path):
+    """A clean run (no window-day failures at all) must not write
+    `window_failures.json` -- the marker is a signal-when-present file, not an
+    always-written status file (contrast with last_run_status.json)."""
+    import json
+
+    from pipeline import config
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+
+    target = date(2026, 7, 6)
+    fetcher = RecordingFetcher()  # no exceptions -- every window day succeeds
+    _catchup_registry(monkeypatch, tmp_path, fetcher)
+
+    rc = cli.main(["daily", "--date", target.isoformat()])
+    assert rc == 0
+    assert not (tmp_path / "window_failures.json").exists()
+
+
+def test_daily_clean_run_removes_stale_window_failures_marker(monkeypatch, tmp_path):
+    """A clean run must not inherit yesterday's marker: a stale
+    `window_failures.json` pre-seeded from a PRIOR run (with past failures)
+    must be removed at the start of a run that has no failures of its own --
+    otherwise a resolved hole would keep re-alerting forever via a leftover
+    file nothing ever cleans up."""
+    import json
+
+    from pipeline import config
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    stale_marker = tmp_path / "window_failures.json"
+    stale_marker.write_text(json.dumps({
+        "failures": [{"dataset": "equities", "date": "2026-06-20", "message": "stale"}]
+    }))
+
+    target = date(2026, 7, 6)
+    fetcher = RecordingFetcher()  # clean run this time -- no exceptions
+    _catchup_registry(monkeypatch, tmp_path, fetcher)
+
+    rc = cli.main(["daily", "--date", target.isoformat()])
+    assert rc == 0
+    assert not stale_marker.exists()  # must not inherit the previous run's marker
+
+
+def test_daily_primary_target_failure_exits_1_even_with_window_failure_marker(
+    monkeypatch, tmp_path
+):
+    """Primary TARGET failure still exits 1 exactly as today -- decoupling
+    window-failure alerting from the publish gate must never weaken the ONE
+    signal that legitimately should still block publish: the target day
+    itself being unhealthy. This holds even when a window_failures.json
+    marker also gets written for an unrelated past-day hole in the same run."""
+    import json
+
+    from pipeline import config
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+
+    target = date(2026, 7, 6)
+    window = cal.trading_days_back(target, config.CATCHUP_WINDOW_DAYS, set())
+    past_day = window[0]
+    assert past_day != target
+
+    # target itself 404s (UnexpectedFailure, not NotYetPublished, to force a
+    # hard "failed" on the target day regardless of is_target_day handling)
+    from pipeline.errors import UnexpectedFailure
+    fetcher = RecordingFetcher(exceptions={
+        past_day: NotYetPublished("404"),
+        target: UnexpectedFailure("primary target source exploded"),
+    })
+    _catchup_registry(monkeypatch, tmp_path, fetcher)
+
+    rc = cli.main(["daily", "--date", target.isoformat()])
+    assert rc == 1  # primary TARGET failure still exits 1, unchanged
+    status = json.loads((tmp_path / "last_run_status.json").read_text())
+    assert status["status"] == "failed"
+    assert status["date"] == target.isoformat()
+    # the past-day hole is still recorded as an alert-only side channel
+    marker = json.loads((tmp_path / "window_failures.json").read_text())
+    assert any(f["date"] == past_day.isoformat() for f in marker["failures"])
+
+
+def _two_spec_catchup_registry(
+    monkeypatch, tmp_path: Path,
+    primary_fetcher: "RecordingFetcher", secondary_fetcher: "RecordingFetcher",
+):
+    """Real two-spec registry (equities=primary, indices=secondary) for
+    exercising the window/catch-up loop against BOTH specs at once, tmp-scoped
+    exactly like `_catchup_registry` but with independent fetchers per spec so
+    a secondary-only window failure can be produced without touching the
+    primary's own fetch results."""
+    def _make_primary():
+        return primary_fetcher
+
+    def _make_secondary():
+        return secondary_fetcher
+
+    equities = dataclasses.replace(
+        datasets.EQUITIES, base_dir=tmp_path / "ohlc",
+        abs_rowcount_range=(0, 10**9), make_fetcher=_make_primary,
+    )
+    indices = dataclasses.replace(
+        datasets.INDICES, base_dir=tmp_path / "indices",
+        abs_rowcount_range=(0, 10**9), make_fetcher=_make_secondary,
+    )
+    monkeypatch.setattr(cli.datasets, "DATASETS", {"equities": equities, "indices": indices})
+    monkeypatch.setattr(cli.datasets, "DATASET_ORDER", ["equities", "indices"])
+
+
+def test_daily_secondary_window_failure_exits_0_and_writes_marker(monkeypatch, tmp_path):
+    """A window (non-target-day) failure in the SECONDARY dataset's own
+    catch-up loop -- not just the primary's -- must also (a) never affect the
+    exit code when the primary target is healthy, and (b) still be persisted
+    to window_failures.json so it isn't silently dropped. Window failures are
+    alert-worthy for BOTH primary and secondary datasets per the fix spec."""
+    import json
+
+    from pipeline import config
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+
+    target = date(2026, 7, 6)
+    window = cal.trading_days_back(target, config.CATCHUP_WINDOW_DAYS, set())
+    past_day = window[0]
+    assert past_day != target
+
+    primary_fetcher = RecordingFetcher()  # equities: fully clean
+    secondary_fetcher = RecordingFetcher(
+        exceptions={past_day: NotYetPublished("404")},
+        raw_fn=_one_day_indices_raw, source="nse-indices",
+    )
+    _two_spec_catchup_registry(monkeypatch, tmp_path, primary_fetcher, secondary_fetcher)
+
+    rc = cli.main(["daily", "--date", target.isoformat()])
+    assert rc == 0  # secondary window failure never blocks publish when primary is healthy
+    marker = json.loads((tmp_path / "window_failures.json").read_text())
+    failures = marker["failures"]
+    assert len(failures) == 1
+    assert failures[0]["dataset"] == "indices"
+    assert failures[0]["date"] == past_day.isoformat()
 
 
 def test_catchup_past_day_failure_is_printed(monkeypatch, tmp_path, capsys):

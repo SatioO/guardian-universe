@@ -104,6 +104,18 @@ publish-blocking signal; secondary-dataset failures surface as a failed CI
 step (visible, actionable) without stopping equities publishing. Revisit this
 if/when a secondary dataset's freshness becomes equally publish-critical.
 
+**`window_failures.json` marker (G2 final-review fix, C1):** a THIRD signal,
+alongside `last_run_status.json` (target-day health, publish-gating) and
+`last_run_status_<key>.json` (per-secondary-dataset target-day health,
+CI-step-red-but-non-blocking). `data/meta/window_failures.json` carries
+non-target catch-up-window failures (primary or secondary dataset), written
+only when at least one occurred, and is explicitly NOT publish-gating and
+NOT part of `main()`'s return code at all — it is a pure alert-only side
+channel, checked exclusively by `data-daily.yml`'s dedicated post-publish
+"Surface window (catch-up) failures" step. A healthy target day always
+publishes now regardless of this file's presence; see "G2: catch-up loop"
+above for the full rationale and the incident this fixes.
+
 ### Manifest v2 shape
 `manifest.json` (`manifest_version: 2`) has one entry per published dataset:
 ```json
@@ -311,15 +323,41 @@ not that the day is running late. This is why `run_daily` takes an
 window day): a past-day `NotYetPublished` maps to `"failed"` with a message
 like `"archive missing for past trading day 2026-07-01"`, never `"not_yet"`.
 
-**A repaired-hole failure is never silent.** The dataset's own status (what
-gets written to `last_run_status.json` / `last_run_status_<key>.json`, and
-what Phase 2's derived builders key off) is always the **target day's**
-status — catch-up days are a side effect, not what's reported as "the run."
-But if a non-target day in the window comes back `"failed"`, it's printed
-explicitly (`catch-up: <key> <date> failed: <message>`, stderr) and, for the
-**primary** dataset specifically, it forces `daily`'s overall exit code to 1
-— even when the target day itself succeeded. A hole that failed to repair
-must never look like a clean run just because today's ingest was fine.
+**A repaired-hole failure is never silent — but it no longer blocks publish
+either (G2 final-review fix, C1).** The dataset's own status (what gets
+written to `last_run_status.json` / `last_run_status_<key>.json`, and what
+Phase 2's derived builders key off) is always the **target day's** status —
+catch-up days are a side effect, not what's reported as "the run." If a
+non-target day in the window comes back `"failed"` (primary OR secondary
+dataset), it's printed explicitly (`catch-up: <key> <date> failed: <message>`,
+stderr) AND persisted to `data/meta/window_failures.json` (shape:
+`{"failures": [{"dataset": ..., "date": ..., "message": ...}, ...]}`,
+written only when at least one window failure occurred; removed
+unconditionally at the start of every `daily` run so a clean run never
+inherits a stale marker from a prior one).
+
+Critically, **window failures (primary or secondary) no longer affect
+`daily`'s own exit code at all** — only the TARGET day's own primary status
+does (unchanged: primary target unhealthy still exits 1). Before this fix, a
+primary-dataset window failure forced exit 1 even when the target day
+succeeded; combined with `data-daily.yml`'s un-guarded "Ingest" step (no
+`if:` condition), a non-zero `daily` exit failed the whole CI job, which made
+GitHub Actions **skip** the downstream "Decide"/"Publish" steps entirely —
+so a single permanent past-day archive hole silently froze publishing
+indefinitely (the pipeline kept reporting the target healthy in its logs,
+but nothing new ever actually reached the release) even though the target
+day itself was fine every single night. The fix decouples the two signals:
+`daily` now exits 0 whenever the target succeeds, regardless of window
+failures, so `data-daily.yml`'s "Publish" step always runs for a healthy
+target; a separate "Surface window (catch-up) failures" step (added AFTER
+"Publish the updated dataset", mirroring "Surface secondary-dataset
+failures"'s shape) checks for `window_failures.json` post-publish and reds
+the job (`::error::` per entry, then exit 1, firing "Alert on failure") if
+it's present — so the alert still fires, just after publish has already
+completed instead of blocking it. `window_failures.json` is a
+runner-local signal for that one workflow step; it is deliberately never
+uploaded as a publish/release artifact (out of scope for this fix — keep it
+minimal).
 
 **Holes older than the window.** The catch-up loop only looks back 7 trading
 days from the target — inclusive: the target day itself counts as one of
