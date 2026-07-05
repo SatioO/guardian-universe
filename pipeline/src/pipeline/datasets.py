@@ -43,3 +43,7 @@ def by_manifest_name(name: str) -> DatasetSpec | None:
         if spec.manifest_name == name:
             return spec
     return None
+
+
+def all_specs() -> list[DatasetSpec]:
+    return [DATASETS[k] for k in DATASET_ORDER]

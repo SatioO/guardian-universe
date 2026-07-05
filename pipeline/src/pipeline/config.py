@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+MANIFEST_VERSION = 2
+MIN_CLIENT_VERSION = "0.1.0"
 
 # Canonical long-format columns, in exact order.
 CANON_COLUMNS: list[str] = [

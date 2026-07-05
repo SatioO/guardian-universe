@@ -7,7 +7,7 @@ import pytest
 
 from pipeline import config
 from pipeline.errors import ReleaseError, UnexpectedFailure
-from pipeline.manifest import write_json
+from pipeline.manifest import dataset_files, write_json
 from pipeline.publish import (
     check_cas,
     check_no_shrink,
@@ -44,7 +44,7 @@ def test_first_publish_creates_release_flips_manifest_last(tmp_path: Path):
                     schema_version=1, generated_at="2026-07-05T16:00:00+00:00", now=NOW)
     assert_release_consistent(fake)
     live = json.loads(fake.assets["manifest.json"])
-    entry = live["datasets"][0]["files"][0]
+    entry = dataset_files(live["datasets"][0])[0]
     assert entry["asset"].startswith("ohlc_2026.") and entry["asset"] != "ohlc_2026.parquet"
 
 

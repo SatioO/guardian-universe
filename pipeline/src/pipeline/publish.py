@@ -6,6 +6,7 @@ are immutable (content-addressed, never clobbered); `manifest.json` is the
 single mutable pointer and is uploaded strictly last."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import shutil
 import sys
@@ -15,8 +16,9 @@ from typing import Any
 
 import pandas as pd
 
+from pipeline import datasets
 from pipeline.errors import ReleaseError, UnexpectedFailure
-from pipeline.manifest import build_manifest, file_digest, write_json
+from pipeline.manifest import build_manifest, dataset_files, file_digest, write_json
 from pipeline.release import ReleaseClient
 from pipeline.sync import SYNCED_STATE
 
@@ -48,8 +50,8 @@ def check_cas(live: dict[str, Any] | None, synced: dict[str, Any]) -> None:
 def check_no_shrink(new: dict[str, Any], live: dict[str, Any] | None) -> None:
     if live is None:
         return
-    new_files = {f["name"]: f for f in new["datasets"][0]["files"]}
-    for lf in live["datasets"][0]["files"]:
+    new_files = {f["name"]: f for f in dataset_files(new["datasets"][0])}
+    for lf in dataset_files(live["datasets"][0]):
         nf = new_files.get(lf["name"])
         if nf is None:
             raise UnexpectedFailure(
@@ -99,7 +101,7 @@ def _verify(client: ReleaseClient, new_manifest: dict[str, Any], work: Path) -> 
         raise UnexpectedFailure(
             "post-publish verification failed: live manifest is not the one just published"
         )
-    files = [e for ds in new_manifest["datasets"] for e in ds["files"]]
+    files = [e for ds in new_manifest["datasets"] for e in dataset_files(ds)]
     smallest = min(files, key=lambda e: int(e["bytes"]))
     client.download([smallest["asset"]], work)
     sha, _ = file_digest(work / smallest["asset"])
@@ -119,7 +121,11 @@ def _gc(client: ReleaseClient, new_manifest: dict[str, Any], now: datetime) -> N
     still runs.
     """
     try:
-        referenced = {e["asset"] for ds in new_manifest["datasets"] for e in ds["files"]}
+        referenced = {
+            e["asset"]
+            for ds in new_manifest["datasets"]
+            for e in [*dataset_files(ds), *ds.get("deltas", [])]
+        }
         for a in client.list_assets():
             if a.name in referenced or a.name in PROTECTED_ASSETS:
                 continue
@@ -155,9 +161,16 @@ def publish_dataset(
     data_files = sorted(ohlc_dir.glob("ohlc_*.parquet"))
     if not data_files:
         raise UnexpectedFailure("refusing to publish: no data files (empty store)")
+    del schema_version  # superseded by per-dataset spec.schema_version (Task 8 removes this param)
+    # publish_dataset takes a single ohlc_dir today (pre-Task-8 signature); point
+    # the equities spec at it so build_manifest reads from the caller's store
+    # rather than the fixed config.OHLC_DIR. Task 8 threads real per-dataset dirs.
+    specs = [
+        dataclasses.replace(spec, base_dir=ohlc_dir) if spec.key == "equities" else spec
+        for spec in datasets.all_specs()
+    ]
     new_manifest = build_manifest(
-        ohlc_dir, schema_version=schema_version,
-        latest_trading_date=latest_trading_date(ohlc_dir), generated_at=generated_at,
+        specs, latest_trading_date=latest_trading_date(ohlc_dir), generated_at=generated_at,
     )
 
     if not client.exists():
@@ -177,12 +190,13 @@ def publish_dataset(
 
     # Upload new content-addressed data assets (immutable: no clobber).
     by_name = {p.name: p for p in data_files}
-    for entry in new_manifest["datasets"][0]["files"]:
-        if entry["asset"] in existing:
-            continue
-        staged = stage_dir / entry["asset"]
-        shutil.copyfile(by_name[entry["name"]], staged)
-        client.upload(staged)
+    for ds in new_manifest["datasets"]:
+        for entry in dataset_files(ds):
+            if entry["asset"] in existing:
+                continue
+            staged = stage_dir / entry["asset"]
+            shutil.copyfile(by_name[entry["name"]], staged)
+            client.upload(staged)
 
     status_path = meta_dir / "last_run_status.json"
     if status_path.exists():

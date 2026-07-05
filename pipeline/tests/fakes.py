@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from pipeline.errors import ReleaseError
+from pipeline.manifest import dataset_files
 from pipeline.release import AssetInfo
 
 
@@ -69,12 +70,13 @@ class FakeReleaseClient:
 
 def assert_release_consistent(fake: FakeReleaseClient) -> None:
     """The G0 invariant: whatever manifest is live, every file it references
-    exists on the release with a matching sha256."""
+    (baseline/files, v1 or v2, plus any v2 deltas) exists on the release with
+    a matching sha256."""
     if "manifest.json" not in fake.assets:
         return
-    manifest = json.loads(fake.assets["manifest.json"])
-    for ds in manifest["datasets"]:
-        for entry in ds["files"]:
+    manifest_obj = json.loads(fake.assets["manifest.json"])
+    for ds in manifest_obj["datasets"]:
+        for entry in [*dataset_files(ds), *ds.get("deltas", [])]:
             asset = entry.get("asset", entry["name"])
             assert asset in fake.assets, f"manifest references missing asset {asset}"
             sha = hashlib.sha256(fake.assets[asset]).hexdigest()
