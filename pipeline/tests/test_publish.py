@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from pipeline import config
-from pipeline.errors import UnexpectedFailure
+from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.manifest import write_json
 from pipeline.publish import (
     check_cas,
@@ -162,6 +162,62 @@ def test_post_publish_verify_detects_manifest_tamper(tmp_path: Path, monkeypatch
     with pytest.raises(UnexpectedFailure, match="verification"):
         publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
                         schema_version=1, generated_at="gen-1", now=NOW)
+
+
+def test_gc_list_assets_failure_does_not_fail_publish(tmp_path: Path, monkeypatch):
+    # Day 1 baseline publish, succeeds normally.
+    ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
+    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
+                    schema_version=1, generated_at="gen-1", now=NOW)
+
+    # Day 2: re-sync to match live, then make list_assets raise ONLY on the
+    # GC-internal call (the second call during the publish run) so the flip
+    # still succeeds but GC's listing is transiently unavailable.
+    _synced(meta, "gen-1")
+    real_list_assets = fake.list_assets
+    calls = {"n": 0}
+
+    def flaky_list_assets():
+        calls["n"] += 1
+        if calls["n"] == 2:  # the GC call
+            raise ReleaseError("transient listing failure")
+        return real_list_assets()
+
+    monkeypatch.setattr(fake, "list_assets", flaky_list_assets)
+
+    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
+                    schema_version=1, generated_at="gen-2", now=NOW)
+
+    live = json.loads(fake.assets["manifest.json"])
+    assert live["generated_at"] == "gen-2"
+    synced = json.loads((meta / SYNCED_STATE).read_text())
+    assert synced["generated_at"] == "gen-2"
+
+
+def test_manifest_upload_is_always_last(tmp_path: Path, monkeypatch):
+    ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
+
+    uploads: list[str] = []
+    real_upload = fake.upload
+
+    def recording_upload(path: Path, *, clobber: bool = False) -> None:
+        uploads.append(path.name)
+        real_upload(path, clobber=clobber)
+
+    monkeypatch.setattr(fake, "upload", recording_upload)
+
+    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
+                    schema_version=1, generated_at="gen-1", now=NOW)
+
+    assert uploads[-1] == "manifest.json"
+    manifest_index = uploads.index("manifest.json")
+    data_asset_indices = [i for i, name in enumerate(uploads) if name != "manifest.json"]
+    assert data_asset_indices, "expected at least one data-asset upload"
+    assert all(i < manifest_index for i in data_asset_indices)
 
 
 def test_latest_trading_date_raises_on_empty_store(tmp_path: Path):

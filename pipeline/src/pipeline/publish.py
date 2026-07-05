@@ -75,6 +75,15 @@ def _read_live_manifest(client: ReleaseClient, work: Path) -> dict[str, Any] | N
 
 
 def _verify(client: ReleaseClient, new_manifest: dict[str, Any], work: Path) -> None:
+    """Post-flip verification: confirm the live manifest and its smallest
+    referenced asset match what we just published.
+
+    Posture — detect, do not restore: verification failure after the flip
+    does NOT roll back. The run fails loudly (alert), the previous
+    manifest's assets are still present (GC runs only after a successful
+    verify), and the remediation is to re-run sync -> daily -> publish.
+    Detection happens here; restoration happens via re-run.
+    """
     client.download(["manifest.json"], work)
     live = json.loads((work / "manifest.json").read_text())
     if live != new_manifest:
@@ -92,17 +101,28 @@ def _verify(client: ReleaseClient, new_manifest: dict[str, Any], work: Path) -> 
 
 
 def _gc(client: ReleaseClient, new_manifest: dict[str, Any], now: datetime) -> None:
-    referenced = {e["asset"] for ds in new_manifest["datasets"] for e in ds["files"]}
-    for a in client.list_assets():
-        if a.name in referenced or a.name in PROTECTED_ASSETS:
-            continue
-        created = datetime.fromisoformat(a.created_at.replace("Z", "+00:00"))
-        if now - created < GC_GRACE:
-            continue
-        try:
-            client.delete_asset(a.name)
-        except ReleaseError as e:  # GC must never fail a good publish
-            print(f"gc: could not delete {a.name}: {e}", file=sys.stderr)
+    """Best-effort garbage collection of unreferenced, aged-out assets.
+
+    GC must NEVER fail a publish whose manifest flip already succeeded: the
+    entire body (including the initial listing) is guarded against
+    ReleaseError. Any failure here is logged to stderr and swallowed; `_gc`
+    always returns normally so step 12 (updating the synced-state baseline)
+    still runs.
+    """
+    try:
+        referenced = {e["asset"] for ds in new_manifest["datasets"] for e in ds["files"]}
+        for a in client.list_assets():
+            if a.name in referenced or a.name in PROTECTED_ASSETS:
+                continue
+            created = datetime.fromisoformat(a.created_at.replace("Z", "+00:00"))
+            if now - created < GC_GRACE:
+                continue
+            try:
+                client.delete_asset(a.name)
+            except ReleaseError as e:  # GC must never fail a good publish
+                print(f"gc: could not delete {a.name}: {e}", file=sys.stderr)
+    except ReleaseError as e:  # e.g. list_assets() itself failed transiently
+        print(f"gc: skipped ({e})", file=sys.stderr)
 
 
 def publish_dataset(
