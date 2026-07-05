@@ -70,3 +70,33 @@ def test_trailing_window_when_prior_year_file_absent(tmp_path: Path):
     append_day(_day("2025-12-31", 100, "K1"), tmp_path)
     out = read_trailing_window(tmp_path, date(2025, 12, 31), 2)
     assert list(out["close"]) == [100.0]
+
+
+def test_append_day_is_atomic_on_write_crash(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import pytest
+
+    def frame(day: str) -> pd.DataFrame:
+        row = {c: ["x"] for c in config.CANON_COLUMNS}
+        df = pd.DataFrame(row)
+        df["date"] = pd.to_datetime([day])
+        df["instrument_key"] = ["INE1"]
+        return df
+
+    append_day(frame("2026-07-02"), tmp_path)
+    good = config.ohlc_path(2026, tmp_path).read_bytes()
+
+    original = pd.DataFrame.to_parquet
+
+    def boom(self, path, *a, **kw):  # crash mid-write: leave a torn tmp file
+        Path(str(path)).write_bytes(b"torn")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", boom)
+    with pytest.raises(OSError):
+        append_day(frame("2026-07-03"), tmp_path)
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", original)
+
+    # The published year file is untouched by the crashed write.
+    assert config.ohlc_path(2026, tmp_path).read_bytes() == good

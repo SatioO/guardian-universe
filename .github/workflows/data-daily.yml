@@ -36,16 +36,25 @@ jobs:
           cache: pip
       - name: Install
         run: pip install -e ".[dev]"
-      - name: Sync baseline from the data-latest release
+      - name: Sync baseline from the data-latest release (fail-closed)
         run: python -m pipeline sync
       - name: Ingest the trading day (today, or the dispatch date)
+        env:
+          DISPATCH_DATE: ${{ github.event.inputs.date }}
         run: |
-          if [ -n "${{ github.event.inputs.date }}" ]; then
-            python -m pipeline daily --date "${{ github.event.inputs.date }}"
+          if [ -n "$DISPATCH_DATE" ]; then
+            python -m pipeline daily --date "$DISPATCH_DATE"
           else
             python -m pipeline daily
           fi
+      - name: Decide whether to publish
+        id: decide
+        run: |
+          status=$(jq -r '.status // "missing"' data/meta/last_run_status.json)
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "Ingest status: $status"
       - name: Publish the updated dataset
+        if: steps.decide.outputs.status == 'success'
         run: python -m pipeline publish
       - name: Alert on failure
         if: failure()

@@ -12,3 +12,7 @@ class NotYetPublished(PipelineError):
 
 class UnexpectedFailure(PipelineError):
     """An unexpected failure (format break, blocked, exhausted fallbacks)."""
+
+
+class ReleaseError(PipelineError):
+    """A GitHub Release operation failed (network, auth, missing asset)."""
