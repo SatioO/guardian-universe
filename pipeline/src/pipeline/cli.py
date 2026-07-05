@@ -48,6 +48,7 @@ def cmd_check_freshness(
     today: date,
     runner: Runner,
     work_dir: Path,
+    special_sessions: set[date] | None = None,
 ) -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
     rc = runner(["gh", "release", "download", tag, "--repo", repo,
@@ -56,26 +57,31 @@ def cmd_check_freshness(
     if rc != 0 or not manifest_path.exists():
         return 1  # no release / download failed -> stale
     latest = date.fromisoformat(json.loads(manifest_path.read_text())["latest_trading_date"])
-    return 1 if freshness.is_stale(latest, today, holidays) else 0
+    return 1 if freshness.is_stale(latest, today, holidays, special_sessions) else 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.cmd == "daily":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
+        special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
         fetcher = NseUdiffFetcher()
         target = date.fromisoformat(args.date) if args.date else datetime.now(UTC).date()
-        st = run_daily(datasets.EQUITIES, target, fetcher=fetcher, holidays=holidays)
+        st = run_daily(
+            datasets.EQUITIES, target, fetcher=fetcher, holidays=holidays,
+            special_sessions=special,
+        )
         manifest.write_status(st, config.META_DIR)
         print(manifest.status_to_dict(st))
         return 0 if st.status in ("success", "skipped_holiday", "skipped_idempotent",
                                   "not_yet") else 1
     if args.cmd == "backfill":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
+        special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
         fetcher = NseUdiffFetcher()
         results = backfill_mod.backfill(
             datasets.EQUITIES, datetime.now(UTC).date(), args.days,
-            fetcher=fetcher, holidays=holidays,
+            fetcher=fetcher, holidays=holidays, special_sessions=special,
         )
         return 0 if all(
             r.status in ("success", "skipped_holiday", "skipped_idempotent", "not_yet")
@@ -93,11 +99,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "check-freshness":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
+        special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
         with tempfile.TemporaryDirectory() as tmp:
             return cmd_check_freshness(
                 repo=config.GITHUB_REPO, tag=config.RELEASE_TAG, holidays=holidays,
                 today=datetime.now(UTC).date(), runner=_plain_runner,
-                work_dir=Path(tmp),
+                work_dir=Path(tmp), special_sessions=special,
             )
     # publish
     client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)

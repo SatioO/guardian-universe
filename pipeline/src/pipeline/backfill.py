@@ -18,13 +18,18 @@ def backfill(
     *,
     fetcher: Fetcher,
     holidays: set[date],
+    special_sessions: set[date] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     delay_s: float = 1.0,
 ) -> list[RunStatus]:
-    dates = cal.trading_days_back(end, n, holidays)
+    dates = cal.trading_days_back(end, n, holidays, special_sessions)
     results: list[RunStatus] = []
     for i, d in enumerate(dates):
-        results.append(run_daily(spec, d, fetcher=fetcher, holidays=holidays))
+        results.append(
+            run_daily(
+                spec, d, fetcher=fetcher, holidays=holidays, special_sessions=special_sessions
+            )
+        )
         if i < len(dates) - 1:
             sleep(delay_s)  # polite delay: NSE burst-blocks rapid archive requests
     return results

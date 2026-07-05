@@ -33,8 +33,9 @@ def run_daily(
     *,
     fetcher: Fetcher,
     holidays: set[date],
+    special_sessions: set[date] | None = None,
 ) -> RunStatus:
-    if not cal.is_trading_day(target, holidays):
+    if not cal.is_trading_day(target, holidays, special_sessions=special_sessions):
         return RunStatus("skipped_holiday", target, message="non-trading day")
 
     if store.has_day(spec.base_dir, target, prefix=spec.file_prefix):
@@ -53,7 +54,7 @@ def run_daily(
     # OSError, ...) all map to a "failed" status so the scheduler never crashes.
     try:
         df = spec.normalizer(raw)
-        trailing = _trailing_counts(spec, target, holidays)
+        trailing = _trailing_counts(spec, target, holidays, special_sessions)
         # NOTE: the deviation gate compares today's PRE-quarantine row count
         # against the POST-quarantine counts of stored days; the difference is
         # negligible in steady state (few rows are ever quarantined).
@@ -82,10 +83,15 @@ def run_daily(
         return RunStatus("failed", target, message=f"unexpected pipeline error: {e}")
 
 
-def _trailing_counts(spec: DatasetSpec, target: date, holidays: set[date]) -> list[int]:
+def _trailing_counts(
+    spec: DatasetSpec,
+    target: date,
+    holidays: set[date],
+    special_sessions: set[date] | None = None,
+) -> list[int]:
     counts: list[int] = []
-    prev = cal.previous_trading_day(target, holidays)
-    for d in cal.trading_days_back(prev, _TRAILING_DAYS, holidays):
+    prev = cal.previous_trading_day(target, holidays, special_sessions)
+    for d in cal.trading_days_back(prev, _TRAILING_DAYS, holidays, special_sessions):
         if store.has_day(spec.base_dir, d, prefix=spec.file_prefix):
             counts.append(store.day_symbol_count(spec.base_dir, d, prefix=spec.file_prefix))
     return counts
