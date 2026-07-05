@@ -69,3 +69,9 @@ def test_quarantine_handles_empty_frame():
     clean, bad = quarantine_bad_rows(empty)
     assert len(clean) == 0
     assert len(bad) == 0
+
+
+def test_check_rowcount_custom_abs_range():
+    check_rowcount(120, [], abs_range=(50, 500))  # accepted
+    with pytest.raises(UnexpectedFailure, match="absolute range"):
+        check_rowcount(20, [], abs_range=(50, 500))
