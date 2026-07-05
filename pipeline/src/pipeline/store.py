@@ -22,7 +22,20 @@ class ReadCache:
     through every call, so each year-file is read from disk once per
     *version* of that file rather than once per read call. `append_keyed`
     invalidates the entry for whatever (base, year, prefix) it just wrote,
-    so a cached reader can never observe stale data within the same run."""
+    so a cached reader can never observe stale data within the same run.
+
+    Safety contract: a shared cache is only correct when EVERY writer that
+    touches a given (base, year, prefix) also threads that same `cache=`
+    through its `append_keyed` call -- an external, UNCACHED writer to that
+    same key, while the cache still holds a populated entry for it, will
+    cause the cache to serve stale data on the next hit, since nothing
+    invalidates an entry the cache itself didn't observe being written.
+    Today this is safe by construction: the only uncached `append_keyed`
+    caller is `builders.build_ca_flags`, which writes to `CA_FLAGS_DIR` --
+    a prefix/base disjoint from anything a run_daily/backfill cache ever
+    touches. But the type system does not enforce this disjointness, so any
+    future caller sharing a cache across code paths must thread that same
+    cache through every writer of the same key, not just its own reads."""
 
     def __init__(self) -> None:
         self._data: dict[tuple[str, int, str], pd.DataFrame] = {}
