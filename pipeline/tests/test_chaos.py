@@ -26,36 +26,55 @@ from tests.fakes import FakeReleaseClient, assert_release_consistent
 NOW = datetime(2026, 7, 5, 16, 0, tzinfo=UTC)
 
 
-def specs_for(base: Path) -> list[datasets.DatasetSpec]:
-    return [dataclasses.replace(datasets.EQUITIES, base_dir=base)]
+def specs_for(base: Path, indices_base: Path | None = None) -> list[datasets.DatasetSpec]:
+    """Two-dataset registry for the chaos sweep: equities (primary) + indices
+    (secondary), so the kill-at-every-op loop traverses a genuinely
+    multi-dataset publish. indices_base defaults alongside base for callers
+    that only care about the single-spec shape."""
+    specs = [dataclasses.replace(datasets.EQUITIES, base_dir=base)]
+    if indices_base is not None:
+        specs.append(dataclasses.replace(datasets.INDICES, base_dir=indices_base))
+    return specs
 
 
-def _write_store(ohlc: Path, days: list[str]) -> None:
-    ohlc.mkdir(parents=True, exist_ok=True)
+def _write_store(base: Path, days: list[str], *, prefix: str = "ohlc") -> None:
+    base.mkdir(parents=True, exist_ok=True)
     rows = {c: ["x"] * len(days) for c in config.CANON_COLUMNS}
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(days)
     df["instrument_key"] = [f"INE{i}" for i in range(len(days))]
-    df.to_parquet(ohlc / "ohlc_2026.parquet", compression="zstd", index=False)
+    df.to_parquet(base / f"{prefix}_2026.parquet", compression="zstd", index=False)
 
 
-def _published_fixture(tmp_path: Path) -> tuple[FakeReleaseClient, Path, Path, Path]:
-    """A release with one good day published (plus one delta day, so the
-    chaos loop's kill-at-every-op sweep also exercises delta uploads), synced
-    state in agreement."""
-    ohlc, meta, stage = tmp_path / "ohlc", tmp_path / "meta", tmp_path / "stage"
+def _published_fixture(
+    tmp_path: Path,
+) -> tuple[FakeReleaseClient, Path, Path, Path, Path]:
+    """A release with one good day published for each of two datasets
+    (equities + indices), each with one baseline file + one delta, so the
+    chaos loop's kill-at-every-op sweep traverses a genuinely multi-dataset
+    publish; synced state in agreement."""
+    ohlc, idx, meta, stage = (
+        tmp_path / "ohlc", tmp_path / "indices", tmp_path / "meta", tmp_path / "stage"
+    )
     meta.mkdir(parents=True, exist_ok=True)
     _write_store(ohlc, ["2026-07-02"])
     day = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
     day["date"] = pd.to_datetime(["2026-07-02"])
     day["instrument_key"] = ["INE0"]
     store.write_delta(day, ohlc, date(2026, 7, 2))
+
+    _write_store(idx, ["2026-07-02"], prefix="indices")
+    idx_day = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+    idx_day["date"] = pd.to_datetime(["2026-07-02"])
+    idx_day["instrument_key"] = ["IDX:NIFTY0"]
+    store.write_delta(idx_day, idx, date(2026, 7, 2), prefix="indices")
+
     write_json({"generated_at": None}, meta / SYNCED_STATE)
     fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T15:00:00Z")
-    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+    publish_dataset(specs=specs_for(ohlc, idx), meta_dir=meta, stage_dir=stage, client=fake,
                     generated_at="gen-1", now=NOW)
     assert_release_consistent(fake)
-    return fake, ohlc, meta, stage
+    return fake, ohlc, idx, meta, stage
 
 
 def test_publish_killed_after_every_op_never_tears_the_release(tmp_path: Path):
@@ -65,17 +84,24 @@ def test_publish_killed_after_every_op_never_tears_the_release(tmp_path: Path):
     k = 0
     while True:
         k += 1
-        fake, ohlc, meta, stage = _published_fixture(tmp_path / f"run{k}")
+        fake, ohlc, idx, meta, stage = _published_fixture(tmp_path / f"run{k}")
         _write_store(ohlc, ["2026-07-02", "2026-07-03"])  # day-2 grows the store
         day2 = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
         day2["date"] = pd.to_datetime(["2026-07-03"])
         day2["instrument_key"] = ["INE1"]
         store.write_delta(day2, ohlc, date(2026, 7, 3))  # day-2 also uploads a delta
+
+        _write_store(idx, ["2026-07-02", "2026-07-03"], prefix="indices")
+        idx_day2 = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+        idx_day2["date"] = pd.to_datetime(["2026-07-03"])
+        idx_day2["instrument_key"] = ["IDX:NIFTY1"]
+        store.write_delta(idx_day2, idx, date(2026, 7, 3), prefix="indices")
+
         fake.ops = 0
         fake.fail_after = k
         try:
-            publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
-                        generated_at="gen-2", now=NOW)
+            publish_dataset(specs=specs_for(ohlc, idx), meta_dir=meta, stage_dir=stage,
+                        client=fake, generated_at="gen-2", now=NOW)
             # publish can now complete successfully even with a late-op
             # injection: _gc is fully non-fatal on ReleaseError (including
             # its internal list_assets), so a failure injected deep enough
@@ -96,7 +122,7 @@ def test_publish_killed_after_every_op_never_tears_the_release(tmp_path: Path):
 
 
 def test_interrupted_publish_leaves_old_manifest_serving_old_data(tmp_path: Path):
-    fake, ohlc, meta, stage = _published_fixture(tmp_path)
+    fake, ohlc, _idx, meta, stage = _published_fixture(tmp_path)
     old_manifest = json.loads(fake.assets["manifest.json"].decode())
     _write_store(ohlc, ["2026-07-02", "2026-07-03"])
     day2 = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
@@ -115,7 +141,7 @@ def test_interrupted_publish_leaves_old_manifest_serving_old_data(tmp_path: Path
 
 def test_failed_sync_then_publish_cannot_wipe_history(tmp_path: Path):
     """The exact P0-1 scenario, end to end."""
-    fake, ohlc, meta, stage = _published_fixture(tmp_path)
+    fake, ohlc, _idx, meta, stage = _published_fixture(tmp_path)
 
     # Fresh runner: empty local store, sync fails transiently.
     runner2 = tmp_path / "runner2"
@@ -139,7 +165,7 @@ def test_failed_sync_then_publish_cannot_wipe_history(tmp_path: Path):
 
 
 def test_concurrent_publisher_is_detected_by_cas(tmp_path: Path):
-    fake, ohlc, meta, stage = _published_fixture(tmp_path)
+    fake, ohlc, _idx, meta, stage = _published_fixture(tmp_path)
     _write_store(ohlc, ["2026-07-02", "2026-07-03"])
 
     # Simulate another publisher flipping the manifest after our sync:
@@ -232,7 +258,7 @@ def test_probe_malformed_created_at_is_skipped_by_gc_not_fatal(tmp_path: Path):
 
     Fix: treat an unparseable created_at as "too young to GC" (skip, warn on
     stderr) via a narrow ValueError catch around just the parse."""
-    fake, ohlc, meta, stage = _published_fixture(tmp_path)
+    fake, ohlc, idx, meta, stage = _published_fixture(tmp_path)
 
     # A stray, unreferenced asset with a malformed timestamp.
     fake.seed("stray.parquet", b"stray-bytes", created_at="not-a-timestamp")
@@ -241,7 +267,7 @@ def test_probe_malformed_created_at_is_skipped_by_gc_not_fatal(tmp_path: Path):
     write_json({"generated_at": "gen-1"}, meta / SYNCED_STATE)
 
     # Must not raise -- GC must treat the bad timestamp as non-fatal.
-    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+    publish_dataset(specs=specs_for(ohlc, idx), meta_dir=meta, stage_dir=stage, client=fake,
                         generated_at="gen-2", now=NOW)
 
     assert "stray.parquet" in fake.assets  # spared, not GC'd, not fatal

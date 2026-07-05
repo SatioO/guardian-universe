@@ -196,3 +196,53 @@ def test_sync_manifest_missing_required_key_fails_closed(tmp_path: Path, routed_
     fake.seed("ohlc_2026.parquet", data)
     with pytest.raises(UnexpectedFailure):
         sync_store(fake, meta_dir=tmp_path / "meta", work_dir=tmp_path / "work")
+
+
+def test_two_dataset_failure_rolls_back_everything(tmp_path: Path, monkeypatch):
+    # Whole-manifest atomicity spans datasets, not just files within one
+    # dataset: registry monkeypatched to two specs (equities + indices, tmp
+    # base dirs); the manifest lists both. The SECOND dataset's asset is
+    # corrupt on the release -- sync must raise UnexpectedFailure AND the
+    # FIRST dataset's file must NOT be materialized (phase 1 verifies
+    # everything before phase 2 touches any base_dir).
+    equities_spec = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
+    indices_spec = dataclasses.replace(datasets.INDICES, base_dir=tmp_path / "indices")
+    monkeypatch.setattr(
+        datasets, "DATASETS", {"equities": equities_spec, "indices": indices_spec}
+    )
+    monkeypatch.setattr(datasets, "DATASET_ORDER", ["equities", "indices"])
+
+    good_data = b"GOODOHLCDATA"
+    good_sha = hashlib.sha256(good_data).hexdigest()
+    bad_data = b"CORRUPTED-ON-RELEASE"
+    correct_bad_sha = hashlib.sha256(b"REAL-INDICES-DATA").hexdigest()
+
+    manifest = {
+        "manifest_version": 2, "generated_at": "g", "latest_trading_date": "2026-07-03",
+        "datasets": [
+            {"name": "ohlc", "baseline": [{
+                "name": "ohlc_2026.parquet",
+                "asset": asset_name("ohlc_2026.parquet", good_sha),
+                "sha256": good_sha, "bytes": len(good_data), "rows": 1,
+            }], "deltas": []},
+            {"name": "indices", "baseline": [{
+                "name": "indices_2026.parquet",
+                "asset": asset_name("indices_2026.parquet", correct_bad_sha),
+                "sha256": correct_bad_sha, "bytes": len(bad_data), "rows": 1,
+            }], "deltas": []},
+        ],
+    }
+    fake = FakeReleaseClient(exists=True)
+    fake.seed("manifest.json", json.dumps(manifest).encode())
+    fake.seed(asset_name("ohlc_2026.parquet", good_sha), good_data)
+    # Seed corrupted bytes under the expected asset name for indices -- sha
+    # won't match what the manifest claims.
+    fake.seed(asset_name("indices_2026.parquet", correct_bad_sha), bad_data)
+
+    with pytest.raises(UnexpectedFailure):
+        sync_store(fake, meta_dir=tmp_path / "meta", work_dir=tmp_path / "work")
+
+    # Whole-manifest atomicity: the FIRST dataset's (equities) file must NOT
+    # have been materialized even though it verified fine on its own.
+    assert not equities_spec.base_dir.exists()
+    assert not indices_spec.base_dir.exists()

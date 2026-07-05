@@ -31,10 +31,16 @@ CANON_COLUMNS: list[str] = [
 ROWCOUNT_ABS_RANGE: tuple[int, int] = (1800, 3000)
 ROWCOUNT_DEVIATION: float = 0.15
 
+# Coarse full-market sanity bound for the indices dataset -- calibrated live
+# in Task 9 against a real ind_close_all CSV (precedent: the equities
+# (1800, 3000) live fix).
+INDICES_ROWCOUNT_ABS_RANGE: tuple[int, int] = (50, 500)
+
 # Project root = the pipeline/ directory (two parents up from this file's src/pipeline/).
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 DATA_DIR: Path = PROJECT_ROOT / "data"
 OHLC_DIR: Path = DATA_DIR / "ohlc"
+INDICES_DIR: Path = DATA_DIR / "indices"
 META_DIR: Path = DATA_DIR / "meta"
 
 

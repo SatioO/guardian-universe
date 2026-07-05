@@ -43,7 +43,7 @@ def test_main_backfill_runs_all_registered_specs(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli.backfill_mod, "backfill", fake_backfill)
     assert cli.main(["backfill", "--days", "1"]) == 0
-    assert seen == ["equities"]  # DATASET_ORDER today; G1b extends this
+    assert seen == ["equities", "indices"]  # DATASET_ORDER as of G1b task 3
 
 
 def test_parser_reads_daily_date():
@@ -134,5 +134,5 @@ def test_main_daily_runs_all_registered_specs(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "run_daily", fake_run_daily)
     assert cli.main(["daily", "--date", "2026-07-03"]) == 0
-    assert seen == ["equities"]  # DATASET_ORDER today; G1b extends this
+    assert seen == ["equities", "indices"]  # DATASET_ORDER as of G1b task 3
     assert (tmp_path / "last_run_status.json").exists()
