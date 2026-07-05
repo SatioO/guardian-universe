@@ -70,3 +70,29 @@ def read_trailing_window(
         .tail(n_rows_per_key)
         .reset_index(drop=True)
     )
+
+
+def write_delta(
+    df: pd.DataFrame, base: Path, d: date, *, prefix: str = "ohlc", keep: int = 35
+) -> Path:
+    """Persist one day's clean frame as a delta artifact (client catch-up unit).
+
+    Prunes to the newest `keep` per prefix; release-side copies self-GC once
+    they drop out of the manifest's delta window."""
+    delta_dir = base / "deltas"
+    delta_dir.mkdir(parents=True, exist_ok=True)
+    target = delta_dir / f"{prefix}_{d.isoformat()}.parquet"
+    tmp = target.with_suffix(".parquet.tmp")
+    df.to_parquet(tmp, compression="zstd", index=False)
+    tmp.replace(target)
+    existing = sorted(delta_dir.glob(f"{prefix}_*.parquet"))
+    for old in existing[:-keep]:
+        old.unlink()
+    return target
+
+
+def list_deltas(base: Path, *, prefix: str = "ohlc") -> list[Path]:
+    delta_dir = base / "deltas"
+    if not delta_dir.exists():
+        return []
+    return sorted(delta_dir.glob(f"{prefix}_*.parquet"))

@@ -70,6 +70,7 @@ def run_daily(
             )
         clean = validate_ohlc(clean)  # runtime contract gate (same schema as tests)
         store.append_day(clean, spec.base_dir, prefix=spec.file_prefix)
+        store.write_delta(clean, spec.base_dir, target, prefix=spec.file_prefix)
         return RunStatus(
             status="success",
             date=target,

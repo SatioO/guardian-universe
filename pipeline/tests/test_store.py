@@ -102,6 +102,30 @@ def test_append_day_is_atomic_on_write_crash(tmp_path, monkeypatch):
     assert config.ohlc_path(2026, tmp_path).read_bytes() == good
 
 
+def test_write_delta_and_prune(tmp_path):
+    from datetime import date, timedelta
+
+    import pandas as pd
+
+    from pipeline import config, store
+
+    def frame(day: str) -> pd.DataFrame:
+        df = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+        df["date"] = pd.to_datetime([day])
+        return df
+
+    start = date(2026, 1, 1)
+    for i in range(40):
+        d = start + timedelta(days=i)
+        p = store.write_delta(frame(d.isoformat()), tmp_path, d, keep=35)
+        assert p.exists() and p.parent.name == "deltas"
+
+    deltas = store.list_deltas(tmp_path)
+    assert len(deltas) == 35                          # pruned to keep
+    assert deltas[0].name == "ohlc_2026-01-06.parquet"  # oldest 5 pruned
+    assert deltas[-1].name == "ohlc_2026-02-09.parquet"
+
+
 def test_prefix_writes_independent_dataset_files(tmp_path):
     from pipeline.store import day_symbol_count
 

@@ -132,6 +132,14 @@ def test_store_error_is_reported_not_raised(tmp_path: Path, monkeypatch):
     assert st.status == "failed"
 
 
+def test_success_emits_delta_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    st = _run(date(2026, 7, 3), StubFetcher(RAW), tmp_path)
+    assert st.status == "success"
+    deltas = store.list_deltas(tmp_path)
+    assert [p.name for p in deltas] == ["ohlc_2026-07-03.parquet"]
+
+
 def test_deviation_gate_fires_from_stored_trailing_window(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
     # Seed the 3 trading days before Fri 2026-07-03 each with 100 rows (mean=100).
