@@ -170,16 +170,116 @@ def test_present_day_with_empty_trailing_skips_without_fetching(
     assert st.status == "skipped_idempotent"
 
 
-def test_short_day_reingest_still_applies_wrong_date_guard_and_quarantine(
+# G2 Task 5 fix round 1: regime-consistent INTERSECTION completeness.
+#
+# THE BUG (reviewer live-reproduced): the completeness gate above compared a
+# stored day's TOTAL against the trailing mean summed over ALL trailing
+# series. After a universe-widening event, pre-widening EQ-only days inside
+# the 7-day catch-up window compare against widened trailing means -> falsely
+# "short" -> nightly re-fetch, 7 nights running in the live incident.
+#
+# THE FIX: completeness is now computed over the series SHARED between the
+# stored day and the trailing dict (a trailing entry only counts if it is
+# non-empty). A pre-widening EQ-only day compared against widened (EQ+BE)
+# trailing history now has shared={EQ} -- BE never enters the comparison
+# because the stored day never had it -- so the day is correctly judged
+# complete on its own (EQ-only) regime instead of the union of both regimes.
+
+def _widened_rows(d: str, n_eq: int, n_be: int) -> pd.DataFrame:
+    """One trailing day's stored rows spanning BOTH EQ and BE series --
+    i.e. what the store looks like AFTER the universe-widening event."""
+    return pd.concat(
+        [_canon_rows(d, n_eq), _be_rows(d, n_be)], ignore_index=True
+    )
+
+
+def _eq_rows_matching_multi_series_raw(d: str, n: int) -> pd.DataFrame:
+    """EQ rows keyed EQ{i:05d} -- the SAME instrument_key scheme the
+    normalizer derives from `_multi_series_raw`'s ISIN column -- so a
+    truncated stored day and a subsequent full re-fetch describe the SAME
+    universe (real symbols served/missing), letting append_keyed's keep="last"
+    dedupe genuinely overwrite+extend rather than landing disjoint rows."""
+    return pd.DataFrame([{
+        "date": pd.Timestamp(d), "instrument_key": f"EQ{i:05d}", "isin": f"EQ{i:05d}",
+        "symbol": f"EQS{i}", "series": "EQ",
+        "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "prevclose": 100.0,
+        "volume": 1, "value": 1.0, "trades": 1, "source": "seed",
+    } for i in range(n)])[config.CANON_COLUMNS]
+
+
+def test_pre_widening_eq_only_day_vs_widened_trailing_skips_regression(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    # Combined property: the re-ingest path is NOT a special case that
-    # bypasses the rest of run_daily's pipeline -- it re-enters the exact same
-    # fetch -> normalize -> wrong-date guard -> quarantine -> schema -> append
-    # sequence as a normal day. Two rows this time: RELIANCE clean, INFY fails
-    # quarantine (high < low) -- proves both the wrong-date guard has already
-    # passed (same target date throughout) and quarantine still fires on the
-    # re-ingest path, while the clean row still tops up the stored count.
+    # THE REPRODUCTION (mirrors the reviewer's live repro shape): the target
+    # day being gated is a COMPLETE, EQ-only day of 2384 rows (matching the
+    # reviewer's reported 2384) -- but ITS OWN trailing window (the 3 trading
+    # days immediately before it, per `_trailing_series_counts`, which always
+    # looks strictly backward from whatever day is passed to run_daily) is
+    # already widened: each trailing day carries EQ=2200 + BE=1247 (trailing
+    # total 3447, matching the reviewer's reported ~3447). This is exactly the
+    # shape the catch-up loop (G2 Task 4) produces for an OLDER window day
+    # sitting a few trading days behind today's real target: the day being
+    # re-visited is older and EQ-only-complete in its own right, while the
+    # days immediately preceding IT already reflect the widened universe.
+    #
+    # Pre-fix (RED against current code): trailing_total_mean sums per-series
+    # means over ALL trailing series = 2200 (EQ) + 1247 (BE) = 3447; the
+    # stored EQ-only day's flat total (2384) is compared against that whole-
+    # regime figure: 2384 >= 0.85 * 3447 (=2930.0)? No -> falsely judged
+    # "short" -> re-fetch triggered (the bug: a COMPLETE day gets re-ingested
+    # every night this day remains inside the catch-up window).
+    #
+    # Post-fix (this test's actual assertion): shared = {EQ} only (BE is
+    # absent from the stored day, so its trailing entry is never counted).
+    # trailing_shared_mean = 2200 (EQ alone). stored_shared_total = 2384 (the
+    # stored day's own EQ count -- it has no BE rows to add). 2384 >= 0.85 *
+    # 2200 (=1870.0)? Yes -> skipped_idempotent, fetcher NOT called.
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    target = date(2026, 7, 3)
+    for d in ("2026-06-30", "2026-07-01", "2026-07-02"):  # widened trailing (EQ+BE)
+        store.append_day(_widened_rows(d, n_eq=2200, n_be=1247), tmp_path)
+    store.append_day(_canon_rows(target.isoformat(), 2384), tmp_path)  # complete, EQ-only
+
+    st = _run(target, StubFetcher(exc=AssertionError("must not refetch")), tmp_path)
+    assert st.status == "skipped_idempotent"
+
+
+def test_truncated_eq_only_day_vs_widened_trailing_still_repairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Truncated-day-still-repairs: an EQ-only day genuinely truncated to HALF
+    # its own (EQ-only) trailing count, compared against widened (EQ+BE)
+    # trailing history, must still re-fetch and top up -- the fix narrows the
+    # comparison to the SHARED series, it must not blind the gate to a real
+    # truncation within that shared series. shared={EQ}, trailing_shared_mean
+    # = 2200, stored_shared_total = 1100 (half): 1100 >= 0.85*2200 (=1870)?
+    # No -> re-fetch triggered (stub IS called), tops up, success.
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    target = date(2026, 7, 3)
+    for d in ("2026-06-30", "2026-07-01", "2026-07-02"):  # widened trailing (EQ+BE)
+        store.append_day(_widened_rows(d, n_eq=2200, n_be=1247), tmp_path)
+    # EQ halved, keyed EQ00000..EQ01099 -- the FIRST HALF of the 2200 keys the
+    # fresh fetch below will re-serve -- so the top-up is a real merge (those
+    # 1100 rows are overwritten in place, not left as orphaned duplicates).
+    store.append_day(_eq_rows_matching_multi_series_raw(target.isoformat(), 1100), tmp_path)
+
+    raw = _multi_series_raw(n_eq=2200, n_be=1247)  # fresh fetch re-serves the FULL day
+    st = _run(target, StubFetcher(raw), tmp_path)
+    assert st.status == "success"
+    assert "re-ingested short day" in st.message
+    assert "over shared series" in st.message
+    assert store.day_symbol_count(tmp_path, target) == 2200 + 1247  # topped up to full
+
+
+def test_short_day_reingest_still_applies_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The re-ingest path is NOT a special case that bypasses the rest of
+    # run_daily's pipeline -- it re-enters the exact same fetch -> normalize
+    # -> wrong-date guard -> quarantine -> schema -> append sequence as a
+    # normal day. Two rows this time: RELIANCE clean, INFY fails quarantine
+    # (high < low) -- proves quarantine still fires on the re-ingest path,
+    # while the clean row still tops up the stored count.
     monkeypatch.setattr(config, "META_DIR", tmp_path / "meta")
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
     target = date(2026, 7, 3)
@@ -205,6 +305,33 @@ def test_short_day_reingest_still_applies_wrong_date_guard_and_quarantine(
     qfile = tmp_path / "meta" / "quarantine" / "ohlc_2026-07-03.parquet"
     assert qfile.exists()
     assert len(pd.read_parquet(qfile)) == 1
+
+
+def test_short_day_reingest_still_applies_wrong_date_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Stronger variant of the property above: the re-ingest path still runs
+    # the wrong-date guard, not just quarantine. A short stored day whose
+    # FRESH fetch comes back wrong-dated (stale republish / fallback
+    # date-stamp bug) must still be rejected as "failed" -- the completeness
+    # gate deciding to re-fetch must never itself bypass the guard that
+    # protects every other day.
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    target = date(2026, 7, 3)
+    wrong_day = date(2026, 7, 1)
+    for d in ("2026-06-30", "2026-07-01", "2026-07-02"):
+        store.append_day(_canon_rows(d, 2), tmp_path)  # trailing mean 2
+    store.append_day(_canon_rows(target.isoformat(), 1), tmp_path)  # short: 1 < 0.85*2
+
+    raw = pd.DataFrame([_raw_row(wrong_day.isoformat(), "INE002A01018", "RELIANCE")])
+    st = _run(target, StubFetcher(raw), tmp_path)
+    assert st.status == "failed"
+    assert str(target) in st.message
+    assert repr(wrong_day) in st.message
+    # The pre-existing short row for `target` must be untouched -- the guard
+    # rejected the re-fetch before any store write, so the original (still
+    # short) stored count survives exactly as it was.
+    assert store.day_symbol_count(tmp_path, target) == 1
 
 
 def test_not_yet_published_is_reported_not_raised(tmp_path: Path):

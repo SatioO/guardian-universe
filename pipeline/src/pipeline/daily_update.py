@@ -45,40 +45,68 @@ def run_daily(
     # truncation, a fallback that only partially served the universe, etc.)
     # would never be topped up because the mere PRESENCE of any row
     # short-circuited every later run, including the catch-up loop's (T4)
-    # nightly re-visits. Cost-conscious ordering: the stored total is one
-    # cheap year-read, checked FIRST -- the (up to 10-year-read) trailing
-    # computation only runs for a day that is actually present, never for an
-    # absent day (an absent day falls through to fetch exactly as before, at
-    # zero extra idempotency-gate cost; its own trailing read for the
-    # per-series gate below is unaffected and unchanged).
+    # nightly re-visits. Cost-conscious ordering: the stored per-series counts
+    # are one cheap year-read, checked FIRST -- the (up to 10-year-read)
+    # trailing computation only runs for a day that is actually present, never
+    # for an absent day (an absent day falls through to fetch exactly as
+    # before, at zero extra idempotency-gate cost; its own trailing read for
+    # the per-series gate below is unaffected and unchanged).
+    #
+    # Fix round 1 (regime-consistent INTERSECTION completeness): comparing the
+    # stored day's TOTAL against the trailing mean summed over ALL trailing
+    # series breaks across a universe-widening event -- a pre-widening,
+    # EQ-only day inside the catch-up window would compare its own (correct,
+    # complete) EQ-only total against a trailing mean that also includes a
+    # series (e.g. BE) the stored day never had, making a genuinely complete
+    # day look falsely short forever. The comparison must stay within the
+    # REGIME the stored day itself belongs to: only series present in BOTH the
+    # stored day and the trailing history (a non-empty trailing entry) count
+    # toward either side of the ratio. A series the stored day never had
+    # (because it predates that series' introduction) is correctly excluded
+    # instead of inflating the trailing denominator; a series genuinely
+    # missing/truncated WITHIN the stored day's own regime still fails the
+    # ratio exactly as before, since it remains in `shared`.
     topup_note = ""
     if store.has_day(spec.base_dir, target, prefix=spec.file_prefix):
-        stored_total = store.day_symbol_count(spec.base_dir, target, prefix=spec.file_prefix)
+        stored_series_counts = store.day_series_counts(
+            spec.base_dir, target, prefix=spec.file_prefix
+        )
         completeness_trailing = _trailing_series_counts(
             spec, target, holidays, special_sessions
         )
-        # sum of per-series trailing MEANS (not a flat total-row-count mean) --
-        # consistent with the per-series gate's own per-series means below
-        # (a separate call further down, at its original post-fetch site: an
-        # absent day must not pay this cost at all here, so the two branches
-        # each compute their own trailing dict rather than sharing one).
-        trailing_total_mean = sum(
-            sum(c) / len(c) for c in completeness_trailing.values() if c
+        # shared = series present in BOTH the stored day (any stored rows) AND
+        # the trailing dict (a non-empty trailing entry -- i.e. it actually
+        # appeared on at least one trailing day). A series stored today but
+        # absent from all trailing days (brand new today) is excluded from
+        # `shared` on the trailing side already (no entry, or an empty list);
+        # a series with trailing history but absent from today is likewise
+        # excluded (not in `stored_series_counts`) -- that absence is instead
+        # the per-series gate's job (`validate.check_rowcount_by_series`,
+        # below), not this idempotency gate's.
+        shared = stored_series_counts.keys() & {
+            series for series, c in completeness_trailing.items() if c
+        }
+        stored_shared_total = sum(stored_series_counts[s] for s in shared)
+        trailing_shared_mean = sum(
+            sum(completeness_trailing[s]) / len(completeness_trailing[s])
+            for s in shared
         )
-        # No trailing history at all (fresh store, or every trailing day was a
-        # miss) -- nothing to compare the stored day against, so any stored
-        # rows count as complete: preserves pre-Task-5 behavior exactly.
-        if not trailing_total_mean or stored_total >= (
+        # No comparable regime at all (no series shared between the stored
+        # day and trailing history -- a fresh store, every trailing day a
+        # miss, or a stored day whose entire series set predates all trailing
+        # history) -- nothing to compare the stored day against, so any
+        # stored rows count as complete: preserves pre-Task-5 behavior exactly.
+        if not trailing_shared_mean or stored_shared_total >= (
             1 - config.COMPLETENESS_SHORTFALL
-        ) * trailing_total_mean:
+        ) * trailing_shared_mean:
             return RunStatus("skipped_idempotent", target, message="already present")
         # Short day: fall through to re-fetch. append_keyed's keep="last"
         # dedupe (on date, instrument_key) makes the merge safe -- rows already
         # stored are simply overwritten by the freshly re-fetched copy, and
         # rows the short fetch missed the first time are newly added.
         topup_note = (
-            f"re-ingested short day (stored {stored_total} vs "
-            f"trailing mean {trailing_total_mean:.0f})"
+            f"re-ingested short day (stored {stored_shared_total} vs "
+            f"trailing mean {trailing_shared_mean:.0f} over shared series)"
         )
 
     try:

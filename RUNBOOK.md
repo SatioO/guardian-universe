@@ -335,21 +335,43 @@ whatever the first successful run happened to store — a day truncated by a
 mid-fetch failure or a fallback that only partially served the universe
 would sit there forever, "present" but incomplete, immune to every future
 catch-up revisit. Now, when a window day is present, `run_daily` also
-compares its stored row total against the trailing history (sum of
-per-series trailing means; no trailing history at all — a fresh store, or
-every trailing day itself missing — makes any stored count count as
-complete, same as before this change) before deciding to skip. A day at or
-above `(1 - COMPLETENESS_SHORTFALL)` of that trailing mean skips exactly as
-today; a day below it is **re-fetched and merged**, not just re-fetched from
-scratch — `append_keyed`'s existing `keep="last"` dedupe on `(date,
-instrument_key)` means rows already stored are simply refreshed by the new
-fetch and rows the short fetch missed the first time are newly added. A
-successful top-up shows up in the status message, e.g. `"re-ingested short
-day (stored 1800 vs trailing mean 2400)"`, so a short-day repair is
-distinguishable in logs from an ordinary first-time ingest. This applies to
-every day the catch-up loop revisits (all 7, not just the target), so a
-short day up to 6 trading days back self-heals the same way a fully missing
-day does.
+compares its stored rows against the trailing history before deciding to
+skip. A day at or above `(1 - COMPLETENESS_SHORTFALL)` of the comparable
+trailing mean skips exactly as today; a day below it is **re-fetched and
+merged**, not just re-fetched from scratch — `append_keyed`'s existing
+`keep="last"` dedupe on `(date, instrument_key)` means rows already stored
+are simply refreshed by the new fetch and rows the short fetch missed the
+first time are newly added. This applies to every day the catch-up loop
+revisits (all 7, not just the target), so a short day up to 6 trading days
+back self-heals the same way a fully missing day does.
+
+**Completeness is measured over series shared between the stored day and
+trailing history (regime-consistent across universe changes).** A first
+version of this gate compared the stored day's flat TOTAL against the
+trailing mean summed over ALL trailing series — that breaks the moment the
+universe widens (e.g. an EQ-only store gains a new series such as BE):
+inside the catch-up window, a pre-widening day that is genuinely EQ-only and
+complete would have its correct EQ total compared against a trailing mean
+that also includes the new series it never had, permanently reading as
+"short" and re-fetching every single night that day stays inside the window
+— a live incident reproduced exactly this (seven consecutive false
+failed/exit-1 nights) before being fixed. The fix keeps the comparison
+inside the stored day's own regime: `shared` = the series present in BOTH
+the stored day (`store.day_series_counts`) and the trailing dict (a
+non-empty trailing entry for that series); both `stored_shared_total` and
+`trailing_shared_mean` are summed over `shared` only, so a series the stored
+day predates (like BE for an old EQ-only day) never enters either side of
+the ratio, while a series genuinely truncated *within* the stored day's own
+regime (e.g. EQ itself halved) still fails the ratio exactly as before,
+since EQ remains in `shared` either way. No shared series at all (fresh
+store, every trailing day a miss, or the stored day's whole regime predates
+all trailing history) still means "nothing to compare against" — any stored
+rows count as complete, same as pre-Task-5. A successful top-up now names
+this shared-series basis explicitly in the status message, e.g. `"re-ingested
+short day (stored 1800 vs trailing mean 2400 over shared series)"` — read it
+as: *only the series this day actually had are counted on both sides, so a
+short reading here means a genuine shortfall within this day's own regime,
+not an artifact of comparing against series the day never had.*
 
 ## G2: manual day-rebuild (recovery)
 

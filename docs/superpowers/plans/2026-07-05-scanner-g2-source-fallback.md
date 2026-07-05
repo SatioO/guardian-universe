@@ -242,4 +242,67 @@ git commit -m "ci(g2/task-8): SHA-pinned actions, locked deps, holiday-refresh n
 
 - **Spec coverage:** §5.1 chain — primary→secfull automatic, Kite manual (superseding jugaad, documented) + provenance per row (T1–T3) · §4 catch-up (T4), completeness (T5), continuity+keep-alive (T7), calendar refresh + hardening (T8) · cross-check gate (T6) · ledger-deferred hygiene (T7/T8).
 - **Type consistency:** `FetchResult`/`Fallback` from T1 used by T2/T3/T6; fallback frames are PRIMARY-RAW-SHAPED (the fallback contract, documented in fetch.py) so `spec.normalizer` stays single-format; `run_daily(spec, d, *, fetcher, holidays, special_sessions=None, is_target_day=True)` final signature consistent across T4/T5 and all test updates.
-- **Judgment calls:** past-day 404 = failed (hole ≠ lateness); completeness measured on TOTAL vs trailing total (per-series completeness deferred — one live short-day class at a time); cross-check is a separate weekly command (both-sources-healthy comparison), not an inline daily gate; keep-alive prints disabled-workflow visibility rather than silently re-enabling only.
+- **Judgment calls:** past-day 404 = failed (hole ≠ lateness); completeness measured on TOTAL vs trailing total (per-series completeness deferred — one live short-day class at a time) — **superseded, see "Fix round 1" below: this TOTAL-vs-TOTAL comparison was live-reproduced as a bug and replaced with shared-series (regime-consistent) completeness**; cross-check is a separate weekly command (both-sources-healthy comparison), not an inline daily gate; keep-alive prints disabled-workflow visibility rather than silently re-enabling only.
+
+---
+
+## Fix round 1
+
+**Finding (reviewer live-reproduced):** the Task 5 completeness gate compared a stored day's TOTAL row count against the trailing mean summed over ALL trailing series. After a universe-widening event (EQ-only → EQ+BE, already merged), a pre-widening, EQ-only day sitting inside the 7-day catch-up window would compare its own correct EQ-only total (2384 rows) against a trailing mean that also included the new BE series it never had (~3447) — permanently reading as "short" and triggering a nightly re-fetch. The reviewer's live repro: 7 consecutive nights of false `failed`/exit-1, because the re-fetched frame then failed the (unrelated, correct) per-series gate on absent-BE for that regime.
+
+**Fix:** regime-consistent INTERSECTION completeness in `daily_update.py::run_daily`. `shared` = series present in BOTH the stored day (`store.day_series_counts`) and the trailing dict (non-empty trailing entry); `stored_shared_total` and `trailing_shared_mean` are summed over `shared` only. A series the stored day predates (BE, for an old EQ-only day) is excluded from the comparison entirely instead of inflating the trailing denominator; a series genuinely truncated within the stored day's own regime (EQ itself halved) still fails the ratio, since it remains in `shared`. No shared series at all still means "nothing to compare" → any stored rows count as complete (unchanged pre-Task-5 semantics). The top-up message now names the shared-series basis: `"re-ingested short day (stored {n} vs trailing mean {m:.0f} over shared series)"`.
+
+**Red-first proof (test a, THE REPRODUCTION —
+`test_pre_widening_eq_only_day_vs_widened_trailing_skips_regression` in
+`pipeline/tests/test_daily_update.py`), run against the code as it stood
+before this round's fix:**
+
+```
+tests/test_daily_update.py:229: in test_pre_widening_eq_only_day_vs_widened_trailing_skips_regression
+    st = _run(target, StubFetcher(exc=AssertionError("must not refetch")), tmp_path)
+tests/test_daily_update.py:43: in _run
+    return run_daily(datasets_spec(base), target, fetcher=fetcher, holidays=HOLIDAYS)
+src/pipeline/daily_update.py:85: in run_daily
+    res = fetcher.fetch_raw(target)
+tests/test_daily_update.py:37: in fetch_raw
+    raise self._exc
+E   AssertionError: must not refetch
+=========================== short test summary info ============================
+FAILED tests/test_daily_update.py::test_pre_widening_eq_only_day_vs_widened_trailing_skips_regression
+============================== 1 failed in 0.95s ===============================
+```
+
+This confirms the bug mechanically: a stored day (2384 EQ rows, complete)
+with widened (EQ+BE, trailing mean 3447) trailing history was judged
+"short" under the pre-fix TOTAL-vs-TOTAL comparison and attempted a
+re-fetch — tripping the stub's "must not refetch" guard. After the fix, the
+same test passes (`skipped_idempotent`, fetcher never called).
+
+**Test additions/changes in this round** (`pipeline/tests/test_daily_update.py`):
+- `test_pre_widening_eq_only_day_vs_widened_trailing_skips_regression` — THE REPRODUCTION (above).
+- `test_truncated_eq_only_day_vs_widened_trailing_still_repairs` — a genuinely truncated EQ-only day (half its own EQ trailing count) against the same widened trailing history still re-fetches and tops up to full; proves the shared-series narrowing doesn't blind the gate to a real truncation within the shared series.
+- `test_short_day_reingest_still_applies_wrong_date_guard_and_quarantine` renamed to `test_short_day_reingest_still_applies_quarantine` (it only ever exercised quarantine, not the wrong-date guard — the old name overclaimed).
+- `test_short_day_reingest_still_applies_wrong_date_guard` — new, stronger variant: a short stored day whose fresh re-fetch comes back wrong-dated is still rejected `"failed"` via the existing wrong-date guard, with the original short stored count left untouched.
+
+**True suite count (this round, full gate, pinned `.venv`):**
+
+| Check | Before this round | After this round |
+|---|---|---|
+| `pytest -q` | 320 passed | **323 passed** (+3 net: 2 new regression tests + 1 new stronger wrong-date-guard variant; 1 test renamed, not added) |
+| `mypy` | Success, 27 source files | Success, 27 source files (unchanged) |
+| `ruff check .` | All checks passed | All checks passed (unchanged) |
+
+**Correction to the prior round's suite-timing claim:** round 1 (Task 5's
+original commit) did not include a direct, isolated timing measurement of a
+single completeness check — only the aggregate `pytest -q` suite duration
+was reported. One direct measurement against the **real** `pipeline/data/ohlc/ohlc_2026.parquet`
+store (3 stored days, ~2400 EQ rows/day, `target = 2026-07-03`, warmed
+filesystem cache, median of 5 runs — a single completeness check =
+`store.day_series_counts` for the target day + `_trailing_series_counts`
+over its trailing window + the shared-series ratio computation, no
+framework overhead):
+
+**~26 ms per completeness check** (individual samples: 28.29, 26.21, 27.55,
+26.15, 25.29 ms; first, cold-cache call was 81.55 ms — filesystem/page-cache
+warm-up, not representative of steady-state cron behavior where the same
+parquet files are read repeatedly across the catch-up window's 7 days).
