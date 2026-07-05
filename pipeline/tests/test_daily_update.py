@@ -8,7 +8,7 @@ import pytest
 from pipeline import config, datasets, store
 from pipeline.daily_update import RunStatus, run_daily
 from pipeline.errors import NotYetPublished, UnexpectedFailure
-from pipeline.fetch import Fetcher
+from pipeline.fetch import Fetcher, FetchResult
 
 HOLIDAYS = {date(2026, 8, 15)}
 RAW = pd.read_csv(Path(__file__).parent / "fixtures" / "bhavcopy_normal.csv")
@@ -24,14 +24,19 @@ def datasets_spec(base):
 
 
 class StubFetcher:
-    def __init__(self, df: pd.DataFrame | None = None, exc: Exception | None = None):
-        self._df, self._exc = df, exc
+    def __init__(
+        self,
+        df: pd.DataFrame | None = None,
+        exc: Exception | None = None,
+        source: str = "nse-udiff",
+    ):
+        self._df, self._exc, self._source = df, exc, source
 
-    def fetch_raw(self, d: date) -> pd.DataFrame:
+    def fetch_raw(self, d: date) -> FetchResult:
         if self._exc is not None:
             raise self._exc
         assert self._df is not None
-        return self._df
+        return FetchResult(self._df, self._source)
 
 
 def _run(target: date, fetcher: Fetcher, base: Path) -> RunStatus:
@@ -47,6 +52,20 @@ def test_normal_day_ingests_and_persists(tmp_path: Path, monkeypatch: pytest.Mon
     assert st.symbol_count == 3
     out = pd.read_parquet(base_year(tmp_path))
     assert set(out["symbol"]) == {"RELIANCE", "INFY", "HDFCBANK"}
+
+
+def test_fallback_served_day_stamps_fallback_source_everywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A day served by a fallback (not the primary) must have its provenance
+    # reflect the ACTUAL source that served it -- both in RunStatus.source and
+    # in the stored rows' "source" column -- never the primary's label.
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    st = _run(date(2026, 7, 3), StubFetcher(RAW, source="secondary-label"), tmp_path)
+    assert st.status == "success"
+    assert st.source == "secondary-label"
+    out = pd.read_parquet(base_year(tmp_path))
+    assert set(out["source"]) == {"secondary-label"}
 
 
 def test_holiday_skips_cleanly_without_fetching(tmp_path: Path):

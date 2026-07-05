@@ -6,6 +6,7 @@ import pandas as pd
 
 from pipeline import config, datasets, store
 from pipeline.backfill import backfill
+from pipeline.fetch import FetchResult
 
 HOLIDAYS: set[date] = set()
 RAW = pd.read_csv(Path(__file__).parent / "fixtures" / "bhavcopy_normal.csv")
@@ -24,13 +25,13 @@ class StubFetcher:
     def __init__(self):
         self.dates: list[date] = []
 
-    def fetch_raw(self, d: date) -> pd.DataFrame:
+    def fetch_raw(self, d: date) -> FetchResult:
         self.dates.append(d)
         # Tag rows with the target date so each day is stored under its own date,
         # matching run_daily's idempotency check (has_day uses the stored TradDt).
         df = RAW.copy()
         df["TradDt"] = d.isoformat()
-        return df
+        return FetchResult(df, "nse-udiff")
 
 
 def _no_sleep(_s: float) -> None:

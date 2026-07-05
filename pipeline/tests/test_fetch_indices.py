@@ -1,5 +1,6 @@
 from datetime import date
 
+import pandas as pd
 import pytest
 import responses
 
@@ -47,10 +48,43 @@ def test_fetch_parses_200_csv():
         status=200,
         content_type="text/csv",
     )
-    df = NseIndicesFetcher().fetch_raw(date(2026, 7, 3))
+    res = NseIndicesFetcher().fetch_raw(date(2026, 7, 3))
+    df = res.frame
     assert len(df) == 2
     assert list(df.columns) == INDICES_RAW_COLUMNS
     assert df.iloc[0]["Index Name"] == "Nifty 50"
+
+
+@responses.activate
+def test_fetch_raw_primary_success_reports_primary_label():
+    responses.add(responses.GET, "https://www.nseindia.com/", status=200)
+    responses.add(
+        responses.GET,
+        build_indices_url(date(2026, 7, 3)),
+        body=CSV,
+        status=200,
+        content_type="text/csv",
+    )
+    res = NseIndicesFetcher().fetch_raw(date(2026, 7, 3))
+    assert res.source == "nse-indices"
+
+
+@responses.activate
+def test_fetch_raw_fallback_success_reports_fallback_label():
+    responses.add(responses.GET, "https://www.nseindia.com/", status=200)
+    responses.add(
+        responses.GET,
+        build_indices_url(date(2026, 7, 3)),
+        status=503,
+    )
+    fallback_df = pd.DataFrame({"Index Name": ["Nifty 50"]})
+
+    def fallback(_d: date) -> pd.DataFrame:
+        return fallback_df
+
+    res = NseIndicesFetcher(fallbacks=(("secondary-label", fallback),)).fetch_raw(date(2026, 7, 3))
+    assert res.source == "secondary-label"
+    assert res.frame.iloc[0]["Index Name"] == "Nifty 50"
 
 
 @responses.activate

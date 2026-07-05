@@ -42,7 +42,7 @@ def run_daily(
         return RunStatus("skipped_idempotent", target, message="already present")
 
     try:
-        raw = fetcher.fetch_raw(target)
+        res = fetcher.fetch_raw(target)
     except NotYetPublished as e:
         return RunStatus("not_yet", target, message=str(e))
     except UnexpectedFailure as e:
@@ -53,7 +53,10 @@ def run_daily(
     # SchemaError) AND unexpected ones (a malformed frame -> KeyError, a store
     # OSError, ...) all map to a "failed" status so the scheduler never crashes.
     try:
-        df = spec.normalizer(raw)
+        df = spec.normalizer(res.frame)
+        # Stamp ACTUAL provenance over the normalizer's partial-bound default:
+        # a fallback-served day must never carry the primary's source label.
+        df["source"] = res.source
         trailing = _trailing_series_counts(spec, target, holidays, special_sessions)
         # NOTE: the per-series deviation gate compares today's PRE-quarantine
         # row counts against the POST-quarantine counts of stored days; the
@@ -93,7 +96,7 @@ def run_daily(
             date=target,
             symbol_count=len(clean),
             quarantined_count=len(bad),
-            source=spec.source_label,
+            source=res.source,
         )
     except (UnexpectedFailure, SchemaError) as e:
         return RunStatus("failed", target, message=str(e))
