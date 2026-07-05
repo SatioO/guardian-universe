@@ -1,0 +1,24 @@
+name: keepalive
+
+on:
+  schedule:
+    - cron: "0 5 1 * *"   # 1st of the month, 05:00 UTC
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Re-enable any auto-disabled cron workflows
+        run: gh workflow enable data-daily.yml data-monitor.yml data-crosscheck.yml || true
+      - name: Report any workflow still not active
+        run: |
+          gh api repos/${{ github.repository }}/actions/workflows \
+            --jq '.workflows[] | select(.state != "active") | .name' \
+            >> "$GITHUB_STEP_SUMMARY"

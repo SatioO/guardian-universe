@@ -572,3 +572,111 @@ calendar + special-sessions logic used elsewhere). Exit 0 pairs with the
 (comparison ran, disagreement found — see the printed table) or the
 `CANNOT-RUN` marker (comparison never ran — see the printed error naming
 which source failed and why).
+
+## G2: continuity monitor (holes, not just staleness) + cron keep-alive
+
+### Why this exists
+`check-freshness`'s pre-existing staleness check only ever asks one
+question: "is the manifest's `latest_trading_date` current as of today?"
+That question is blind to a hole sitting a few sessions BEHIND the latest
+date — e.g. a day the daily catch-up loop's own 7-trading-day reach never
+covered (see the G2 catch-up-loop section above, "Holes older than the
+window"), or a day that was present, silently corrupted/deleted on the
+release side, and never re-checked because the latest date kept advancing
+normally on top of it. A dataset can look perfectly healthy by the
+staleness check alone while quietly missing a day. The continuity check
+closes this gap by re-deriving which trading days SHOULD be present over a
+trailing window and diffing that against what's actually in the published
+baseline.
+
+### Scope: every FETCHED dataset, not just the primary
+**Continuity covers every dataset the registry resolves as fetched
+(`not spec.derived`) — today that's both `equities` (primary) AND `indices`
+(secondary) — not only the primary dataset.** This was a controller-level
+scope amendment during implementation: the original design considered
+checking only the primary, but that leaves a secondary dataset's hole
+completely invisible to every other layer. Concretely: the primary's own
+staleness AND continuity can both read perfectly clean while `indices` is
+sitting on a hole several sessions back, because nothing else in the
+monitoring stack ever looks at a secondary dataset's day-level completeness
+— `last_run_status.json` (the publish-gate signal) is written only from the
+primary's status (see the G1b "Primary-status contract" section above), and
+the daily workflow's "Surface secondary-dataset failures" step only checks
+the TARGET day's status, not day-level history. A hole confined to
+`indices` would otherwise go undetected indefinitely. **Derived datasets
+(`reference`, `ca_flags`) are deliberately NOT continuity-checked** — they
+are rebuilt wholesale from the store on every full `daily --dataset all`
+run, so a hole in a derived dataset is always a downstream symptom of an
+underlying fetched-dataset hole (which continuity already catches), never
+an independent fact worth alerting on by itself.
+
+### What it checks
+For each fetched spec, `check-freshness` resolves that dataset's entry in
+the downloaded release manifest by `spec.manifest_name` (e.g. `"ohlc"`,
+`"indices"`), downloads whichever baseline asset(s) cover the trailing
+10-trading-day window (both the current- and previous-year asset when the
+window straddles Jan 1 — the same year-selection logic
+`store.read_trailing_window` uses), reads just the `date` column, and calls
+`freshness.missing_days(dates_present, today, holidays, special_sessions)`
+— a pure function that re-derives the expected trading days ending at the
+last COMPLETED trading day before `today` and returns
+`sorted(expected - dates_present)`. **Any missing day in ANY fetched
+dataset** fails the check (exit 1), and each affected dataset's missing
+day(s) are printed on their own line so an operator can see immediately
+which dataset(s) and which day(s) are involved without digging through logs.
+
+### The arming rule (read before panicking about a "missing" brand-new dataset)
+**A fetched dataset with NO entry in the manifest at all is a WARNING, not
+a failure — it does not fail the check.** This matters for the exact moment
+a new dataset is registered in code but hasn't published for the first
+time yet (e.g. the window between `indices` landing in `DATASET_ORDER` and
+its first successful `daily`+`publish` cycle): a dataset that has never
+published isn't meaningfully "stale" or "full of holes" — there's nothing
+to compare against yet. Without this grace rule, a hard exit-1 here would
+false-alarm on every monitor run from the moment new dataset code merges
+until its first real publish, which is exactly backwards (alerting on the
+system working as designed, before it's had a chance to run once).
+
+**Once a dataset's first baseline lands in the manifest, this grace period
+ends permanently — from that point on, holes in that dataset are enforced
+exactly like any other fetched dataset.** In short: *a never-published
+dataset does not alert; its first publish arms continuity checking for it.*
+There is no way back into the grace period once armed — do not expect a
+dataset that publishes once and then goes dark to fall back to a warning
+instead of an alert; a dataset with a manifest entry but a hole inside it is
+always a hard failure, never a warning, regardless of how that hole came
+to exist.
+
+### Running manually
+```
+cd pipeline && uv run python -m pipeline check-freshness
+```
+Exit 0: both the staleness check and every fetched dataset's continuity
+check passed (or a not-yet-armed dataset only produced a warning). Exit 1:
+either the staleness check failed (the manifest's `latest_trading_date` is
+behind the last completed trading day), the release/manifest couldn't be
+downloaded at all, or at least one ARMED fetched dataset is missing at
+least one trading day inside its trailing window (printed explicitly,
+per-dataset).
+
+### Cron keep-alive (`.github/workflows/keepalive.yml`)
+GitHub automatically disables a scheduled workflow's cron trigger after 60
+days with no repository activity — a real risk for a low-traffic repo where
+the only activity IS the scheduled crons themselves creating a silent
+bootstrapping problem (crons stop firing, so there's no more activity, so
+they never get a chance to re-trigger). `keepalive.yml` runs monthly (1st,
+05:00 UTC, plus `workflow_dispatch` for an on-demand check) and:
+1. Runs `gh workflow enable data-daily.yml data-monitor.yml
+   data-crosscheck.yml || true` — a no-op if all three are already active,
+   and idempotently re-enables any that GitHub auto-disabled.
+2. Prints the name of any workflow still NOT in the `active` state (via
+   `gh api repos/{repo}/actions/workflows --jq '.workflows[] | select(.state
+   != "active") | .name'`) to the job's step summary — visibility that
+   something needs manual attention (e.g. a workflow disabled for a reason
+   OTHER than the 60-day auto-disable, which `gh workflow enable` alone
+   would silently paper over without this visibility step).
+
+This is the one workflow in the repo that needs `permissions: actions:
+write` (every other workflow only needs `contents`/`issues` — see each
+workflow's own `permissions:` block) since re-enabling a workflow is an
+Actions-API write, not a repo-content or issue write.

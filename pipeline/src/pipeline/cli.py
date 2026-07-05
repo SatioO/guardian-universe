@@ -10,6 +10,7 @@ import tempfile
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import requests
@@ -38,7 +39,7 @@ from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.fetch import _BROWSER_UA, FetchResult, NseUdiffFetcher, _fetch_with_retry
 from pipeline.normalize import normalize_equity_bhavcopy
 from pipeline.publish import publish_dataset
-from pipeline.release import GhReleaseClient
+from pipeline.release import GhReleaseClient, ReleaseClient
 from pipeline.sources.nse_secfull import build_secfull_url, secfull_to_udiff_shape
 from pipeline.sync import sync_store
 
@@ -301,6 +302,85 @@ def cmd_cross_check(
     return 1 if result.mismatched > 0 else 0
 
 
+def _continuity_window_years(today: date, holidays: set[date],
+                              special_sessions: set[date] | None) -> list[int]:
+    """Which calendar year(s) the continuity window's baseline asset(s) must
+    be downloaded from. Same year-selection logic as
+    `store.read_trailing_window`: the window is computed exactly as
+    `freshness.missing_days` computes its own `expected` set, and if it
+    straddles Jan 1 both the previous and current year are needed (ascending,
+    de-duplicated, so a window fully inside one year downloads only that
+    one)."""
+    window = cal.trading_days_back(
+        cal.previous_trading_day(today, holidays, special_sessions),
+        10, holidays, special_sessions,
+    )
+    years = sorted({d.year for d in window})
+    return years
+
+
+def _dataset_manifest_entry(
+    manifest_obj: dict[str, Any], manifest_name: str
+) -> dict[str, Any] | None:
+    entries: list[dict[str, Any]] = manifest_obj.get("datasets", [])
+    for ds in entries:
+        if ds.get("name") == manifest_name:
+            return ds
+    return None
+
+
+def _check_dataset_continuity(
+    spec: datasets.DatasetSpec,
+    manifest_obj: dict[str, Any],
+    *,
+    client: ReleaseClient,
+    work_dir: Path,
+    today: date,
+    holidays: set[date],
+    special_sessions: set[date] | None,
+) -> list[date]:
+    """Downloads whichever baseline asset(s) cover the continuity window for
+    one FETCHED dataset spec and returns its missing trading days (empty
+    when clean). Raises `ReleaseError` if the manifest names an asset that
+    the release doesn't actually have (a real inconsistency, distinct from
+    the dataset being absent from the manifest entirely -- see the
+    absent-dataset grace rule in the caller)."""
+    ds = _dataset_manifest_entry(manifest_obj, spec.manifest_name)
+    if ds is None:
+        # Grace rule: a fetched dataset that has never appeared in the
+        # manifest is NOT a continuity failure -- see RUNBOOK ("a
+        # never-published dataset does not alert; first publish arms it").
+        # The caller treats an empty list here identically to "clean", but
+        # prints its own WARNING (it, not this function, knows the dataset
+        # NAME to name in that warning without re-deriving it).
+        raise _DatasetNotYetPublished(spec.manifest_name)
+
+    years = _continuity_window_years(today, holidays, special_sessions)
+    by_name = {f["name"]: f for f in manifest.dataset_files(ds)}
+    dates_present: set[date] = set()
+    for year in years:
+        name = f"{spec.file_prefix}_{year}.parquet"
+        entry = by_name.get(name)
+        if entry is None:
+            continue  # that year's baseline doesn't exist yet (e.g. brand-new dataset)
+        asset = entry.get("asset", entry["name"])
+        client.download([asset], work_dir)
+        got = work_dir / asset
+        col = pd.to_datetime(pd.read_parquet(got, columns=["date"])["date"])
+        dates_present.update(d.date() for d in col)
+
+    return freshness.missing_days(dates_present, today, holidays, special_sessions)
+
+
+class _DatasetNotYetPublished(Exception):
+    """Internal signal (never escapes cmd_check_freshness): the dataset has
+    no manifest entry at all yet -- the absent-from-manifest grace rule."""
+
+    def __init__(self, manifest_name: str) -> None:
+        super().__init__(manifest_name)
+        self.manifest_name = manifest_name
+
+
 def cmd_check_freshness(
     *,
     repo: str,
@@ -309,16 +389,65 @@ def cmd_check_freshness(
     today: date,
     runner: Runner,
     work_dir: Path,
+    client: ReleaseClient,
     special_sessions: set[date] | None = None,
 ) -> int:
+    """Freshness monitor: two independent checks, run in order.
+
+    1. STALENESS (unchanged from pre-G2 behavior): is the manifest's
+       `latest_trading_date` current as of `today`? This only ever looks at
+       a single date field -- it says nothing about holes further back.
+    2. CONTINUITY (G2 task 7): for EVERY FETCHED dataset in the registry
+       (equities AND indices -- see the scope-amendment note at the top of
+       the continuity test suite in test_cli.py for why this covers more
+       than just the primary), are there any missing trading days inside the
+       trailing 10-trading-day window? A dataset can have a perfectly
+       current latest date while still hiding a hole a few sessions back
+       (e.g. a hole outside the daily catch-up loop's own 7-day reach, or a
+       secondary dataset's hole that the primary's own health never
+       reflects). Derived datasets (reference, ca_flags) are never checked
+       here -- they rebuild from the store, so a hole there is a symptom of
+       an underlying fetched-dataset hole, not an independent fact.
+
+    ANY missing day in ANY fetched dataset exits 1, with each dataset's
+    holes printed on their own line(s). A fetched dataset with NO manifest
+    entry at all (never published yet) is a WARNING on stderr, not a
+    failure -- see `_check_dataset_continuity`'s grace rule."""
     work_dir.mkdir(parents=True, exist_ok=True)
     rc = runner(["gh", "release", "download", tag, "--repo", repo,
                  "--pattern", "manifest.json", "--dir", str(work_dir), "--clobber"])
     manifest_path = work_dir / "manifest.json"
     if rc != 0 or not manifest_path.exists():
         return 1  # no release / download failed -> stale
-    latest = date.fromisoformat(json.loads(manifest_path.read_text())["latest_trading_date"])
-    return 1 if freshness.is_stale(latest, today, holidays, special_sessions) else 0
+    manifest_obj = json.loads(manifest_path.read_text())
+    latest = date.fromisoformat(manifest_obj["latest_trading_date"])
+    if freshness.is_stale(latest, today, holidays, special_sessions):
+        return 1
+
+    ok = True
+    for key in datasets.DATASET_ORDER:
+        spec = datasets.DATASETS[key]
+        if spec.derived:
+            continue
+        try:
+            holes = _check_dataset_continuity(
+                spec, manifest_obj, client=client, work_dir=work_dir,
+                today=today, holidays=holidays, special_sessions=special_sessions,
+            )
+        except _DatasetNotYetPublished as e:
+            print(
+                f"check-freshness: WARNING dataset '{e.manifest_name}' has no "
+                "manifest entry yet (never published) -- not treated as stale; "
+                "holes will be enforced once it publishes for the first time",
+                file=sys.stderr,
+            )
+            continue
+        if holes:
+            ok = False
+            days = ", ".join(d.isoformat() for d in holes)
+            print(f"check-freshness: dataset '{spec.manifest_name}' missing "
+                  f"trading day(s): {days}")
+    return 0 if ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -445,11 +574,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "check-freshness":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
         special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
+        client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
         with tempfile.TemporaryDirectory() as tmp:
             return cmd_check_freshness(
                 repo=config.GITHUB_REPO, tag=config.RELEASE_TAG, holidays=holidays,
                 today=datetime.now(UTC).date(), runner=_plain_runner,
-                work_dir=Path(tmp), special_sessions=special,
+                work_dir=Path(tmp), special_sessions=special, client=client,
             )
     if args.cmd == "rebuild-day":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")

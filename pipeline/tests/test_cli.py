@@ -1,4 +1,5 @@
 import dataclasses
+import hashlib
 from datetime import date
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from pipeline import calendar as cal
 from pipeline import cli, config, datasets
 from pipeline.errors import NotYetPublished, UnexpectedFailure
 from pipeline.fetch import FetchResult
+from pipeline.manifest import asset_name
+from tests.fakes import FakeReleaseClient
 
 
 def _write_parquet(p: Path, n: int) -> None:
@@ -117,18 +120,22 @@ def test_parser_has_check_freshness():
 
 def test_cmd_check_freshness_reads_manifest_and_reports_fresh(tmp_path: Path):
     import json
-    (tmp_path / "manifest.json").write_text(json.dumps({"latest_trading_date": "2026-07-03"}))
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "latest_trading_date": "2026-07-03", "datasets": [],
+    }))
     rc = cli.cmd_check_freshness(
         repo="o/r", tag="data-latest", holidays=set(),
         today=date(2026, 7, 6), runner=lambda _cmd: 0, work_dir=tmp_path,
+        client=FakeReleaseClient(),
     )
-    assert rc == 0  # Fri 2026-07-03 published, today Mon -> fresh
+    assert rc == 0  # Fri 2026-07-03 published, today Mon -> fresh, no datasets to check
 
 
 def test_cmd_check_freshness_flags_missing_release(tmp_path: Path):
     rc = cli.cmd_check_freshness(
         repo="o/r", tag="data-latest", holidays=set(),
         today=date(2026, 7, 6), runner=lambda _cmd: 1, work_dir=tmp_path,
+        client=FakeReleaseClient(),
     )
     assert rc == 1  # download failed -> treated as stale/missing
 
@@ -1003,3 +1010,278 @@ def test_cross_check_secondary_wiring_has_no_fallback_machinery(monkeypatch):
     # one. Isolation is structural here, not an empty-tuple flag to assert.
     assert set(captured_kwargs) == {"session", "url", "d", "parse"}
     assert "fallbacks" not in captured_kwargs
+
+
+# -- check-freshness continuity (G2 task 7) --
+#
+# SCOPE AMENDMENT (controller adjudication, supersedes the plan's
+# "primary dataset only" wording): continuity covers EVERY FETCHED dataset
+# (equities AND indices), not just the primary. A T4 review proved a hole
+# confined to a SECONDARY dataset's catch-up window is otherwise invisible
+# to every existing layer (the primary's own staleness/continuity is clean,
+# so nothing else would ever surface it). Derived datasets (reference,
+# ca_flags) are never continuity-checked -- they rebuild from the store, so
+# a hole there is a symptom of an underlying fetched-dataset hole, not an
+# independent fact to alert on.
+
+_TODAY = date(2026, 7, 6)  # Monday; last completed trading day = Fri 2026-07-03
+
+
+def _continuity_registry(monkeypatch, tmp_path: Path) -> None:
+    """Routes the registry to just equities + indices (both fetched, tmp
+    base_dirs) -- continuity must never touch `derived` specs, so a lone
+    derived entry is deliberately NOT included here (nothing to skip in this
+    fixture; test_continuity_skips_derived_datasets below proves the skip
+    explicitly with one present)."""
+    equities = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
+    indices = dataclasses.replace(datasets.INDICES, base_dir=tmp_path / "indices")
+    monkeypatch.setattr(cli.datasets, "DATASETS", {"equities": equities, "indices": indices})
+    monkeypatch.setattr(cli.datasets, "DATASET_ORDER", ["equities", "indices"])
+
+
+def _window_dates(today: date = _TODAY, holidays: set[date] | None = None,
+                   window: int = 10) -> list[date]:
+    holidays = holidays or set()
+    return cal.trading_days_back(
+        cal.previous_trading_day(today, holidays), window, holidays,
+    )
+
+
+def _baseline_parquet_bytes(dates: list[date]) -> bytes:
+    """A minimal baseline parquet: only the `date` column matters to the
+    continuity reader (column-pruned read), but a real baseline carries the
+    full CANON_COLUMNS shape -- match that shape so this fixture stays
+    representative of a real published asset."""
+    import io as _io
+    n = len(dates)
+    df = pd.DataFrame({
+        "date": pd.to_datetime(dates),
+        **{c: [0] * n for c in config.CANON_COLUMNS if c != "date"},
+    })
+    buf = _io.BytesIO()
+    df.to_parquet(buf, compression="zstd", index=False)
+    return buf.getvalue()
+
+
+def _seed_dataset_baseline(
+    fake: FakeReleaseClient, manifest_datasets: list[dict], *,
+    manifest_name: str, file_prefix: str, year: int, dates: list[date],
+) -> None:
+    """Seeds one dataset's manifest entry (v2 shape, `baseline` key) plus the
+    matching content-addressed parquet asset into `fake`, and appends the
+    entry dict to `manifest_datasets` (mutated in place, mirroring how
+    `build_manifest` accumulates `out_datasets`)."""
+    data = _baseline_parquet_bytes(dates)
+    sha = hashlib.sha256(data).hexdigest()
+    name = f"{file_prefix}_{year}.parquet"
+    asset = asset_name(name, sha)
+    fake.seed(asset, data)
+    manifest_datasets.append({
+        "name": manifest_name, "schema_version": 1,
+        "latest_date": max(dates).isoformat(),
+        "baseline": [{"name": name, "asset": asset, "sha256": sha,
+                      "bytes": len(data), "rows": len(dates)}],
+        "deltas": [],
+    })
+
+
+def _seed_manifest_and_client(
+    fake: FakeReleaseClient, manifest_datasets: list[dict], *,
+    work_dir: Path,
+    latest_trading_date: date = date(2026, 7, 3),
+) -> None:
+    """Seeds the manifest into `fake` (documents what a real `gh release
+    download` would fetch) AND writes it directly onto `work_dir` -- the
+    fake `runner=lambda _cmd: 0` used throughout these tests is a pure rc
+    stub (matching the pre-existing check-freshness tests' convention) that
+    does not itself perform a download, so the test must place the file
+    where the real `gh` invocation would have, exactly like the pre-existing
+    `test_cmd_check_freshness_reads_manifest_and_reports_fresh` does."""
+    manifest = {
+        "manifest_version": 2, "generated_at": "2026-07-04T00:00:00Z",
+        "latest_trading_date": latest_trading_date.isoformat(),
+        "datasets": manifest_datasets,
+    }
+    import json as _json
+    payload = _json.dumps(manifest).encode()
+    fake.seed("manifest.json", payload)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "manifest.json").write_bytes(payload)
+
+
+def test_continuity_clean_both_datasets_exits_0(monkeypatch, tmp_path):
+    _continuity_registry(monkeypatch, tmp_path)
+    window = _window_dates()
+    fake = FakeReleaseClient(exists=True)
+    manifest_datasets: list[dict] = []
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="ohlc",
+                            file_prefix="ohlc", year=2026, dates=window)
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="indices",
+                            file_prefix="indices", year=2026, dates=window)
+    _seed_manifest_and_client(fake, manifest_datasets, work_dir=tmp_path / "work")
+
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(), today=_TODAY,
+        runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
+    )
+    assert rc == 0
+
+
+def test_continuity_hole_in_equities_baseline_exits_1_naming_day_and_dataset(
+    monkeypatch, tmp_path, capsys,
+):
+    _continuity_registry(monkeypatch, tmp_path)
+    window = _window_dates()
+    hole = window[len(window) // 2]
+    equities_dates = [d for d in window if d != hole]
+    fake = FakeReleaseClient(exists=True)
+    manifest_datasets: list[dict] = []
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="ohlc",
+                            file_prefix="ohlc", year=2026, dates=equities_dates)
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="indices",
+                            file_prefix="indices", year=2026, dates=window)
+    _seed_manifest_and_client(fake, manifest_datasets, work_dir=tmp_path / "work")
+
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(), today=_TODAY,
+        runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert hole.isoformat() in out
+    assert "ohlc" in out  # names the dataset with the hole
+
+
+def test_continuity_hole_in_indices_baseline_only_exits_1(monkeypatch, tmp_path, capsys):
+    """THE T4 GAP CLOSED: a hole confined entirely to the SECONDARY
+    (indices) dataset must alert even though the primary (equities) baseline
+    is perfectly clean -- this is the exact scenario the plan's original
+    "primary dataset only" wording would have missed, and is the reason for
+    the scope amendment."""
+    _continuity_registry(monkeypatch, tmp_path)
+    window = _window_dates()
+    hole = window[2]
+    indices_dates = [d for d in window if d != hole]
+    fake = FakeReleaseClient(exists=True)
+    manifest_datasets: list[dict] = []
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="ohlc",
+                            file_prefix="ohlc", year=2026, dates=window)
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="indices",
+                            file_prefix="indices", year=2026, dates=indices_dates)
+    _seed_manifest_and_client(fake, manifest_datasets, work_dir=tmp_path / "work")
+
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(), today=_TODAY,
+        runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert hole.isoformat() in out
+    assert "indices" in out
+
+
+def test_continuity_dataset_absent_from_manifest_warns_and_exits_0(
+    monkeypatch, tmp_path, capsys,
+):
+    """Grace rule (pre-first-publish state): a fetched dataset that has
+    never appeared in the manifest yet is reported as a WARNING, not a
+    hard failure -- a dataset that has never published isn't "stale", and a
+    hard exit-1 here would false-alarm from the day indices was registered
+    in the code until its very first successful publish. Once the dataset
+    DOES appear in the manifest, holes are enforced normally (see the
+    hole-in-indices test above)."""
+    _continuity_registry(monkeypatch, tmp_path)
+    window = _window_dates()
+    fake = FakeReleaseClient(exists=True)
+    manifest_datasets: list[dict] = []
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="ohlc",
+                            file_prefix="ohlc", year=2026, dates=window)
+    # indices deliberately NOT added to manifest_datasets -- absent entirely.
+    _seed_manifest_and_client(fake, manifest_datasets, work_dir=tmp_path / "work")
+
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(), today=_TODAY,
+        runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "indices" in err  # warning names the never-published dataset
+
+
+def test_continuity_skips_derived_datasets(monkeypatch, tmp_path):
+    """A derived spec (reference/ca_flags) has no fetcher and is never
+    continuity-checked -- even if it's registered and absent from the
+    manifest, it must NOT trigger the absent-dataset warning path (that path
+    is scoped to FETCHED specs only) and must NOT be able to fail the
+    check."""
+    equities = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
+    derived = datasets.DatasetSpec(
+        key="reference", file_prefix="reference", base_dir=tmp_path / "reference",
+        source_label="derived", normalizer=lambda df: df,
+        make_fetcher=lambda: (_ for _ in ()).throw(
+            RuntimeError("derived dataset has no fetcher -- must never be called")
+        ),
+        abs_rowcount_range=(0, 10**9), manifest_name="reference", schema_version=1,
+        derived=True,
+    )
+    monkeypatch.setattr(cli.datasets, "DATASETS", {"equities": equities, "reference": derived})
+    monkeypatch.setattr(cli.datasets, "DATASET_ORDER", ["equities", "reference"])
+
+    window = _window_dates()
+    fake = FakeReleaseClient(exists=True)
+    manifest_datasets: list[dict] = []
+    _seed_dataset_baseline(fake, manifest_datasets, manifest_name="ohlc",
+                            file_prefix="ohlc", year=2026, dates=window)
+    # "reference" absent from the manifest entirely -- must be a non-event.
+    _seed_manifest_and_client(fake, manifest_datasets, work_dir=tmp_path / "work")
+
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(), today=_TODAY,
+        runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
+    )
+    assert rc == 0
+
+
+def test_continuity_year_boundary_window_downloads_previous_year_asset(
+    monkeypatch, tmp_path,
+):
+    """When the trailing window crosses Jan 1, the continuity check must
+    download BOTH the current-year and previous-year baseline assets (same
+    year-selection logic as `store.read_trailing_window`) -- a baseline
+    seeded ONLY under the correct two-year split must still read as fully
+    clean, proving both years were actually fetched and combined rather
+    than just the latest one."""
+    monkeypatch.setattr(cli.datasets, "DATASETS", {"equities": dataclasses.replace(
+        datasets.EQUITIES, base_dir=tmp_path / "ohlc")})
+    monkeypatch.setattr(cli.datasets, "DATASET_ORDER", ["equities"])
+
+    today = date(2026, 1, 5)  # window reaches back into December 2025
+    window = _window_dates(today=today)
+    assert window[0].year == 2025 and window[-1].year == 2026
+    by_year: dict[int, list[date]] = {}
+    for d in window:
+        by_year.setdefault(d.year, []).append(d)
+
+    fake = FakeReleaseClient(exists=True)
+    manifest_datasets: list[dict] = []
+    data_by_year = []
+    for year, dates_in_year in by_year.items():
+        data = _baseline_parquet_bytes(dates_in_year)
+        sha = hashlib.sha256(data).hexdigest()
+        name = f"ohlc_{year}.parquet"
+        asset = asset_name(name, sha)
+        fake.seed(asset, data)
+        data_by_year.append({"name": name, "asset": asset, "sha256": sha,
+                              "bytes": len(data), "rows": len(dates_in_year)})
+    manifest_datasets.append({
+        "name": "ohlc", "schema_version": 1, "latest_date": max(window).isoformat(),
+        "baseline": data_by_year, "deltas": [],
+    })
+    _seed_manifest_and_client(fake, manifest_datasets, work_dir=tmp_path / "work",
+                               latest_trading_date=date(2026, 1, 2))
+
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(), today=today,
+        runner=lambda _cmd: 0, work_dir=tmp_path / "work", client=fake,
+    )
+    assert rc == 0
