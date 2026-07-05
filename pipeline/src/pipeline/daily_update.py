@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
+import pandas as pd
 from pandera.errors import SchemaError
 
 from pipeline import calendar as cal
@@ -57,6 +58,25 @@ def run_daily(
         # Stamp ACTUAL provenance over the normalizer's partial-bound default:
         # a fallback-served day must never carry the primary's source label.
         df["source"] = res.source
+        # Wrong-date guard (data-corruption gate): a source can serve a
+        # wrong-dated file (stale republish, fallback date-stamp bug) that
+        # otherwise passes every downstream gate. Unchecked, that either (a)
+        # reports "success" for `target` while writing zero target rows --
+        # endless refetch -- or (b) if the embedded date matches an
+        # already-stored day, silently overwrites correct historical rows via
+        # append_keyed's keep="last" dedupe. Reject before any other gate or
+        # store write -- cheapest early exit, and no partial/quarantine state
+        # for a day that isn't even the one we asked for. Empty frames pass
+        # through untouched (the existing abs-floor gate fails them as today).
+        if len(df) > 0 and not (df["date"] == pd.Timestamp(target)).all():
+            fetched_dates = sorted(df["date"].dt.date.unique())[:3]
+            return RunStatus(
+                "failed", target,
+                message=(
+                    f"fetched frame dates {fetched_dates}... do not match "
+                    f"requested target {target}"
+                ),
+            )
         trailing = _trailing_series_counts(spec, target, holidays, special_sessions)
         # NOTE: the per-series deviation gate compares today's PRE-quarantine
         # row counts against the POST-quarantine counts of stored days; the

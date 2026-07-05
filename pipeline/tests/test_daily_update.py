@@ -251,6 +251,72 @@ def test_vanished_major_series_fails(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert not store.has_day(tmp_path, date(2026, 7, 3))
 
 
+def _raw_row(trad_dt: str, isin: str, symbol: str, close: float = 100) -> dict[str, object]:
+    return {
+        "TradDt": trad_dt, "FinInstrmTp": "STK", "ISIN": isin, "TckrSymb": symbol,
+        "SctySrs": "EQ", "SsnId": "F1", "OpnPric": close, "HghPric": close + 1,
+        "LwPric": close - 1, "ClsPric": close, "PrvsClsgPric": close,
+        "TtlTradgVol": 1000, "TtlTrfVal": 100000, "TtlNbOfTxsExctd": 10,
+    }
+
+
+def test_wrong_dated_frame_fails_and_never_touches_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    target = date(2026, 7, 3)
+    wrong_day = date(2026, 7, 1)  # stale republish: whole frame dated D != target
+    raw = pd.DataFrame([_raw_row(wrong_day.isoformat(), "INE002A01018", "RELIANCE")])
+    st = _run(target, StubFetcher(raw), tmp_path)
+    assert st.status == "failed"
+    assert str(target) in st.message  # target date (actual)
+    assert repr(wrong_day) in st.message  # fetched date (actual), datetime.date(...) repr
+    assert not store.has_day(tmp_path, target)
+    assert not store.has_day(tmp_path, wrong_day)  # nothing written anywhere
+
+
+def test_wrong_dated_frame_cannot_overwrite_existing_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    good_day = date(2026, 7, 1)
+    target = date(2026, 7, 3)  # a later, DIFFERENT target than the pre-seeded day
+    # Pre-seed a correct day D via a normal successful run.
+    seed_raw = pd.DataFrame([_raw_row(good_day.isoformat(), "INE002A01018", "RELIANCE", close=100)])
+    seed_st = _run(good_day, StubFetcher(seed_raw), tmp_path)
+    assert seed_st.status == "success"
+    before = pd.read_parquet(base_year(tmp_path))
+    before_day_rows = before[before["date"] == pd.Timestamp(good_day)].reset_index(drop=True)
+
+    # Now run target=T (T != D) with a fetcher serving a frame dated D (the
+    # already-stored day) with DIFFERENT prices -- this must NOT silently
+    # overwrite the pre-seeded history via append_keyed's keep="last".
+    poison_raw = pd.DataFrame(
+        [_raw_row(good_day.isoformat(), "INE002A01018", "RELIANCE", close=999)]
+    )
+    st = _run(target, StubFetcher(poison_raw), tmp_path)
+    assert st.status == "failed"
+
+    after = pd.read_parquet(base_year(tmp_path))
+    after_day_rows = after[after["date"] == pd.Timestamp(good_day)].reset_index(drop=True)
+    pd.testing.assert_frame_equal(before_day_rows, after_day_rows)  # byte-identical
+    assert not store.has_day(tmp_path, target)
+
+
+def test_mixed_dated_frame_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    target = date(2026, 7, 3)
+    other_day = date(2026, 7, 2)
+    raw = pd.DataFrame([
+        _raw_row(target.isoformat(), "INE002A01018", "RELIANCE"),
+        _raw_row(other_day.isoformat(), "INE009A01021", "INFY"),
+    ])
+    st = _run(target, StubFetcher(raw), tmp_path)
+    assert st.status == "failed"
+    assert not store.has_day(tmp_path, target)
+    assert not store.has_day(tmp_path, other_day)
+
+
 def test_quarantined_rows_are_persisted(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(config, "META_DIR", tmp_path / "meta")
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
