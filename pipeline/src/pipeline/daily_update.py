@@ -35,6 +35,7 @@ def run_daily(
     fetcher: Fetcher,
     holidays: set[date],
     special_sessions: set[date] | None = None,
+    is_target_day: bool = True,
 ) -> RunStatus:
     if not cal.is_trading_day(target, holidays, special_sessions=special_sessions):
         return RunStatus("skipped_holiday", target, message="non-trading day")
@@ -45,7 +46,22 @@ def run_daily(
     try:
         res = fetcher.fetch_raw(target)
     except NotYetPublished as e:
-        return RunStatus("not_yet", target, message=str(e))
+        # A 404 on the day we're actually trying to publish today (the
+        # target) is ordinary lateness -- the bhavcopy simply isn't out yet.
+        # A 404 on any OTHER day in the catch-up window (G2 Task 4) is a
+        # different thing entirely: that day is in the past relative to the
+        # target, so NSE's archive should already have it -- a 404 there
+        # means the archive has a HOLE, not that the day is running late.
+        # Treating it as "not_yet" (the CLI's non-alerting ok-set) would let
+        # a real, permanent hole in the catch-up window quietly re-appear as
+        # lateness on every subsequent run, forever -- so it must be
+        # "failed" instead (retryable, and alertable via the exit code).
+        if is_target_day:
+            return RunStatus("not_yet", target, message=str(e))
+        return RunStatus(
+            "failed", target,
+            message=f"archive missing for past trading day {target.isoformat()}",
+        )
     except UnexpectedFailure as e:
         return RunStatus("failed", target, message=str(e))
 

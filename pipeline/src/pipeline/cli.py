@@ -225,13 +225,63 @@ def main(argv: list[str] | None = None) -> int:
         primary_key = datasets.DATASET_ORDER[0]
 
         # Phase 1: FETCHED specs (never touch derived specs' normalizer/make_fetcher).
+        #
+        # G2 Task 4 (catch-up loop): each fetched spec is run not just for
+        # `target` but for the trailing CATCHUP_WINDOW_DAYS-day trading
+        # window ending at `target` (ascending order) -- a day missed by an
+        # earlier failed/skipped run (both crons down, a late bhavcopy, ...)
+        # self-heals here instead of becoming a permanent hole. A day
+        # already in the store costs one cheap `has_day` idempotent-skip
+        # read via run_daily's existing gate.
+        #
+        # ONE fetcher per spec, reused across every day in that spec's
+        # window (not reconstructed per day) -- session/connection reuse,
+        # and consistent with backfill's existing per-spec fetcher lifetime.
+        #
+        # The spec's status recorded into `statuses` (and therefore written
+        # to its status file, and what Phase 2/the exit-code logic keys off)
+        # is always the TARGET day's status -- catch-up days are a side
+        # channel. But a catch-up day's own `failed` must not be silently
+        # swallowed just because the target day succeeded: it's printed
+        # explicitly, and for the PRIMARY spec it forces the overall exit
+        # code to 1 -- a repaired hole that failed to repair must never look
+        # like a clean run.
         statuses: dict[str, RunStatus] = {}
+        primary_window_failure = False
         for key in keys:
             spec = datasets.DATASETS[key]
             if spec.derived:
                 continue
-            st = run_daily(spec, target, fetcher=spec.make_fetcher(), holidays=holidays,
-                           special_sessions=special)
+            fetcher = spec.make_fetcher()
+            # `trading_days_back`'s `end` is only included in its own result
+            # when `end` IS a trading day -- if `target` itself falls on a
+            # holiday/weekend (e.g. cron misfire), the window would silently
+            # exclude it and this loop's "last element" would be some OTHER
+            # day, never target. There is nothing to catch up FOR relative
+            # to a non-trading-day target anyway (run_daily's own calendar
+            # gate would just no-op it), so fall back to the pre-existing
+            # single-day behavior unchanged: call run_daily on `target` alone
+            # (-> "skipped_holiday", exactly as before this task).
+            if not cal.is_trading_day(target, holidays, special_sessions=special):
+                window = [target]
+            else:
+                window = cal.trading_days_back(
+                    target, config.CATCHUP_WINDOW_DAYS, holidays, special
+                )
+            st = None
+            for d in window:
+                st = run_daily(
+                    spec, d, fetcher=fetcher, holidays=holidays,
+                    special_sessions=special, is_target_day=(d == target),
+                )
+                if d != target and st.status == "failed":
+                    print(
+                        f"catch-up: {key} {d.isoformat()} failed: {st.message}",
+                        file=sys.stderr,
+                    )
+                    if key == primary_key:
+                        primary_window_failure = True
+            assert st is not None  # window always has >=1 day (target itself)
             statuses[key] = st
             print(manifest.status_to_dict(st))
 
@@ -254,6 +304,8 @@ def main(argv: list[str] | None = None) -> int:
                 manifest.write_status(st, config.META_DIR, filename=f"last_run_status_{key}.json")
 
         if primary_key in statuses:
+            if primary_window_failure:
+                return 1  # a repaired-hole failure must never silently pass
             return 0 if statuses[primary_key].status in ok else 1
         return 0 if all(s.status in ok for s in statuses.values()) else 1
     if args.cmd == "backfill":

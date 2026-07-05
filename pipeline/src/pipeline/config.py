@@ -38,6 +38,13 @@ ROWCOUNT_DEVIATION: float = 0.15
 # (1800, 3000) live fix).
 INDICES_ROWCOUNT_ABS_RANGE: tuple[int, int] = (50, 500)
 
+# G2 Task 4: catch-up loop. Each `daily` run for a fetched spec re-checks the
+# trailing N trading days (ascending, ending at the target day) via run_daily,
+# not just the target day itself -- a missed day (both crons failed, a late
+# bhavcopy, etc.) self-heals the next time `daily` runs, instead of becoming a
+# permanent hole. Present days cost one cheap `has_day` idempotent-skip read.
+CATCHUP_WINDOW_DAYS: int = 7
+
 # Project root = the pipeline/ directory (two parents up from this file's src/pipeline/).
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 DATA_DIR: Path = PROJECT_ROOT / "data"

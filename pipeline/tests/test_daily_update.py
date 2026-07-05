@@ -85,6 +85,36 @@ def test_not_yet_published_is_reported_not_raised(tmp_path: Path):
     assert st.status == "not_yet"
 
 
+def test_not_yet_published_on_target_day_maps_to_not_yet(tmp_path: Path):
+    # Explicit is_target_day=True (the default) reaffirms the existing
+    # semantics: a 404 on the day we're actually trying to publish today is
+    # ordinary lateness, not a hole.
+    st = run_daily(
+        datasets_spec(tmp_path), date(2026, 7, 3),
+        fetcher=StubFetcher(exc=NotYetPublished("404")), holidays=HOLIDAYS,
+        is_target_day=True,
+    )
+    assert st.status == "not_yet"
+
+
+def test_not_yet_published_on_past_day_maps_to_failed(tmp_path: Path):
+    # G2 Task 4: a 404 for a day that is NOT the target (a catch-up-window
+    # day strictly before today's target) is a HOLE, not lateness -- NSE
+    # archives don't retroactively un-publish a day, so a 404 on a day that
+    # should already exist means the archive is missing it. This must map to
+    # "failed" (retryable, alertable) rather than "not_yet" (which the CLI's
+    # ok-set treats as a clean, non-alerting outcome).
+    past_day = date(2026, 7, 1)
+    st = run_daily(
+        datasets_spec(tmp_path), past_day,
+        fetcher=StubFetcher(exc=NotYetPublished("404")), holidays=HOLIDAYS,
+        is_target_day=False,
+    )
+    assert st.status == "failed"
+    assert "archive missing for past trading day" in st.message
+    assert str(past_day) in st.message
+
+
 def test_unexpected_failure_is_reported_not_raised(tmp_path: Path):
     st = _run(date(2026, 7, 3), StubFetcher(exc=UnexpectedFailure("timeout")), tmp_path)
     assert st.status == "failed"

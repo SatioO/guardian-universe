@@ -287,6 +287,46 @@ in any ordinary daily publish (e.g. a year file rewritten with a new day's
 rows gets a new sha8 and thus a new asset name; the old one ages out after 7
 days, same as always).
 
+## G2: catch-up loop (self-healing)
+
+Every `daily` run doesn't just ingest the target day — for each **fetched**
+dataset it also re-checks the trailing `config.CATCHUP_WINDOW_DAYS = 7`
+trading days (ascending, ending at the target day) via the same `run_daily`
+gates. A day already in the store costs one cheap idempotent-skip read; a day
+that's missing (both crons failed earlier, a late bhavcopy, a transient
+outage, ...) gets fetched and appended right there — no separate command,
+no manual step. This means a single missed day self-heals automatically the
+next time `daily` runs, instead of becoming a permanent hole. The window uses
+ONE fetcher instance per spec (constructed once, reused for every day in that
+spec's window), and threads the same holiday/special-session calendar as the
+target day, so a holiday inside the window is correctly never requested.
+
+**What a past-day failure means.** A 404 for the TARGET day is ordinary
+lateness — the bhavcopy for today just isn't published yet (`not_yet`,
+non-alerting, exit 0). A 404 for any OTHER day in the window is different:
+that day is strictly in the past relative to the target, so NSE's archive
+should already have it — a 404 there means the archive genuinely has a hole,
+not that the day is running late. This is why `run_daily` takes an
+`is_target_day` keyword (`True` for the target day, `False` for every other
+window day): a past-day `NotYetPublished` maps to `"failed"` with a message
+like `"archive missing for past trading day 2026-07-01"`, never `"not_yet"`.
+
+**A repaired-hole failure is never silent.** The dataset's own status (what
+gets written to `last_run_status.json` / `last_run_status_<key>.json`, and
+what Phase 2's derived builders key off) is always the **target day's**
+status — catch-up days are a side effect, not what's reported as "the run."
+But if a non-target day in the window comes back `"failed"`, it's printed
+explicitly (`catch-up: <key> <date> failed: <message>`, stderr) and, for the
+**primary** dataset specifically, it forces `daily`'s overall exit code to 1
+— even when the target day itself succeeded. A hole that failed to repair
+must never look like a clean run just because today's ingest was fine.
+
+**Holes older than the window.** The catch-up loop only looks back 7 trading
+days from the target. A hole older than that — the pipeline was down for
+over a week, or a hole predates this mechanism entirely — is NOT
+self-healed by `daily`; use `backfill --days N` (with N covering the gap) or,
+if both NSE sources are down for that day, `rebuild-day` (see below).
+
 ## G2: manual day-rebuild (recovery)
 
 ### When to use this

@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from pipeline import calendar as cal
 from pipeline import cli, config, datasets
+from pipeline.errors import NotYetPublished
+from pipeline.fetch import FetchResult
 
 
 def _write_parquet(p: Path, n: int) -> None:
@@ -165,7 +168,10 @@ def test_main_daily_runs_all_registered_specs(monkeypatch, tmp_path):
     # import time and write to the real config.REFERENCE_DIR.
     monkeypatch.setattr(cli.builders, "BUILDERS", {"reference": fake_builder})
     assert cli.main(["daily", "--date", "2026-07-03"]) == 0
-    assert seen == ["equities", "indices"]  # DATASET_ORDER as of G1b task 3
+    # G2 Task 4: run_daily is now called once per catch-up-window day per
+    # spec (not once per spec) -- dedupe to assert WHICH specs were run, in
+    # first-seen order, same intent as before the catch-up loop existed.
+    assert list(dict.fromkeys(seen)) == ["equities", "indices"]  # DATASET_ORDER (G1b task 3)
     assert (tmp_path / "last_run_status.json").exists()
 
 
@@ -223,7 +229,10 @@ def test_daily_fetch_loop_skips_derived_specs(monkeypatch, tmp_path):
     # builder") secondary status, but its make_fetcher must never be invoked.
     monkeypatch.setattr(cli.builders, "BUILDERS", {})
     cli.main(["daily", "--date", "2026-07-03"])
-    assert seen == ["equities", "indices"]  # reference (derived) never fetched
+    # G2 Task 4: run_daily is now called once per catch-up-window day per
+    # spec -- dedupe to assert WHICH specs were run (reference/derived must
+    # never appear), same intent as before the catch-up loop existed.
+    assert list(dict.fromkeys(seen)) == ["equities", "indices"]  # reference (derived) never fetched
 
 
 def test_daily_writes_primary_and_secondary_status_files(monkeypatch, tmp_path):
@@ -488,3 +497,215 @@ def test_daily_lone_secondary_failure_exits_1(monkeypatch, tmp_path):
     assert rc == 1
     assert (tmp_path / "last_run_status_indices.json").exists()
     assert not (tmp_path / "last_run_status.json").exists()
+
+
+# --- G2 Task 4: catch-up loop -----------------------------------------------
+#
+# These tests exercise the REAL `run_daily` (never faked) against a real
+# tmp-scoped equities store, driven by a `RecordingFetcher` stub that logs
+# every date it was asked to fetch and serves either a valid one-day frame or
+# a raised exception per date. This is the only way to prove the CLI's window
+# loop (`cal.trading_days_back` -> per-day `run_daily`) actually behaves as
+# specified, as opposed to the `fake_run_daily(spec, target, **kw)` used by
+# every other CLI test above (which bypasses the window loop entirely).
+
+_CATCHUP_HOLIDAYS: set[date] = {date(2026, 8, 15)}
+
+
+def _one_day_raw(d: date) -> pd.DataFrame:
+    """A minimal, valid UDiFF-shaped raw frame for exactly one date -- enough
+    to pass the wrong-date guard, quarantine, and schema gates."""
+    return pd.DataFrame([{
+        "TradDt": d.isoformat(), "FinInstrmTp": "STK", "ISIN": "INE002A01018",
+        "TckrSymb": "RELIANCE", "SctySrs": "EQ", "SsnId": "F1",
+        "OpnPric": 100, "HghPric": 101, "LwPric": 99, "ClsPric": 100,
+        "PrvsClsgPric": 100, "TtlTradgVol": 1000, "TtlTrfVal": 100000,
+        "TtlNbOfTxsExctd": 10,
+    }])
+
+
+class RecordingFetcher:
+    """Logs every requested date; serves `_one_day_raw(d)` by default, or
+    raises `exceptions[d]` when that date has an override. A single instance
+    is reused across an entire window's days (proving the fetcher-reuse
+    contract) by having `make_fetcher` be a closure returning this same
+    object every time it's invoked, while a separate counter proves
+    `make_fetcher` itself is called exactly once per spec per CLI run."""
+
+    def __init__(self, exceptions: dict[date, Exception] | None = None):
+        self.requested: list[date] = []
+        self._exceptions = exceptions or {}
+
+    def fetch_raw(self, d: date) -> FetchResult:
+        self.requested.append(d)
+        if d in self._exceptions:
+            raise self._exceptions[d]
+        return FetchResult(_one_day_raw(d), "nse-udiff")
+
+
+def _catchup_registry(monkeypatch, tmp_path: Path, fetcher: RecordingFetcher):
+    """A registry of exactly one fetched spec ('equities'), tmp-scoped, real
+    normalizer, a permissive rowcount range (single-symbol frames are far
+    below the real (2000, 10000) floor), and `make_fetcher` a counting
+    closure over the single shared `fetcher` instance (fetcher-reuse
+    contract: cli.py must call `spec.make_fetcher()` once per spec, not once
+    per window-day)."""
+    make_fetcher_calls = {"n": 0}
+
+    def _make_fetcher():
+        make_fetcher_calls["n"] += 1
+        return fetcher
+
+    equities = dataclasses.replace(
+        datasets.EQUITIES, base_dir=tmp_path / "ohlc",
+        abs_rowcount_range=(0, 10**9), make_fetcher=_make_fetcher,
+    )
+    monkeypatch.setattr(cli.datasets, "DATASETS", {"equities": equities})
+    monkeypatch.setattr(cli.datasets, "DATASET_ORDER", ["equities"])
+    return make_fetcher_calls
+
+
+def test_catchup_window_fetches_only_the_missing_middle_day(monkeypatch, tmp_path):
+    """A 3-day window where the middle day is missing from the store: the CLI
+    must fetch+append exactly that missing day, treat the other two (already
+    present) days as idempotent skips, still write the target's status, and
+    exit 0."""
+    import json
+
+    from pipeline import config, store
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fetcher = RecordingFetcher()
+    make_fetcher_calls = _catchup_registry(monkeypatch, tmp_path, fetcher)
+
+    equities = cli.datasets.DATASETS["equities"]
+    target = date(2026, 7, 6)  # a Monday -- deliberately not a Friday
+    window = cal.trading_days_back(target, config.CATCHUP_WINDOW_DAYS, set())
+    assert window[-1] == target  # sanity: target is the last (ascending) element
+    missing_day = window[len(window) // 2]
+
+    # Pre-seed every window day EXCEPT missing_day, each via a real run_daily
+    # (so has_day/idempotency sees genuine stored rows, not a hand-poked file).
+    from pipeline.daily_update import run_daily
+    for d in window:
+        if d == missing_day:
+            continue
+        seed_fetcher = RecordingFetcher()
+        st = run_daily(equities, d, fetcher=seed_fetcher, holidays=set())
+        assert st.status == "success"
+    fetcher.requested.clear()  # only care about requests made by the CLI run itself
+
+    rc = cli.main(["daily", "--date", target.isoformat()])
+    assert rc == 0
+    assert fetcher.requested == [missing_day]  # exactly the missing day was fetched
+    assert make_fetcher_calls["n"] == 1  # ONE make_fetcher() call, reused for the window
+    assert store.has_day(equities.base_dir, missing_day)
+    assert (tmp_path / "last_run_status.json").exists()
+    status = json.loads((tmp_path / "last_run_status.json").read_text())
+    # Target itself was pre-seeded above (part of "every window day except
+    # missing_day") -- so its own status from THIS run is the ordinary
+    # idempotent-rerun outcome, exactly as it would be without any hole in
+    # the window at all. This is still the TARGET day's status driving the
+    # status file/exit code (contract item 3), just not "success" specifically.
+    assert status["status"] == "skipped_idempotent"
+    assert status["date"] == target.isoformat()  # status file reflects the TARGET day
+
+
+def test_catchup_past_day_404_fails_and_forces_exit_1_while_target_still_ingests(
+    monkeypatch, tmp_path
+):
+    """A past (non-target) day in the window that 404s must be reported as
+    'failed' (a hole, not lateness) and force the run's exit code to 1 for
+    the primary spec -- even though the target day itself succeeds and its
+    status file still shows success. This is the 'repaired-hole failure must
+    never silently pass' requirement."""
+    import json
+
+    from pipeline import config, store
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+
+    target = date(2026, 7, 6)
+    window = cal.trading_days_back(target, config.CATCHUP_WINDOW_DAYS, set())
+    past_day = window[0]  # the oldest day in the window, strictly before target
+    assert past_day != target
+
+    fetcher = RecordingFetcher(exceptions={past_day: NotYetPublished("404")})
+    _catchup_registry(monkeypatch, tmp_path, fetcher)
+    equities = cli.datasets.DATASETS["equities"]
+
+    rc = cli.main(["daily", "--date", target.isoformat()])
+    assert rc == 1  # a repaired-hole failure must never silently pass
+    assert store.has_day(equities.base_dir, target)  # target day still ingested
+    assert not store.has_day(equities.base_dir, past_day)  # the hole stays a hole
+    status = json.loads((tmp_path / "last_run_status.json").read_text())
+    assert status["status"] == "success"  # status FILE carries the TARGET day's status
+    assert status["date"] == target.isoformat()
+
+
+def test_catchup_past_day_failure_is_printed(monkeypatch, tmp_path, capsys):
+    """The non-target-day failure must be printed clearly, not just silently
+    folded into the exit code."""
+    import json
+
+    from pipeline import config
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+
+    target = date(2026, 7, 6)
+    window = cal.trading_days_back(target, config.CATCHUP_WINDOW_DAYS, set())
+    past_day = window[0]
+
+    fetcher = RecordingFetcher(exceptions={past_day: NotYetPublished("404")})
+    _catchup_registry(monkeypatch, tmp_path, fetcher)
+
+    cli.main(["daily", "--date", target.isoformat()])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert past_day.isoformat() in out
+    assert "failed" in out
+
+
+def test_catchup_target_day_404_is_not_yet_not_failed(monkeypatch, tmp_path):
+    """A 404 on the TARGET day itself is ordinary lateness (unchanged
+    semantics) -- `not_yet`, exit 0 -- never 'failed'."""
+    import json
+
+    from pipeline import config
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+
+    target = date(2026, 7, 6)
+    fetcher = RecordingFetcher(exceptions={target: NotYetPublished("404")})
+    _catchup_registry(monkeypatch, tmp_path, fetcher)
+
+    rc = cli.main(["daily", "--date", target.isoformat()])
+    assert rc == 0
+    status = json.loads((tmp_path / "last_run_status.json").read_text())
+    assert status["status"] == "not_yet"
+
+
+def test_catchup_window_skips_holiday_inside_window(monkeypatch, tmp_path):
+    """The window must be computed via the real trading calendar -- a holiday
+    that falls inside the naive 7-calendar-day span must never be requested
+    (trading_days_back itself is already unit-tested; this is the one
+    integration assertion that the CLI actually threads holidays through)."""
+    import json
+
+    from pipeline import config
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    holiday = date(2026, 7, 2)  # a Thursday inside the window ending 2026-07-06
+    (tmp_path / "holidays.json").write_text(json.dumps({"2026": [holiday.isoformat()]}))
+
+    target = date(2026, 7, 6)
+    fetcher = RecordingFetcher()
+    _catchup_registry(monkeypatch, tmp_path, fetcher)
+
+    rc = cli.main(["daily", "--date", target.isoformat()])
+    assert rc == 0
+    assert holiday not in fetcher.requested
