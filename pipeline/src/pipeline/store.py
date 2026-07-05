@@ -27,9 +27,11 @@ def append_day(df: pd.DataFrame, base: Path) -> None:
             subset=["date", "instrument_key"], keep="last"
         )
         combined = combined.sort_values(["date", "instrument_key"]).reset_index(drop=True)
-        combined.to_parquet(
-            config.ohlc_path(int(year), base), compression="zstd", index=False
-        )
+        # Crash-atomic: write to a temp sibling, then atomically replace.
+        target = config.ohlc_path(int(year), base)
+        tmp = target.with_suffix(".parquet.tmp")
+        combined.to_parquet(tmp, compression="zstd", index=False)
+        tmp.replace(target)
 
 
 def has_day(base: Path, d: date) -> bool:
