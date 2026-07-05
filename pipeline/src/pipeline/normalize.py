@@ -49,6 +49,13 @@ def normalize_equity_bhavcopy(raw: pd.DataFrame, source: str = "nse-udiff") -> p
     symbol = df["symbol"].fillna("").astype(str)
     df["isin"] = isin
 
+    # Live-data finding (Calibration fix 2, real 2026-07-03 bhavcopy): 5
+    # STK/F-session rows had a NULL SctySrs post-universe-widening -- these
+    # survive the filters above with series=NaN and previously failed the
+    # non-nullable `series` schema column, killing the entire day. Null/NaN
+    # series is filled with "" (consistent with the isin="" sentinel).
+    df["series"] = df["series"].fillna("").astype(str)
+
     # Sentinel keys: null/empty-ISIN rows key off "NSE:" + symbol instead of
     # dying in quarantine for a missing ISIN. Rows where BOTH isin and symbol
     # are empty get an empty instrument_key so quarantine's key_ok check still

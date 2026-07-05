@@ -165,7 +165,9 @@ cash series (EQ, BE, BZ, SM, ST, …) is stored under its own `series` value
 (the scanner still defaults to EQ client-side). Rows with a null/empty ISIN
 key as an `"NSE:" + symbol` sentinel instead of being quarantined for a
 missing ISIN (quarantine still rejects rows where BOTH isin and symbol are
-empty).
+empty). Rows with a missing/null `SctySrs` are stored with `series=""` and
+are excluded from EQ-default scans by construction (calibrated live against
+the real 2026-07-03 bhavcopy, which had 5 such STK rows).
 
 Because the widened universe roughly doubles daily row counts and adds
 series with no prior history, the OLD **total**-deviation gate would trip on

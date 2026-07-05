@@ -117,3 +117,36 @@ def test_missing_required_column_raises():
     raw = pd.DataFrame([{"TradDt": "2026-07-03", "TckrSymb": "X"}])  # missing most cols
     with pytest.raises(UnexpectedFailure):
         normalize_equity_bhavcopy(raw)
+
+
+def test_null_series_row_survives_as_empty_string_and_passes_validate_ohlc():
+    # Live-data finding (Calibration fix 2): the real 2026-07-03 NSE bhavcopy,
+    # post-universe-widening, has 5 STK/F-session rows with a NULL SctySrs.
+    # Pre-widening the EQ filter dropped them silently; now they survive the
+    # FinInstrmTp/session filters with series=NaN and validate_ohlc (series is
+    # non-nullable) rejected the row -- failing the ENTIRE day. These rows must
+    # be stored with series="" (consistent with the isin="" sentinel) instead.
+    from pipeline.schema import validate_ohlc
+
+    raw = pd.DataFrame([
+        _stk_row("INE001", "A", "EQ"),
+        _stk_row("INE004", "NULLSERIES", float("nan")),
+        {**_stk_row("INE005", "NONESERIES", "EQ"), "SctySrs": None},
+    ])
+    out = normalize_equity_bhavcopy(raw)
+    assert len(out) == 3
+
+    nullseries = out[out["symbol"] == "NULLSERIES"].iloc[0]
+    assert nullseries["series"] == ""
+    noneseries = out[out["symbol"] == "NONESERIES"].iloc[0]
+    assert noneseries["series"] == ""
+
+    # Must not raise -- this is exactly the frame shape that killed the whole
+    # day in the live 2026-07-03 run before this fix.
+    validate_ohlc(out)
+
+    # Per-series gate sanity (store.day_series_counts-style groupby): the ""
+    # series groups as its own normal (tiny, new-series-exempt) bucket, not as
+    # NaN/dropped rows that would vanish from the groupby entirely.
+    counts = {str(k): int(v) for k, v in out.groupby("series").size().items()}
+    assert counts == {"EQ": 1, "": 2}
