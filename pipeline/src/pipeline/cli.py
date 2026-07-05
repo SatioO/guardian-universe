@@ -10,13 +10,24 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import pandas as pd
+
 from pipeline import backfill as backfill_mod
-from pipeline import builders, config, datasets, freshness, manifest
+from pipeline import builders, config, datasets, freshness, manifest, rebuild
 from pipeline import calendar as cal
 from pipeline.daily_update import RunStatus, run_daily
 from pipeline.errors import ReleaseError, UnexpectedFailure
+from pipeline.fetch import FetchResult
 from pipeline.publish import publish_dataset
 from pipeline.release import GhReleaseClient
+
+# cli is the allowed name edge (see the builders.BUILDERS binding below for
+# the precedent): `rebuild.py` stays fully broker-neutral, so importing a
+# concrete RebuildSource module (here, Kite) purely for its import-time
+# self-registration side effect happens here, not inside rebuild.py or in any
+# dispatch logic. Never call kite_rebuild.KiteDayRebuilder directly below --
+# always go through rebuild.resolve()/rebuild.REBUILDERS.
+from pipeline.sources import kite_rebuild  # noqa: F401
 from pipeline.sync import sync_store
 
 Runner = Callable[[list[str]], int]
@@ -61,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("publish")
     sub.add_parser("sync")
     sub.add_parser("check-freshness")
+    r = sub.add_parser("rebuild-day")
+    r.add_argument("--date", required=True)
+    # choices derived from the registry (populated by this module's broker
+    # self-registration imports above) -- never a hardcoded broker-name list.
+    r.add_argument("--via", choices=[*rebuild.REBUILDERS], default=None)
     return p
 
 
@@ -75,6 +91,96 @@ def _run_builder(spec: datasets.DatasetSpec, target: date) -> RunStatus:
         return build(spec, target)
     except Exception as e:  # boundary guard: builders must never crash the CLI
         return RunStatus("failed", target, message=f"builder error for '{spec.key}': {e}")
+
+
+class _OneShotFetcher:
+    """Wraps an already-built frame as a `Fetcher` so `rebuild-day` can route
+    through the NORMAL `run_daily` path (every gate applies: wrong-date guard,
+    rowcount, quarantine, schema) instead of a bespoke store-write path.
+
+    `fetch_raw` ignores its `d` argument -- the frame was already built by the
+    caller for the requested date before this wrapper was constructed."""
+
+    def __init__(self, frame: pd.DataFrame, source: str) -> None:
+        self._frame = frame
+        self._source = source
+
+    def fetch_raw(self, d: date) -> FetchResult:  # noqa: ARG002 - frame is precomputed
+        return FetchResult(self._frame, self._source)
+
+
+def _load_rebuild_universe(reference_dir: Path) -> dict[str, tuple[str, str]]:
+    """symbol -> (isin, series) for whichever RebuildSource `rebuild-day`
+    resolves to, read from the reference/instruments store: active rows
+    only, index rows excluded (an index has no tradable broker instrument
+    token). Reference is SCD2 (multiple rows per symbol over time) --
+    dedupe to the latest by `last_seen`, same as `datasets._load_isin_map`."""
+    df = pd.read_parquet(reference_dir / "instruments_all.parquet")
+    df = df[(df["status"] == "active") & (df["series"] != "INDEX")]
+    df = df.sort_values("last_seen").drop_duplicates(subset="symbol", keep="last")
+    return {
+        str(row.symbol): (str(row.isin), str(row.series))
+        for row in df.itertuples()
+    }
+
+
+def cmd_rebuild_day(target: date, *, holidays: set[date],
+                     special_sessions: set[date] | None = None,
+                     via: str | None = None) -> int:
+    """Manual last-resort recovery: rebuild one day's equities OHLCV directly
+    from a registered broker source (`--via <id>`, or the first available one
+    when omitted) when both NSE sources are down or the hole predates either
+    NSE archive. NEVER invoked from cron or the automatic fallback chain --
+    see rebuild.py's module docstring and RUNBOOK.md.
+
+    Broker-agnostic by construction: this function never mentions a broker by
+    name -- `rebuild.resolve(via)` is the only place that decides which
+    registered `RebuildSource` serves the request, and that source's own
+    `available()` is what actually gates on credentials (see rebuild.py).
+
+    Deliberately does NOT run Phase 2 (derived builders, e.g. `reference`):
+    those are built from the regular daily cadence's full multi-dataset run,
+    and a single manual equities rebuild is not that -- running them here
+    would rebuild `reference`/`ca_flags` from a store that may still be
+    missing surrounding days, which is out of scope for what this command is
+    for (getting one day's raw OHLCV back into the store)."""
+    try:
+        source = rebuild.resolve(via)
+    except ValueError as e:
+        print(f"rebuild-day: {e}", file=sys.stderr)
+        return 2
+
+    reference_path = config.REFERENCE_DIR / "instruments_all.parquet"
+    if not reference_path.exists():
+        print(
+            f"rebuild-day requires the reference dataset at {reference_path} "
+            "(the symbol universe map) -- run a normal `daily` cycle at "
+            "least once first",
+            file=sys.stderr,
+        )
+        return 2
+
+    universe = _load_rebuild_universe(config.REFERENCE_DIR)
+    frame = source.day_frame(target, universe)
+
+    spec = datasets.DATASETS[datasets.DATASET_ORDER[0]]
+    # Provenance is derived from the resolved source's own id, never a
+    # hardcoded broker name -- a second registered broker gets
+    # "<its-id>-rebuild" for free.
+    fetcher = _OneShotFetcher(frame, f"{source.id}-rebuild")
+    status = run_daily(spec, target, fetcher=fetcher, holidays=holidays,
+                        special_sessions=special_sessions)
+    print(manifest.status_to_dict(status))
+    # RebuildSource itself only guarantees id/available/day_frame; a
+    # `failures` list is a (currently universal, Kite included) convention,
+    # not a Protocol requirement, so read it defensively.
+    failures = getattr(source, "failures", [])
+    print(f"per-symbol failures: {len(failures)}", file=sys.stderr)
+    for f in failures:
+        print(f"  - {f}", file=sys.stderr)
+
+    ok = ("success", "skipped_holiday", "skipped_idempotent", "not_yet")
+    return 0 if status.status in ok else 1
 
 
 def cmd_check_freshness(
@@ -175,6 +281,11 @@ def main(argv: list[str] | None = None) -> int:
                 today=datetime.now(UTC).date(), runner=_plain_runner,
                 work_dir=Path(tmp), special_sessions=special,
             )
+    if args.cmd == "rebuild-day":
+        holidays = cal.load_holidays(config.META_DIR / "holidays.json")
+        special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
+        target = date.fromisoformat(args.date)
+        return cmd_rebuild_day(target, holidays=holidays, special_sessions=special, via=args.via)
     # publish
     client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
     try:

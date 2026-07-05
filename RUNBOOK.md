@@ -286,3 +286,95 @@ nothing is GC-eligible at the cutover except assets that would be superseded
 in any ordinary daily publish (e.g. a year file rewritten with a new day's
 rows gets a new sha8 and thus a new asset name; the old one ages out after 7
 days, same as always).
+
+## G2: manual day-rebuild (recovery)
+
+### When to use this
+Last resort ONLY: both NSE sources (the UDiFF primary and the
+`sec_bhavdata_full` fallback) are down for a trading day, or a data hole
+predates what either NSE archive still serves. This command is **never**
+wired into cron or the automatic fallback chain (`NseUdiffFetcher.fallbacks`)
+— it is credential-gated and exists purely for a human operator to invoke on
+demand. If a normal `daily`/catch-up run would eventually self-heal the hole
+(NSE archives typically stay available for many days), prefer that; reach
+for this only when NSE itself is the problem.
+
+### Rebuild via any registered broker source (currently: kite)
+`rebuild-day` is **broker-agnostic**: it resolves which broker actually
+serves the rebuild through a registry (`pipeline/src/pipeline/rebuild.py`,
+`RebuildSource` Protocol + `REBUILDERS` dict), never a hardcoded broker name.
+Today exactly one broker is registered — Kite Connect (`id = "kite"`,
+implemented in `pipeline/src/pipeline/sources/kite_rebuild.py`) — but the CLI
+itself has zero Kite-specific logic; adding a second broker later is purely
+additive (see "Adding a new broker source" below).
+
+1. Generate a fresh Kite Connect access token (tokens expire daily at 6 AM
+   IST): follow Kite Connect's login flow —
+   https://kite.trade/docs/connect/v3/user/#login-flow — to obtain
+   `KITE_API_KEY` and a same-day `KITE_ACCESS_TOKEN`.
+2. Export both as environment variables:
+   ```
+   export KITE_API_KEY=...
+   export KITE_ACCESS_TOKEN=...
+   ```
+3. Run the rebuild for the missing date:
+   ```
+   cd pipeline && uv run python -m pipeline rebuild-day --date YYYY-MM-DD
+   ```
+   Optionally pin the broker explicitly with `--via kite` (useful once a
+   second broker is registered and you want to force one over the other;
+   omitting `--via` picks the first currently-available registered source).
+   Requires the `reference/instruments` derived dataset to already exist
+   locally (it supplies the symbol -> (ISIN, series) universe map) — run a
+   normal `daily` cycle at least once first if it's missing.
+4. Expect roughly **~15 minutes for the full ~2400-symbol NSE universe** at
+   the default 0.35s per-symbol rate limit (one HTTP call per symbol against
+   Kite's historical-candle endpoint).
+5. On success, publish as normal:
+   ```
+   cd pipeline && uv run python -m pipeline publish
+   ```
+
+The rebuilt frame runs through the **exact same** `run_daily` gates as any
+regular ingest (wrong-date guard, per-series rowcount deviation, quarantine,
+schema validation) — a rebuild that only manages to recover a small fraction
+of the universe will legitimately **fail** the absolute rowcount floor rather
+than silently landing a partial day. That is by design: a partial day is
+worse than a clearly-failed one (it would otherwise look "complete" to
+`has_day`/idempotency checks). Per-symbol failures (a handful of bad/missing
+symbols) are tolerated and reported as a count + list on stderr; they do not
+block the rest of the day from landing.
+
+`rebuild-day` deliberately does **not** run the derived-dataset builders
+(`reference`, `ca_flags`) that a full `daily --dataset all` run would —
+those are rebuilt from the regular daily cadence's full multi-dataset run,
+and a one-off manual equities rebuild is not that; run a normal `daily`
+afterward (or wait for the next scheduled one) to refresh derived datasets
+against the now-repaired store.
+
+### Known degradations (accepted trade-offs for a recovery path)
+Kite's historical day-candle endpoint doesn't expose two UDiFF fields for a
+single day, so they're approximated rather than sourced correctly:
+- **`PrvsClsgPric` (previous close)** degrades to the day's own **open**
+  price (fetching a second, d-1 candle per symbol would double an already
+  slow per-symbol HTTP volume for ~2400 symbols).
+- **`TtlTrfVal` (turnover)** is not present in the day-candle payload at all
+  and defaults to **0.0**.
+
+Both are documented, intentional gaps: the goal of this path is getting
+*some* OHLCV data back into the store for a hole, not byte-for-byte
+reproducing the official bhavcopy. Do not rely on turnover or previous-close
+figures for any day rebuilt this way.
+
+### Adding a new broker source
+Implement `rebuild.RebuildSource` (`id`, `available()`, `day_frame()`
+returning the same PRIMARY-RAW UDiFF shape as the Kite/secfull adapters —
+see `fetch.py`'s fallback-contract docstring) in a new module under
+`pipeline/src/pipeline/sources/`, and self-register it at import time
+(`rebuild.register(YourBroker.from_env())`, mirroring
+`kite_rebuild.py`'s bottom-of-file registration). Import that module once,
+for its registration side effect, from `cli.py` (the one allowed
+broker-naming edge — see the comment above the Kite import there). No other
+edits to `cli.py`, `rebuild.py`, or `cmd_rebuild_day` are needed: `--via`'s
+choices and provenance labels (`"<id>-rebuild"`) are derived from the
+registry automatically.
