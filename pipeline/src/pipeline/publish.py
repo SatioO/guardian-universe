@@ -63,13 +63,22 @@ def check_no_shrink(new: dict[str, Any], live: dict[str, Any] | None) -> None:
         raise UnexpectedFailure("shrink-guard: latest_trading_date would regress")
 
 
-def _read_live_manifest(client: ReleaseClient, work: Path) -> dict[str, Any] | None:
+def _read_live_manifest(
+    client: ReleaseClient, work: Path, *, listed: set[str]
+) -> dict[str, Any] | None:
+    # Distinguish "manifest genuinely absent" (fresh release: safe to treat
+    # as None) from "manifest is listed as present but failed to download"
+    # (transient read failure: must NOT be treated as None, or a never-synced
+    # runner with synced generated_at=None would sail through check_cas and
+    # check_no_shrink and clobber a live, populated release).
+    if "manifest.json" not in listed:
+        return None
     try:
         client.download(["manifest.json"], work)
-    except ReleaseError:
-        # No manifest yet (fresh release) — or transiently unreadable, in which
-        # case check_cas will mismatch the synced state and abort. Fail-safe.
-        return None
+    except ReleaseError as e:
+        raise UnexpectedFailure(
+            f"manifest.json exists on the release but could not be read: {e}"
+        ) from e
     loaded: dict[str, Any] = json.loads((work / "manifest.json").read_text())
     return loaded
 
@@ -114,7 +123,15 @@ def _gc(client: ReleaseClient, new_manifest: dict[str, Any], now: datetime) -> N
         for a in client.list_assets():
             if a.name in referenced or a.name in PROTECTED_ASSETS:
                 continue
-            created = datetime.fromisoformat(a.created_at.replace("Z", "+00:00"))
+            try:
+                created = datetime.fromisoformat(a.created_at.replace("Z", "+00:00"))
+            except ValueError:
+                # Malformed created_at: treat as "too young to GC" rather
+                # than let a bad timestamp fail an otherwise-successful,
+                # already-flipped publish.
+                print(f"gc: skipping {a.name} (unparseable created_at {a.created_at!r})",
+                      file=sys.stderr)
+                continue
             if now - created < GC_GRACE:
                 continue
             try:
@@ -147,7 +164,8 @@ def publish_dataset(
         client.create()
 
     stage_dir.mkdir(parents=True, exist_ok=True)
-    live = _read_live_manifest(client, stage_dir / "_live")
+    existing = {a.name for a in client.list_assets()}
+    live = _read_live_manifest(client, stage_dir / "_live", listed=existing)
 
     synced_path = meta_dir / SYNCED_STATE
     if not synced_path.exists():
@@ -158,7 +176,6 @@ def publish_dataset(
     check_no_shrink(new_manifest, live)
 
     # Upload new content-addressed data assets (immutable: no clobber).
-    existing = {a.name for a in client.list_assets()}
     by_name = {p.name: p for p in data_files}
     for entry in new_manifest["datasets"][0]["files"]:
         if entry["asset"] in existing:
