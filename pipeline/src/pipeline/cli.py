@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pipeline import backfill as backfill_mod
 from pipeline import calendar as cal
-from pipeline import config, freshness, manifest
+from pipeline import config, datasets, freshness, manifest
 from pipeline.daily_update import run_daily
 from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.fetch import NseUdiffFetcher
@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
         fetcher = NseUdiffFetcher()
         target = date.fromisoformat(args.date) if args.date else datetime.now(UTC).date()
-        st = run_daily(target, fetcher=fetcher, holidays=holidays, base=config.OHLC_DIR)
+        st = run_daily(datasets.EQUITIES, target, fetcher=fetcher, holidays=holidays)
         manifest.write_status(st, config.META_DIR)
         print(manifest.status_to_dict(st))
         return 0 if st.status in ("success", "skipped_holiday", "skipped_idempotent",
@@ -74,8 +74,8 @@ def main(argv: list[str] | None = None) -> int:
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
         fetcher = NseUdiffFetcher()
         results = backfill_mod.backfill(
-            datetime.now(UTC).date(), args.days,
-            fetcher=fetcher, holidays=holidays, base=config.OHLC_DIR,
+            datasets.EQUITIES, datetime.now(UTC).date(), args.days,
+            fetcher=fetcher, holidays=holidays,
         )
         return 0 if all(
             r.status in ("success", "skipped_holiday", "skipped_idempotent", "not_yet")

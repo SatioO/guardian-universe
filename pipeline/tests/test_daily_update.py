@@ -1,16 +1,26 @@
+import dataclasses
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from pipeline import config, store
+from pipeline import config, datasets, store
 from pipeline.daily_update import RunStatus, run_daily
 from pipeline.errors import NotYetPublished, UnexpectedFailure
 from pipeline.fetch import Fetcher
 
 HOLIDAYS = {date(2026, 8, 15)}
 RAW = pd.read_csv(Path(__file__).parent / "fixtures" / "bhavcopy_normal.csv")
+
+
+def datasets_spec(base):
+    # abs_rowcount_range is re-read from config (not just base_dir) so that
+    # tests monkeypatching config.ROWCOUNT_ABS_RANGE still take effect — the
+    # spec field is otherwise frozen at datasets.py import time.
+    return dataclasses.replace(
+        datasets.EQUITIES, base_dir=base, abs_rowcount_range=config.ROWCOUNT_ABS_RANGE
+    )
 
 
 class StubFetcher:
@@ -25,7 +35,7 @@ class StubFetcher:
 
 
 def _run(target: date, fetcher: Fetcher, base: Path) -> RunStatus:
-    return run_daily(target, fetcher=fetcher, holidays=HOLIDAYS, base=base)
+    return run_daily(datasets_spec(base), target, fetcher=fetcher, holidays=HOLIDAYS)
 
 
 def test_normal_day_ingests_and_persists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

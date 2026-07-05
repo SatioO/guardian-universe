@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
 
 from pandera.errors import SchemaError
 
 from pipeline import calendar as cal
 from pipeline import store, validate
+from pipeline.datasets import DatasetSpec
 from pipeline.errors import NotYetPublished, UnexpectedFailure
 from pipeline.fetch import Fetcher
-from pipeline.normalize import normalize_equity_bhavcopy
 from pipeline.schema import validate_ohlc
 
 _TRAILING_DAYS = 10
@@ -29,16 +28,16 @@ class RunStatus:
 
 
 def run_daily(
+    spec: DatasetSpec,
     target: date,
     *,
     fetcher: Fetcher,
     holidays: set[date],
-    base: Path,
 ) -> RunStatus:
     if not cal.is_trading_day(target, holidays):
         return RunStatus("skipped_holiday", target, message="non-trading day")
 
-    if store.has_day(base, target):
+    if store.has_day(spec.base_dir, target, prefix=spec.file_prefix):
         return RunStatus("skipped_idempotent", target, message="already present")
 
     try:
@@ -53,12 +52,12 @@ def run_daily(
     # SchemaError) AND unexpected ones (a malformed frame -> KeyError, a store
     # OSError, ...) all map to a "failed" status so the scheduler never crashes.
     try:
-        df = normalize_equity_bhavcopy(raw)
-        trailing = _trailing_counts(base, target, holidays)
+        df = spec.normalizer(raw)
+        trailing = _trailing_counts(spec, target, holidays)
         # NOTE: the deviation gate compares today's PRE-quarantine row count
         # against the POST-quarantine counts of stored days; the difference is
         # negligible in steady state (few rows are ever quarantined).
-        validate.check_rowcount(len(df), trailing)
+        validate.check_rowcount(len(df), trailing, abs_range=spec.abs_rowcount_range)
         clean, bad = validate.quarantine_bad_rows(df)
         if len(clean) == 0 and len(df) > 0:
             # A day where every row is corrupt is a data failure, not a
@@ -69,13 +68,13 @@ def run_daily(
                 message=f"all {len(df)} rows failed quarantine",
             )
         clean = validate_ohlc(clean)  # runtime contract gate (same schema as tests)
-        store.append_day(clean, base)
+        store.append_day(clean, spec.base_dir, prefix=spec.file_prefix)
         return RunStatus(
             status="success",
             date=target,
             symbol_count=len(clean),
             quarantined_count=len(bad),
-            source="nse-udiff",
+            source=spec.source_label,
         )
     except (UnexpectedFailure, SchemaError) as e:
         return RunStatus("failed", target, message=str(e))
@@ -83,10 +82,10 @@ def run_daily(
         return RunStatus("failed", target, message=f"unexpected pipeline error: {e}")
 
 
-def _trailing_counts(base: Path, target: date, holidays: set[date]) -> list[int]:
+def _trailing_counts(spec: DatasetSpec, target: date, holidays: set[date]) -> list[int]:
     counts: list[int] = []
     prev = cal.previous_trading_day(target, holidays)
     for d in cal.trading_days_back(prev, _TRAILING_DAYS, holidays):
-        if store.has_day(base, d):
-            counts.append(store.day_symbol_count(base, d))
+        if store.has_day(spec.base_dir, d, prefix=spec.file_prefix):
+            counts.append(store.day_symbol_count(spec.base_dir, d, prefix=spec.file_prefix))
     return counts
