@@ -41,6 +41,19 @@ def _synced(meta: Path, generated_at: str | None) -> None:
     write_json({"generated_at": generated_at}, meta / SYNCED_STATE)
 
 
+def _write_store(base: Path, days: list[str], *, prefix: str = "ohlc") -> None:
+    # Mirrors _store's row-building logic but writes into an arbitrary
+    # directory under an arbitrary file_prefix, so it can populate a second
+    # (non-equities) dataset's base_dir -- e.g. indices -- without touching
+    # _store's fixed ohlc/meta/stage shape used by the rest of this file.
+    base.mkdir(parents=True, exist_ok=True)
+    rows = {c: ["x"] * len(days) for c in config.CANON_COLUMNS}
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(days)
+    df["instrument_key"] = [f"INE{i}" for i in range(len(days))]
+    df.to_parquet(base / f"{prefix}_2026.parquet", compression="zstd", index=False)
+
+
 def test_first_publish_creates_release_flips_manifest_last(tmp_path: Path):
     ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
     _synced(meta, None)
@@ -320,3 +333,40 @@ def test_publish_uploads_quarantine_extra(tmp_path: Path):
     publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
                     generated_at="g1", now=NOW)
     assert "ohlc_2026-07-03.parquet" in fake.assets  # diagnostic extra, unreferenced -> self-GCs
+
+
+def test_publish_with_registered_but_empty_second_dataset(tmp_path: Path):
+    # The exact merge-day state: BOTH specs are registered (equities +
+    # indices) but the indices base_dir is empty/nonexistent -- the real
+    # live state right after Task 3's DATASETS registration, before Task 9's
+    # indices backfill goes live. Mechanism is correct by trace
+    # (build_manifest omits empty datasets; the shrink-guard never sees an
+    # unpublished dataset because it isn't in the live manifest either) --
+    # this proves it end-to-end instead of by trace alone.
+    eq = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
+    idx = dataclasses.replace(datasets.INDICES, base_dir=tmp_path / "indices")
+    meta, stage = tmp_path / "meta", tmp_path / "stage"
+    meta.mkdir()
+
+    _write_store(eq.base_dir, ["2026-07-03"])
+    # idx.base_dir ("indices") is deliberately never created.
+
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False)
+    publish_dataset(specs=[eq, idx], meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="g1", now=NOW)
+
+    assert_release_consistent(fake)
+    live = json.loads(fake.assets["manifest.json"])
+    assert [d["name"] for d in live["datasets"]] == ["ohlc"]  # indices omitted
+    assert not any(name.startswith("indices_") for name in fake.assets)
+
+    # Go-live: indices gets its first year file: additive, not disruptive.
+    _write_store(idx.base_dir, ["2026-07-03"], prefix="indices")
+    _synced(meta, "g1")
+    publish_dataset(specs=[eq, idx], meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="g2", now=NOW)
+
+    assert_release_consistent(fake)
+    live2 = json.loads(fake.assets["manifest.json"])
+    assert {d["name"] for d in live2["datasets"]} == {"ohlc", "indices"}
