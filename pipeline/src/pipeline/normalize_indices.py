@@ -46,6 +46,9 @@ def normalize_indices(raw: pd.DataFrame, source: str = "nse-indices") -> pd.Data
     df["close"] = df["Closing Index Value"].astype(float)
 
     # prevclose = close - Points Change
+    # May go negative when Points Change > close (small-base indices); such rows
+    # are quarantined upstream of the schema gate — see
+    # test_negative_prevclose_index_row_is_quarantined_not_fatal.
     df["prevclose"] = df["close"] - df["Points Change"].astype(float)
 
     # Volume: NaN -> 0, int64

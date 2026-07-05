@@ -1,9 +1,10 @@
 import pandas as pd
 import pytest
 
-from pipeline import config
+from pipeline import config, validate
 from pipeline.errors import UnexpectedFailure
 from pipeline.normalize_indices import normalize_indices
+from pipeline.schema import validate_ohlc
 
 
 def _raw() -> pd.DataFrame:
@@ -38,3 +39,32 @@ def test_normalize_indices_canonical():
 def test_normalize_indices_missing_column_fails_loud():
     with pytest.raises(UnexpectedFailure, match="missing"):
         normalize_indices(_raw().drop(columns=["Points Change"]))
+
+
+def test_normalize_indices_iso_date_fails():
+    # Index Date must be strict DD-MM-YYYY; an ISO-formatted date must not
+    # silently parse (pd.to_datetime with format=... raises ValueError).
+    raw = _raw()
+    raw["Index Date"] = ["2026-07-03", "2026-07-03"]
+    with pytest.raises(ValueError):
+        normalize_indices(raw)
+
+
+def test_negative_prevclose_index_row_is_quarantined_not_fatal():
+    # Points Change > close is possible on small-base indices, driving
+    # prevclose negative. Build a normalized-indices-shaped frame (one normal
+    # row, one with prevclose < 0) and push it through the same
+    # quarantine -> schema path run_daily uses, to prove the bad row is
+    # dropped by quarantine_bad_rows BEFORE validate_ohlc ever sees it.
+    raw = _raw()
+    raw["Points Change"] = [150.15, 60000.0]  # row 1: Points Change > close -> prevclose < 0
+    df = normalize_indices(raw)
+    assert df["prevclose"].iloc[1] < 0
+
+    clean, bad = validate.quarantine_bad_rows(df)
+
+    assert df["symbol"].iloc[1] in set(bad["symbol"])
+    assert set(clean["symbol"]) == {df["symbol"].iloc[0]}
+    assert (clean["prevclose"] > 0).all()
+
+    validate_ohlc(clean)  # must not raise: bad row already quarantined out
