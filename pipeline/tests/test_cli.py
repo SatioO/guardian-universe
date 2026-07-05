@@ -1751,3 +1751,68 @@ def test_continuity_release_error_on_asset_download_exits_1_clean_message(
     err = capsys.readouterr().err
     assert "cross-dataset" in err
     assert "Traceback" not in err
+
+
+# --- G3 Task 4: monthly snapshot CLI subcommand ------------------------------
+
+def test_parser_has_snapshot():
+    args = cli.build_parser().parse_args(["snapshot"])
+    assert args.cmd == "snapshot"
+
+
+def test_main_snapshot_calls_create_then_prune_and_exits_0(monkeypatch):
+    calls: list[str] = []
+
+    def fake_create_snapshot(*a, **kw):
+        calls.append("create")
+        return "data-snapshot-202607"
+
+    def fake_prune_snapshots(*a, **kw):
+        calls.append("prune")
+        return ["data-snapshot-202601"]
+
+    monkeypatch.setattr(cli, "create_snapshot", fake_create_snapshot)
+    monkeypatch.setattr(cli, "prune_snapshots", fake_prune_snapshots)
+    rc = cli.main(["snapshot"])
+    assert rc == 0
+    assert calls == ["create", "prune"]  # create runs before prune, never the reverse
+
+
+def test_main_snapshot_returns_1_on_release_error(monkeypatch):
+    from pipeline.errors import ReleaseError
+
+    def _boom(*a, **kw):
+        raise ReleaseError("network down")
+
+    monkeypatch.setattr(cli, "create_snapshot", _boom)
+    assert cli.main(["snapshot"]) == 1
+
+
+def test_main_snapshot_returns_1_on_unexpected_failure(monkeypatch):
+    def _boom(*a, **kw):
+        raise UnexpectedFailure("snapshot tag already exists")
+
+    monkeypatch.setattr(cli, "create_snapshot", _boom)
+    assert cli.main(["snapshot"]) == 1
+
+
+def test_main_snapshot_prune_failure_also_exits_1(monkeypatch):
+    from pipeline.errors import ReleaseError
+
+    monkeypatch.setattr(cli, "create_snapshot", lambda *a, **kw: "data-snapshot-202607")
+
+    def _boom(*a, **kw):
+        raise ReleaseError("delete failed")
+
+    monkeypatch.setattr(cli, "prune_snapshots", _boom)
+    assert cli.main(["snapshot"]) == 1
+
+
+def test_main_snapshot_prints_created_and_pruned(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "create_snapshot", lambda *a, **kw: "data-snapshot-202607")
+    monkeypatch.setattr(cli, "prune_snapshots", lambda *a, **kw: ["data-snapshot-202601"])
+    rc = cli.main(["snapshot"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "data-snapshot-202607" in out
+    assert "data-snapshot-202601" in out

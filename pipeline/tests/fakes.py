@@ -68,6 +68,55 @@ class FakeReleaseClient:
         self._exists = True
 
 
+class FakeReleaseRepo:
+    """Deterministic in-memory multi-tag release repo: models the ONE
+    underlying GitHub repo that `snapshot.py`'s `create_snapshot`/
+    `prune_snapshots` operate over, as a `dict[str, FakeReleaseClient]` keyed
+    by tag.
+
+    This is purely ADDITIVE alongside `FakeReleaseClient` -- it does not
+    modify that class at all, so every existing single-tag `FakeReleaseClient`
+    usage across the rest of the suite is untouched. `FakeReleaseClient`
+    itself still only ever models ONE tag; `FakeReleaseRepo` is what lets
+    tests model several tags (e.g. `data-latest` plus several
+    `data-snapshot-YYYYMM` tags) sharing one fake "repo" namespace."""
+
+    def __init__(self) -> None:
+        self._clients: dict[str, FakeReleaseClient] = {}
+
+    def client_for(self, tag: str) -> FakeReleaseClient:
+        """Factory: same signature shape as the real
+        `dest_client_factory: Callable[[str], ReleaseClient]` the CLI/snapshot
+        code is built against. Returns the SAME `FakeReleaseClient` instance
+        on every call for a given tag (lazily created on first access) --
+        callers that build a client for a tag and later fetch "the client for
+        that tag" again see the identical object/state, matching how the real
+        `GhReleaseClient(repo=..., tag=t)` addresses the same underlying
+        release across multiple constructions."""
+        if tag not in self._clients:
+            self._clients[tag] = FakeReleaseClient()
+        return self._clients[tag]
+
+    def list_releases(self) -> list[str]:
+        return list(self._clients)
+
+    def delete_release(self, tag: str) -> None:
+        del self._clients[tag]
+
+    def tags(self) -> list[str]:
+        """Test helper (not part of the ReleaseClient protocol): every tag
+        currently present in this repo, for assertions."""
+        return list(self._clients)
+
+    def as_list_client(self) -> FakeReleaseRepo:
+        """Returns self: `list_releases`/`delete_release` above already give
+        this object the shape callers need for the "list client" role (e.g.
+        `snapshot.prune_snapshots`'s `list_client: ReleaseClient` parameter) --
+        this accessor just names that role explicitly at call sites instead of
+        passing the repo object bare."""
+        return self
+
+
 def assert_release_consistent(fake: FakeReleaseClient) -> None:
     """The G0 invariant: whatever manifest is live, every file it references
     (baseline/files, v1 or v2, plus any v2 deltas) exists on the release with

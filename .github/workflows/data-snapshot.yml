@@ -1,0 +1,43 @@
+name: data-snapshot
+
+on:
+  schedule:
+    - cron: "0 4 1 * *"   # 1st of the month, 04:00 UTC — monthly DR snapshot
+  workflow_dispatch:
+
+permissions:
+  contents: write   # gh needs release read+write (create/delete releases)
+  issues: write     # failure alerting
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: pipeline
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.lock -e . --no-deps
+      - name: Create monthly snapshot + prune (keep newest 6)
+        run: python -m pipeline snapshot
+      - name: Alert on failure
+        if: failure()
+        working-directory: ${{ github.workspace }}
+        run: |
+          gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true
+          body="Monthly data-snapshot FAILED on $(date -u +%F) — the disaster-recovery snapshot mechanism did not complete (create or prune may have failed). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number' || true)
+          if [ -z "$n" ]; then
+            gh issue create --title "Data pipeline: monthly snapshot failed" --label pipeline-failure --body "$body"
+          else
+            gh issue comment "$n" --body "$body"
+          fi

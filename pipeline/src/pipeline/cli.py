@@ -42,6 +42,7 @@ from pipeline.fetch import _BROWSER_UA, FetchResult, NseUdiffFetcher, _fetch_wit
 from pipeline.normalize import normalize_equity_bhavcopy
 from pipeline.publish import publish_dataset
 from pipeline.release import GhReleaseClient, ReleaseClient
+from pipeline.snapshot import create_snapshot, prune_snapshots
 from pipeline.sources.nse_secfull import build_secfull_url, secfull_to_udiff_shape
 from pipeline.sync import sync_store
 
@@ -87,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("publish")
     sub.add_parser("sync")
     sub.add_parser("check-freshness")
+    sub.add_parser("snapshot")
     r = sub.add_parser("rebuild-day")
     r.add_argument("--date", required=True)
     # choices derived from the registry (populated by this module's broker
@@ -701,6 +703,26 @@ def main(argv: list[str] | None = None) -> int:
             except (ReleaseError, UnexpectedFailure) as e:
                 print(f"sync failed: {e}", file=sys.stderr)
                 return 1
+        return 0
+    if args.cmd == "snapshot":
+        source_client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
+
+        def _dest_client_factory(t: str) -> ReleaseClient:
+            return GhReleaseClient(repo=config.GITHUB_REPO, tag=t)
+
+        list_client = _dest_client_factory(config.RELEASE_TAG)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                created = create_snapshot(
+                    source_client, _dest_client_factory,
+                    work_dir=Path(tmp), now=datetime.now(UTC),
+                )
+            pruned = prune_snapshots(_dest_client_factory, list_client)
+        except (ReleaseError, UnexpectedFailure) as e:
+            print(f"snapshot failed: {e}", file=sys.stderr)
+            return 1
+        print(f"snapshot: created {created}")
+        print(f"snapshot: pruned {pruned}")
         return 0
     if args.cmd == "check-freshness":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")

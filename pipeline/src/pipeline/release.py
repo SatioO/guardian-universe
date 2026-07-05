@@ -46,6 +46,8 @@ class ReleaseClient(Protocol):
     def download(self, names: list[str], dest: Path) -> None: ...
     def upload(self, path: Path, *, clobber: bool = False) -> None: ...
     def delete_asset(self, name: str) -> None: ...
+    def list_releases(self) -> list[str]: ...
+    def delete_release(self, tag: str) -> None: ...
 
 
 class GhReleaseClient:
@@ -114,3 +116,19 @@ class GhReleaseClient:
         ])
         if rc != 0:
             raise ReleaseError(f"asset delete failed for {name}: {err.strip()}")
+
+    def list_releases(self) -> list[str]:
+        rc, out, err = self._run([
+            "gh", "api", f"repos/{self._repo}/releases", "--jq", "[.[].tag_name]",
+        ])
+        if rc != 0:
+            raise ReleaseError(f"release listing failed: {err.strip()}")
+        parsed: list[str] = json.loads(out)
+        return parsed
+
+    def delete_release(self, tag: str) -> None:
+        rc, _, err = self._run([
+            "gh", "release", "delete", tag, "--repo", self._repo, "--yes",
+        ])
+        if rc != 0:
+            raise ReleaseError(f"release delete failed for {tag}: {err.strip()}")

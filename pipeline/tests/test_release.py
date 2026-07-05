@@ -95,3 +95,16 @@ def test_fake_upload_without_clobber_rejects_existing(tmp_path: Path):
     fake.upload(f)
     with pytest.raises(ReleaseError):
         fake.upload(f)
+
+
+def test_list_releases_parses_tag_names():
+    out = '["data-latest", "data-snapshot-202606", "data-snapshot-202607"]'
+    r = RecordingRunner([(0, out, "")])
+    tags = GhReleaseClient(repo="o/r", tag="t", runner=r).list_releases()
+    assert tags == ["data-latest", "data-snapshot-202606", "data-snapshot-202607"]
+
+
+def test_delete_release_raises_on_failure():
+    r = RecordingRunner([(1, "", "some error")])
+    with pytest.raises(ReleaseError):
+        GhReleaseClient(repo="o/r", tag="t", runner=r).delete_release("data-snapshot-202601")

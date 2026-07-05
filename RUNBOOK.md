@@ -1012,3 +1012,66 @@ stderr and skipped, never raised — a sweep hiccup must never block an
 otherwise-healthy ingest write. A fresh `.tmp` file (younger than the
 threshold) is always left alone, since it may be the CURRENT in-flight write
 of a still-running process.
+
+## G3 Task 4: Monthly snapshots (disaster recovery)
+
+### What a snapshot is
+A monthly snapshot is a point-in-time, **immutable** copy of whatever the
+live `data-latest` release references at the moment it's taken, published as
+its own GitHub Release tagged `data-snapshot-YYYYMM` (e.g.
+`data-snapshot-202607`). `pipeline/src/pipeline/snapshot.py`'s
+`create_snapshot` downloads `data-latest`'s current `manifest.json`, verifies
+every asset it references (baseline files AND deltas, across every dataset
+the manifest lists — sha256-checked byte-for-byte, the same verify discipline
+`sync.py`/`publish.py` use) into a scratch work directory, then uploads that
+exact same set of files plus the manifest itself to a brand-new release under
+the month's tag. This is a **verbatim copy of the manifest's own references**,
+not a re-derivation through today's registered dataset specs — a snapshot
+taken before a dataset was renamed/retired in code still faithfully preserves
+what was actually live at snapshot time.
+
+**Immutable by design:** `create_snapshot` refuses to recreate a month's tag
+that already exists (raises `UnexpectedFailure`) rather than silently
+overwriting it. The monthly cadence means two runs should never target the
+same `YYYYMM` in practice, but if it ever did (a bug, a manual re-run, clock
+skew), the run fails loudly instead of corrupting an archival copy that later
+disaster recovery may depend on.
+
+### Keep-6 retention
+Every snapshot run also calls `prune_snapshots`, which deletes every
+`data-snapshot-*` tag except the **newest 6** (a lexical sort on the
+zero-padded `YYYYMM` suffix is already chronological order — no date parsing
+needed). `data-latest` (and anything else not prefixed `data-snapshot-`) is
+never a candidate for deletion; the prefix filter excludes it before any
+delete logic runs. At steady state this keeps roughly six months of monthly
+recovery points available at all times.
+
+### Automation
+`.github/workflows/data-snapshot.yml` runs monthly (1st of the month, 04:00
+UTC, plus `workflow_dispatch` for an on-demand run), invoking `python -m
+pipeline snapshot` — which runs `create_snapshot` against the live
+`data-latest` release, then `prune_snapshots`, printing what was created and
+what was pruned. Exits 1 (and opens/appends the standard
+`pipeline-failure`-labeled issue, same dedupe pattern as
+`data-daily.yml`/`data-monitor.yml`/`data-crosscheck.yml`) on any
+`ReleaseError`/`UnexpectedFailure` — e.g. a transient `gh` failure, or (should
+it ever happen) an attempt to recreate an existing month's tag.
+
+### Listing current snapshots
+```
+gh release list --repo SatioO/guardian-universe | grep data-snapshot-
+```
+
+### Running manually
+```
+cd pipeline && uv run python -m pipeline snapshot
+```
+
+### Restoring from a snapshot (forward reference)
+A snapshot is only useful if it can actually be restored — that tooling
+(`restore-from-snapshot --tag data-snapshot-YYYYMM`, plus a rehearsable DR
+drill procedure) is **Task 5**, not this task. See the "Disaster recovery
+drill" section (added by Task 5) for the exact restore command, what a
+successful drill looks like, and the separate, explicitly-flagged real-
+recovery procedure. This task (4) only produces and retains the snapshots
+themselves.
