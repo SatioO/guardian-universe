@@ -185,13 +185,6 @@ def has_day(base: Path, d: date, *, prefix: str = "ohlc", cache: ReadCache | Non
     return bool((df["date"] == pd.Timestamp(d)).any())
 
 
-def day_symbol_count(base: Path, d: date, *, prefix: str = "ohlc") -> int:
-    df = _read_year(base, d.year, prefix)
-    if df.empty:
-        return 0
-    return int((df["date"] == pd.Timestamp(d)).sum())
-
-
 def day_series_counts(
     base: Path, d: date, *, prefix: str = "ohlc", cache: ReadCache | None = None
 ) -> dict[str, int]:

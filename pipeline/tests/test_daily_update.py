@@ -115,13 +115,14 @@ def test_short_stored_day_reingests_and_tops_up_to_full(
         "volume": 1, "value": 1.0, "trades": 1, "source": "seed",
     }])[config.CANON_COLUMNS]
     store.append_day(truncated, tmp_path)
-    assert store.day_symbol_count(tmp_path, target) == 1
+    assert sum(store.day_series_counts(tmp_path, target).values()) == 1
 
     st = _run(target, StubFetcher(RAW), tmp_path)  # RAW re-serves the full day
     assert st.status == "success"
     assert "re-ingested short day" in st.message
     assert "stored 1" in st.message
-    assert store.day_symbol_count(tmp_path, target) == 3  # merged up to full (2 EQ + 1 BE)
+    counts = sum(store.day_series_counts(tmp_path, target).values())
+    assert counts == 3  # merged up to full (2 EQ + 1 BE)
     out = pd.read_parquet(base_year(tmp_path))
     reliance = out[(out["date"] == pd.Timestamp(target)) & (out["symbol"] == "RELIANCE")]
     assert len(reliance) == 1
@@ -268,7 +269,8 @@ def test_truncated_eq_only_day_vs_widened_trailing_still_repairs(
     assert st.status == "success"
     assert "re-ingested short day" in st.message
     assert "over shared series" in st.message
-    assert store.day_symbol_count(tmp_path, target) == 2200 + 1247  # topped up to full
+    counts = sum(store.day_series_counts(tmp_path, target).values())
+    assert counts == 2200 + 1247  # topped up to full
 
 
 def test_short_day_reingest_still_applies_quarantine(
@@ -331,7 +333,7 @@ def test_short_day_reingest_still_applies_wrong_date_guard(
     # The pre-existing short row for `target` must be untouched -- the guard
     # rejected the re-fetch before any store write, so the original (still
     # short) stored count survives exactly as it was.
-    assert store.day_symbol_count(tmp_path, target) == 1
+    assert sum(store.day_series_counts(tmp_path, target).values()) == 1
 
 
 def test_not_yet_published_is_reported_not_raised(tmp_path: Path):

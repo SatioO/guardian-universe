@@ -354,5 +354,5 @@ def test_run_daily_cached_and_uncached_loops_produce_identical_results(
     # Explicit confirmation of the topped-up count on both sides (not just
     # "some bytes matched") -- day 4 grew from the pre-seeded 86 to the full
     # 106 in both runs.
-    assert store.day_symbol_count(base_uncached, day4) == 106
-    assert store.day_symbol_count(base_shared_cache, day4) == 106
+    assert sum(store.day_series_counts(base_uncached, day4).values()) == 106
+    assert sum(store.day_series_counts(base_shared_cache, day4).values()) == 106

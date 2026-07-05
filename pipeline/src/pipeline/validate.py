@@ -7,28 +7,6 @@ from pipeline import config
 from pipeline.errors import UnexpectedFailure
 
 
-def check_rowcount(
-    count: int,
-    trailing: list[int],
-    *,
-    abs_range: tuple[int, int] | None = None,
-) -> None:
-    lo, hi = abs_range if abs_range is not None else config.ROWCOUNT_ABS_RANGE
-    if not (lo <= count <= hi):
-        raise UnexpectedFailure(f"row count {count} outside absolute range {lo}..{hi}")
-    if trailing:
-        mean = sum(trailing) / len(trailing)
-        if mean <= 0:
-            raise UnexpectedFailure(
-                f"trailing row-count mean is non-positive ({mean:.0f}); cannot validate deviation"
-            )
-        if abs(count - mean) / mean > config.ROWCOUNT_DEVIATION:
-            raise UnexpectedFailure(
-                f"row count {count} deviates >{config.ROWCOUNT_DEVIATION:.0%} "
-                f"from trailing mean {mean:.0f}"
-            )
-
-
 def check_rowcount_by_series(
     total: int,
     series_counts: dict[str, int],

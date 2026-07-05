@@ -6,7 +6,13 @@ from pathlib import Path
 import pandas as pd
 
 from pipeline import config
-from pipeline.store import append_day, has_day, read_trailing_window, sweep_orphan_tmp
+from pipeline.store import (
+    append_day,
+    day_series_counts,
+    has_day,
+    read_trailing_window,
+    sweep_orphan_tmp,
+)
 
 
 def _day(d: str, close: float, key: str = "INE002A01018") -> pd.DataFrame:
@@ -24,14 +30,6 @@ def test_append_creates_year_file_and_has_day(tmp_path: Path):
     append_day(_day("2026-07-03", 3000), tmp_path)
     assert config.ohlc_path(2026, tmp_path).exists()
     assert has_day(tmp_path, date(2026, 7, 3)) is True
-
-
-def test_day_symbol_count(tmp_path: Path):
-    from pipeline.store import day_symbol_count
-    assert day_symbol_count(tmp_path, date(2026, 7, 3)) == 0
-    append_day(_day("2026-07-03", 3000, "INE002A01018"), tmp_path)
-    append_day(_day("2026-07-03", 1500, "INE009A01021"), tmp_path)
-    assert day_symbol_count(tmp_path, date(2026, 7, 3)) == 2
 
 
 def test_reappending_same_day_dedupes_keep_last(tmp_path: Path):
@@ -166,8 +164,6 @@ def test_day_series_counts_respects_prefix(tmp_path: Path):
 
 
 def test_prefix_writes_independent_dataset_files(tmp_path):
-    from pipeline.store import day_symbol_count
-
     def frame(day: str, key: str) -> pd.DataFrame:
         df = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
         df["date"] = pd.to_datetime([day])
@@ -180,8 +176,8 @@ def test_prefix_writes_independent_dataset_files(tmp_path):
     assert (tmp_path / "ohlc_2026.parquet").exists()
     assert (tmp_path / "indices_2026.parquet").exists()
     # No cross-contamination: each file holds only its own dataset's row.
-    assert day_symbol_count(tmp_path, date(2026, 7, 3)) == 1
-    assert day_symbol_count(tmp_path, date(2026, 7, 3), prefix="indices") == 1
+    assert sum(day_series_counts(tmp_path, date(2026, 7, 3)).values()) == 1
+    assert sum(day_series_counts(tmp_path, date(2026, 7, 3), prefix="indices").values()) == 1
     assert has_day(tmp_path, date(2026, 7, 3), prefix="indices")
     w = read_trailing_window(tmp_path, date(2026, 7, 3), 5, prefix="indices")
     assert list(w["instrument_key"]) == ["NIFTY50"]

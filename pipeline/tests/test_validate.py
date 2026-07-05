@@ -3,38 +3,7 @@ import pytest
 
 from pipeline import config
 from pipeline.errors import UnexpectedFailure
-from pipeline.validate import check_rowcount, check_rowcount_by_series, quarantine_bad_rows
-
-
-def test_rowcount_within_range_and_stable_passes():
-    check_rowcount(5000, [4990, 5010, 5005])  # no raise
-
-
-def test_rowcount_below_absolute_floor_fails():
-    with pytest.raises(UnexpectedFailure):
-        check_rowcount(1500, [1990, 2010])
-
-
-def test_rowcount_deviation_over_threshold_fails():
-    # count 5000 is INSIDE the abs range [2000, 10000] but deviates ~18% (900/4900)
-    # from the trailing mean of 5900 -> must fail on the DEVIATION check, not abs-range.
-    with pytest.raises(UnexpectedFailure):
-        check_rowcount(5000, [5900, 5900, 5900])
-
-
-def test_rowcount_above_absolute_ceiling_fails():
-    with pytest.raises(UnexpectedFailure):
-        check_rowcount(15000, [5000, 5000])
-
-
-def test_rowcount_nonpositive_trailing_mean_fails():
-    # trailing present but all-zero mean -> fail-closed, not a silent skip.
-    with pytest.raises(UnexpectedFailure):
-        check_rowcount(2000, [0, 0, 0])
-
-
-def test_rowcount_empty_trailing_uses_abs_range_only():
-    check_rowcount(9000, [])  # no raise (within 2000..10000)
+from pipeline.validate import check_rowcount_by_series, quarantine_bad_rows
 
 
 def _row(**over) -> dict:
@@ -69,12 +38,6 @@ def test_quarantine_handles_empty_frame():
     clean, bad = quarantine_bad_rows(empty)
     assert len(clean) == 0
     assert len(bad) == 0
-
-
-def test_check_rowcount_custom_abs_range():
-    check_rowcount(120, [], abs_range=(50, 500))  # accepted
-    with pytest.raises(UnexpectedFailure, match="absolute range"):
-        check_rowcount(20, [], abs_range=(50, 500))
 
 
 # --- check_rowcount_by_series (Task 4: per-series gate) ---------------------
