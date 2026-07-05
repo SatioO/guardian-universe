@@ -23,6 +23,16 @@ def normalize_indices(raw: pd.DataFrame, source: str = "nse-indices") -> pd.Data
 
     Raises:
         UnexpectedFailure: If required columns are missing
+
+    Note:
+        Close-only indices (total-return indices like Nifty50 TRI, and
+        fixed-income/G-Sec indices) don't trade intraday, so NSE publishes a
+        literal "-" placeholder for Open/High/Low Index Value and often for
+        Volume/Turnover on those rows. These are normalized to flat bars
+        (open = high = low = close) with volume/value 0; provenance
+        (instrument_key, symbol, source) is unchanged. Closing Index Value
+        itself is never "-" in practice and stays a strict float parse: a
+        row with no usable close is genuinely bad data and must fail loudly.
     """
     missing = _REQUIRED_RAW - set(raw.columns)
     if missing:
@@ -39,11 +49,16 @@ def normalize_indices(raw: pd.DataFrame, source: str = "nse-indices") -> pd.Data
     # Create instrument_key: IDX: + symbol.upper().replace(" ", "")
     df["instrument_key"] = "IDX:" + df["symbol"].str.upper().str.replace(" ", "")
 
-    # OHLC prices: convert to float (fail loud on non-numeric)
-    df["open"] = df["Open Index Value"].astype(float)
-    df["high"] = df["High Index Value"].astype(float)
-    df["low"] = df["Low Index Value"].astype(float)
+    # Close: strict float parse (fail loud on non-numeric). Close-only indices
+    # never omit this in practice; a "-" here means the row is unusable.
     df["close"] = df["Closing Index Value"].astype(float)
+
+    # OHLC open/high/low: close-only indices (TRI/G-Sec) publish literal "-"
+    # here since they don't trade intraday. Coerce non-numeric -> NaN, then
+    # fall back to the (already-strict) close, i.e. a flat bar.
+    df["open"] = pd.to_numeric(df["Open Index Value"], errors="coerce").fillna(df["close"])
+    df["high"] = pd.to_numeric(df["High Index Value"], errors="coerce").fillna(df["close"])
+    df["low"] = pd.to_numeric(df["Low Index Value"], errors="coerce").fillna(df["close"])
 
     # prevclose = close - Points Change
     # May go negative when Points Change > close (small-base indices); such rows
@@ -51,11 +66,11 @@ def normalize_indices(raw: pd.DataFrame, source: str = "nse-indices") -> pd.Data
     # test_negative_prevclose_index_row_is_quarantined_not_fatal.
     df["prevclose"] = df["close"] - df["Points Change"].astype(float)
 
-    # Volume: NaN -> 0, int64
-    df["volume"] = df["Volume"].fillna(0).astype("int64")
+    # Volume: "-" (close-only indices) or NaN -> 0, int64
+    df["volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0).astype("int64")
 
-    # Value (Turnover): NaN -> 0.0, float
-    df["value"] = df["Turnover (Rs. Cr.)"].fillna(0.0).astype(float)
+    # Value (Turnover): "-" (close-only indices) or NaN -> 0.0, float
+    df["value"] = pd.to_numeric(df["Turnover (Rs. Cr.)"], errors="coerce").fillna(0.0).astype(float)
 
     # Fixed fields
     df["isin"] = ""
