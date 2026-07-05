@@ -8,14 +8,15 @@ Also includes two probes (flagged during Task 5 review) for scenarios the
 brief's 4 core tests don't directly exercise: a never-synced CAS race against
 a live release whose manifest download fails, and a malformed created_at
 timestamp on a stray asset encountered during GC."""
+import dataclasses
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from pipeline import config
+from pipeline import config, datasets, store
 from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.manifest import write_json
 from pipeline.publish import publish_dataset
@@ -23,6 +24,10 @@ from pipeline.sync import SYNCED_STATE, sync_store
 from tests.fakes import FakeReleaseClient, assert_release_consistent
 
 NOW = datetime(2026, 7, 5, 16, 0, tzinfo=UTC)
+
+
+def specs_for(base: Path) -> list[datasets.DatasetSpec]:
+    return [dataclasses.replace(datasets.EQUITIES, base_dir=base)]
 
 
 def _write_store(ohlc: Path, days: list[str]) -> None:
@@ -35,14 +40,20 @@ def _write_store(ohlc: Path, days: list[str]) -> None:
 
 
 def _published_fixture(tmp_path: Path) -> tuple[FakeReleaseClient, Path, Path, Path]:
-    """A release with one good day published, synced state in agreement."""
+    """A release with one good day published (plus one delta day, so the
+    chaos loop's kill-at-every-op sweep also exercises delta uploads), synced
+    state in agreement."""
     ohlc, meta, stage = tmp_path / "ohlc", tmp_path / "meta", tmp_path / "stage"
     meta.mkdir(parents=True, exist_ok=True)
     _write_store(ohlc, ["2026-07-02"])
+    day = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+    day["date"] = pd.to_datetime(["2026-07-02"])
+    day["instrument_key"] = ["INE0"]
+    store.write_delta(day, ohlc, date(2026, 7, 2))
     write_json({"generated_at": None}, meta / SYNCED_STATE)
     fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T15:00:00Z")
-    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                    schema_version=1, generated_at="gen-1", now=NOW)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
     assert_release_consistent(fake)
     return fake, ohlc, meta, stage
 
@@ -59,8 +70,8 @@ def test_publish_killed_after_every_op_never_tears_the_release(tmp_path: Path):
         fake.ops = 0
         fake.fail_after = k
         try:
-            publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                            schema_version=1, generated_at="gen-2", now=NOW)
+            publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                        generated_at="gen-2", now=NOW)
             # publish can now complete successfully even with a late-op
             # injection: _gc is fully non-fatal on ReleaseError (including
             # its internal list_assets), so a failure injected deep enough
@@ -87,8 +98,8 @@ def test_interrupted_publish_leaves_old_manifest_serving_old_data(tmp_path: Path
     fake.ops = 0
     fake.fail_after = 4  # dies before reaching the manifest flip
     with pytest.raises((ReleaseError, UnexpectedFailure)):
-        publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                        schema_version=1, generated_at="gen-2", now=NOW)
+        publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                        generated_at="gen-2", now=NOW)
     # The pointer never flipped: clients still read the old, fully-valid set.
     assert json.loads(fake.assets["manifest.json"].decode()) == old_manifest
     assert_release_consistent(fake)
@@ -110,12 +121,12 @@ def test_failed_sync_then_publish_cannot_wipe_history(tmp_path: Path):
     # Even if an operator force-runs publish afterwards, guards refuse:
     # (a) empty store -> refuse; (b) one-day store -> no synced state / CAS / shrink.
     with pytest.raises(UnexpectedFailure):
-        publish_dataset(ohlc_dir=ohlc2, meta_dir=meta2, stage_dir=stage2, client=fake,
-                        schema_version=1, generated_at="gen-evil", now=NOW)
+        publish_dataset(specs=specs_for(ohlc2), meta_dir=meta2, stage_dir=stage2, client=fake,
+                        generated_at="gen-evil", now=NOW)
     _write_store(ohlc2, ["2026-07-05"])  # a lone new day, no history
     with pytest.raises(UnexpectedFailure):
-        publish_dataset(ohlc_dir=ohlc2, meta_dir=meta2, stage_dir=stage2, client=fake,
-                        schema_version=1, generated_at="gen-evil", now=NOW)
+        publish_dataset(specs=specs_for(ohlc2), meta_dir=meta2, stage_dir=stage2, client=fake,
+                        generated_at="gen-evil", now=NOW)
     assert_release_consistent(fake)  # history intact throughout
 
 
@@ -129,8 +140,8 @@ def test_concurrent_publisher_is_detected_by_cas(tmp_path: Path):
     fake.assets["manifest.json"] = json.dumps(live).encode()
 
     with pytest.raises(UnexpectedFailure, match="changed since sync"):
-        publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                        schema_version=1, generated_at="gen-2", now=NOW)
+        publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                        generated_at="gen-2", now=NOW)
     assert_release_consistent(fake)
 
 
@@ -193,8 +204,8 @@ def test_probe_never_synced_cas_race_aborts_instead_of_clobbering(
     monkeypatch.setattr(fake, "download", flaky_download)
 
     with pytest.raises(UnexpectedFailure):
-        publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                        schema_version=1, generated_at="gen-evil", now=NOW)
+        publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                        generated_at="gen-evil", now=NOW)
 
     # The prior release must be untouched: same manifest, same asset.
     assert json.loads(fake.assets["manifest.json"].decode()) == prior_manifest
@@ -222,8 +233,8 @@ def test_probe_malformed_created_at_is_skipped_by_gc_not_fatal(tmp_path: Path):
     write_json({"generated_at": "gen-1"}, meta / SYNCED_STATE)
 
     # Must not raise -- GC must treat the bad timestamp as non-fatal.
-    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                    schema_version=1, generated_at="gen-2", now=NOW)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                        generated_at="gen-2", now=NOW)
 
     assert "stray.parquet" in fake.assets  # spared, not GC'd, not fatal
     assert_release_consistent(fake)

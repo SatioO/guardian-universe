@@ -1,3 +1,4 @@
+import dataclasses
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -5,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from pipeline import config, store
+from pipeline import config, datasets, store
 from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.manifest import dataset_files, write_json
 from pipeline.publish import (
@@ -18,6 +19,10 @@ from pipeline.sync import SYNCED_STATE
 from tests.fakes import FakeReleaseClient, assert_release_consistent
 
 NOW = datetime(2026, 7, 5, 16, 0, tzinfo=UTC)
+
+
+def specs_for(base: Path) -> list[datasets.DatasetSpec]:
+    return [dataclasses.replace(datasets.EQUITIES, base_dir=base)]
 
 
 def _store(tmp_path: Path, days: list[str]) -> tuple[Path, Path, Path]:
@@ -40,8 +45,8 @@ def test_first_publish_creates_release_flips_manifest_last(tmp_path: Path):
     ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
     _synced(meta, None)
     fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
-    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                    schema_version=1, generated_at="2026-07-05T16:00:00+00:00", now=NOW)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="2026-07-05T16:00:00+00:00", now=NOW)
     assert_release_consistent(fake)
     live = json.loads(fake.assets["manifest.json"])
     entry = dataset_files(live["datasets"][0])[0]
@@ -52,8 +57,8 @@ def test_publish_requires_prior_sync(tmp_path: Path):
     ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
     fake = FakeReleaseClient(exists=False)
     with pytest.raises(UnexpectedFailure, match="sync"):
-        publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                        schema_version=1, generated_at="g", now=NOW)
+        publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="g", now=NOW)
 
 
 def test_cas_aborts_when_release_moved_since_sync(tmp_path: Path):
@@ -65,8 +70,8 @@ def test_cas_aborts_when_release_moved_since_sync(tmp_path: Path):
         "latest_trading_date": "2026-07-03", "datasets": [{"name": "ohlc", "files": []}],
     }).encode())
     with pytest.raises(UnexpectedFailure, match="changed since sync"):
-        publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                        schema_version=1, generated_at="g", now=NOW)
+        publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="g", now=NOW)
     assert_release_consistent(fake)
 
 
@@ -138,6 +143,18 @@ def test_shrink_guard_tolerates_legacy_live_without_rows():
     check_no_shrink(new, live)  # must not raise
 
 
+def test_shrink_guard_blocks_missing_live_dataset():
+    live = {"latest_trading_date": "2026-07-03", "datasets": [
+        {"name": "ohlc", "files": [{"name": "ohlc_2026.parquet", "sha256": "s", "bytes": 1}]},
+        {"name": "indices", "baseline": [{"name": "indices_2026.parquet", "sha256": "t",
+                                          "bytes": 1, "rows": 5, "asset": "a"}]}]}
+    new = {"latest_trading_date": "2026-07-03", "datasets": [
+        {"name": "ohlc", "baseline": [{"name": "ohlc_2026.parquet", "sha256": "s",
+                                       "bytes": 1, "rows": 9, "asset": "b"}], "deltas": []}]}
+    with pytest.raises(UnexpectedFailure, match="shrink"):
+        check_no_shrink(new, live)  # live 'indices' dataset vanished locally
+
+
 def test_check_cas_passes_when_both_none():
     check_cas(None, {"generated_at": None})
 
@@ -147,8 +164,8 @@ def test_second_publish_skips_existing_assets_and_gcs_old(tmp_path: Path):
     ohlc, meta, stage = _store(tmp_path, ["2026-07-02"])
     _synced(meta, None)
     fake = FakeReleaseClient(exists=False, now_iso="2026-06-20T16:00:00Z")  # old uploads
-    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                    schema_version=1, generated_at="gen-1", now=NOW)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
     old_assets = set(fake.assets) - {"manifest.json"}
 
     # Day 2: store grows; re-sync state to match live
@@ -160,8 +177,8 @@ def test_second_publish_skips_existing_assets_and_gcs_old(tmp_path: Path):
         ohlc / "ohlc_2026.parquet", compression="zstd", index=False)
     _synced(meta, "gen-1")
     fake.now_iso = "2026-07-05T16:00:00Z"
-    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                    schema_version=1, generated_at="gen-2", now=NOW)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-2", now=NOW)
 
     assert_release_consistent(fake)
     # Old day-1 asset was uploaded >7 days ago and is unreferenced -> GC'd.
@@ -172,12 +189,12 @@ def test_gc_spares_young_and_protected_assets(tmp_path: Path):
     ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
     _synced(meta, None)
     fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T15:00:00Z")  # 1h old
-    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                    schema_version=1, generated_at="gen-1", now=NOW)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
     fake.seed("stray.parquet", b"stray", created_at="2026-07-05T15:30:00Z")  # young stray
     _synced(meta, "gen-1")
-    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                    schema_version=1, generated_at="gen-2", now=NOW)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-2", now=NOW)
     assert "stray.parquet" in fake.assets  # younger than grace -> spared
     assert "manifest.json" in fake.assets
 
@@ -198,8 +215,8 @@ def test_post_publish_verify_detects_manifest_tamper(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(fake, "upload", tampering_upload)
     with pytest.raises(UnexpectedFailure, match="verification"):
-        publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                        schema_version=1, generated_at="gen-1", now=NOW)
+        publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
 
 
 def test_gc_list_assets_failure_does_not_fail_publish(tmp_path: Path, monkeypatch):
@@ -207,8 +224,8 @@ def test_gc_list_assets_failure_does_not_fail_publish(tmp_path: Path, monkeypatc
     ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
     _synced(meta, None)
     fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
-    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                    schema_version=1, generated_at="gen-1", now=NOW)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
 
     # Day 2: re-sync to match live, then make list_assets raise ONLY on the
     # GC-internal call (the second call during the publish run) so the flip
@@ -225,8 +242,8 @@ def test_gc_list_assets_failure_does_not_fail_publish(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(fake, "list_assets", flaky_list_assets)
 
-    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                    schema_version=1, generated_at="gen-2", now=NOW)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-2", now=NOW)
 
     live = json.loads(fake.assets["manifest.json"])
     assert live["generated_at"] == "gen-2"
@@ -248,8 +265,8 @@ def test_manifest_upload_is_always_last(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(fake, "upload", recording_upload)
 
-    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                    schema_version=1, generated_at="gen-1", now=NOW)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
 
     assert uploads[-1] == "manifest.json"
     manifest_index = uploads.index("manifest.json")
@@ -271,8 +288,8 @@ def test_publish_uploads_manifest_listed_deltas(tmp_path: Path):
     store.write_delta(delta_df, ohlc, date(2026, 7, 3))
 
     fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
-    publish_dataset(ohlc_dir=ohlc, meta_dir=meta, stage_dir=stage, client=fake,
-                    schema_version=1, generated_at="2026-07-05T16:00:00+00:00", now=NOW)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="2026-07-05T16:00:00+00:00", now=NOW)
 
     assert_release_consistent(fake)
     live = json.loads(fake.assets["manifest.json"])
@@ -285,9 +302,22 @@ def test_publish_uploads_manifest_listed_deltas(tmp_path: Path):
 
 def test_latest_trading_date_raises_on_empty_store(tmp_path: Path):
     with pytest.raises(UnexpectedFailure):
-        latest_trading_date(tmp_path)
+        latest_trading_date(specs_for(tmp_path)[0])
 
 
 def test_latest_trading_date_reads_max(tmp_path: Path):
     ohlc, _, _ = _store(tmp_path, ["2026-07-02", "2026-07-03"])
-    assert latest_trading_date(ohlc) == date(2026, 7, 3)
+    assert latest_trading_date(specs_for(ohlc)[0]) == date(2026, 7, 3)
+
+
+def test_publish_uploads_quarantine_extra(tmp_path: Path, monkeypatch):
+    ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
+    monkeypatch.setattr(config, "META_DIR", meta)
+    qdir = meta / "quarantine"
+    qdir.mkdir()
+    pd.DataFrame({"x": [1]}).to_parquet(qdir / "ohlc_2026-07-03.parquet")
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False)
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="g1", now=NOW)
+    assert "ohlc_2026-07-03.parquet" in fake.assets  # diagnostic extra, unreferenced -> self-GCs

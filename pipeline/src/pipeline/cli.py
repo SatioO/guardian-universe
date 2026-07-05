@@ -110,9 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
     try:
         publish_dataset(
-            ohlc_dir=config.OHLC_DIR, meta_dir=config.META_DIR,
+            specs=datasets.all_specs(), meta_dir=config.META_DIR,
             stage_dir=config.DATA_DIR / "stage", client=client,
-            schema_version=config.SCHEMA_VERSION,
             generated_at=datetime.now(UTC).isoformat(),
             now=datetime.now(UTC),
         )

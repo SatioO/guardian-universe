@@ -6,29 +6,31 @@ are immutable (content-addressed, never clobbered); `manifest.json` is the
 single mutable pointer and is uploaded strictly last."""
 from __future__ import annotations
 
-import dataclasses
 import json
 import shutil
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
-from pipeline import datasets
+from pipeline import config
 from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.manifest import build_manifest, dataset_files, file_digest, write_json
 from pipeline.release import ReleaseClient
 from pipeline.sync import SYNCED_STATE
 
+if TYPE_CHECKING:
+    from pipeline.datasets import DatasetSpec
+
 PROTECTED_ASSETS = frozenset({"manifest.json", "last_run_status.json"})
 GC_GRACE = timedelta(days=7)
 
 
-def latest_trading_date(ohlc_dir: Path) -> date:
+def latest_trading_date(spec: DatasetSpec) -> date:
     latest = date.min
-    for p in sorted(ohlc_dir.glob("ohlc_*.parquet")):
+    for p in sorted(spec.base_dir.glob(f"{spec.file_prefix}_*.parquet")):
         col = pd.to_datetime(pd.read_parquet(p, columns=["date"])["date"])
         if col.empty:
             continue
@@ -165,27 +167,22 @@ def _gc(client: ReleaseClient, new_manifest: dict[str, Any], now: datetime) -> N
 
 def publish_dataset(
     *,
-    ohlc_dir: Path,
+    specs: list[DatasetSpec],
     meta_dir: Path,
     stage_dir: Path,
     client: ReleaseClient,
-    schema_version: int,
     generated_at: str,
     now: datetime,
 ) -> None:
-    data_files = sorted(ohlc_dir.glob("ohlc_*.parquet"))
-    if not data_files:
+    # Empty-store guard: only the PRIMARY dataset (specs[0], equities) must
+    # have baseline files. Other specs may be legitimately empty (they are
+    # simply omitted from the manifest by build_manifest).
+    primary = specs[0]
+    if not sorted(primary.base_dir.glob(f"{primary.file_prefix}_*.parquet")):
         raise UnexpectedFailure("refusing to publish: no data files (empty store)")
-    del schema_version  # superseded by per-dataset spec.schema_version (Task 8 removes this param)
-    # publish_dataset takes a single ohlc_dir today (pre-Task-8 signature); point
-    # the equities spec at it so build_manifest reads from the caller's store
-    # rather than the fixed config.OHLC_DIR. Task 8 threads real per-dataset dirs.
-    specs = [
-        dataclasses.replace(spec, base_dir=ohlc_dir) if spec.key == "equities" else spec
-        for spec in datasets.all_specs()
-    ]
+
     new_manifest = build_manifest(
-        specs, latest_trading_date=latest_trading_date(ohlc_dir), generated_at=generated_at,
+        specs, latest_trading_date=latest_trading_date(primary), generated_at=generated_at,
     )
 
     if not client.exists():
@@ -204,23 +201,35 @@ def publish_dataset(
     check_no_shrink(new_manifest, live)
 
     # Upload new content-addressed data assets (immutable: no clobber).
-    by_name = {p.name: p for p in data_files}
-    # Pre-Task-8 shim: deltas for every dataset live under the single
-    # ohlc_dir's "deltas" subdirectory (Task 8 threads real per-dataset dirs).
-    deltas_dir = ohlc_dir / "deltas"
+    # Reconstruct real per-spec source paths: baseline files live at
+    # spec.base_dir/entry["name"]; deltas live at spec.base_dir/"deltas"/entry["name"].
+    # Resolve against the specs passed in (not the global registry) so a
+    # caller-supplied spec with an overridden base_dir (e.g. tests pointing at
+    # a tmp_path store) is honoured; in production `specs == datasets.all_specs()`
+    # so this is equivalent to `datasets.by_manifest_name`.
+    by_manifest_name = {spec.manifest_name: spec for spec in specs}
+    worklist: list[tuple[Path, str]] = []
     for ds in new_manifest["datasets"]:
+        spec = by_manifest_name.get(ds["name"])
+        assert spec is not None  # manifest was built from these specs
         for entry in dataset_files(ds):
-            if entry["asset"] in existing:
-                continue
-            staged = stage_dir / entry["asset"]
-            shutil.copyfile(by_name[entry["name"]], staged)
-            client.upload(staged)
+            worklist.append((spec.base_dir / entry["name"], entry["asset"]))
         for entry in ds.get("deltas", []):
-            if entry["asset"] in existing:
-                continue
-            staged = stage_dir / entry["asset"]
-            shutil.copyfile(deltas_dir / entry["name"], staged)
-            client.upload(staged)
+            worklist.append((spec.base_dir / "deltas" / entry["name"], entry["asset"]))
+    for src, asset in worklist:
+        if asset in existing:
+            continue
+        staged = stage_dir / asset
+        shutil.copyfile(src, staged)
+        client.upload(staged)
+
+    # Quarantine extras: diagnostic-only, per spec, current latest_trading_date
+    # day only. Not referenced by the manifest, so they self-GC after grace.
+    for spec in specs:
+        qfile = (config.META_DIR / "quarantine"
+                 / f"{spec.file_prefix}_{new_manifest['latest_trading_date']}.parquet")
+        if qfile.exists():
+            client.upload(qfile, clobber=True)
 
     status_path = meta_dir / "last_run_status.json"
     if status_path.exists():

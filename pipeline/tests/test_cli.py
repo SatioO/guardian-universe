@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from pipeline import cli, config
+from pipeline import cli, config, datasets
 
 
 def _write_parquet(p: Path, n: int) -> None:
@@ -34,7 +34,7 @@ def test_main_publish_returns_0_on_success(monkeypatch):
     calls = {}
     monkeypatch.setattr(cli, "publish_dataset", lambda **kw: calls.update(kw))
     assert cli.main(["publish"]) == 0
-    assert calls["schema_version"] == config.SCHEMA_VERSION
+    assert calls["specs"] == datasets.all_specs()
 
 
 def test_parser_has_sync():
