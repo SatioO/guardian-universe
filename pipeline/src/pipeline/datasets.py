@@ -8,16 +8,27 @@ total_return."""
 from __future__ import annotations
 
 import functools
+import io
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 from pipeline import config
-from pipeline.fetch import Fetcher, NseIndicesFetcher, NseUdiffFetcher
+from pipeline.fetch import (
+    _BROWSER_UA,
+    Fetcher,
+    NseIndicesFetcher,
+    NseUdiffFetcher,
+    _fetch_with_retry,
+)
 from pipeline.normalize import normalize_equity_bhavcopy
 from pipeline.normalize_indices import normalize_indices
+from pipeline.sources.nse_secfull import build_secfull_url, secfull_to_udiff_shape
 
 
 @dataclass(frozen=True)
@@ -41,13 +52,61 @@ class DatasetSpec:
     derived: bool = False
 
 
+def _load_isin_map() -> dict[str, str]:
+    """symbol -> ISIN, read from the reference/instruments store.
+
+    secfull has no ISIN column of its own, so the fallback keys its rows via
+    this reference-derived map. The reference dataset is SCD2 (multiple rows
+    per symbol over time, e.g. a series change); this dedupes to the latest
+    row per symbol by `last_seen` before building the map, so the join never
+    blows up cardinality. Absent reference (not yet built, or this is an
+    early-adopter deployment) -> {} + a stderr note; sentinel "NSE:"+symbol
+    keys take over downstream and self-heal once reference lands.
+    """
+    path = config.REFERENCE_DIR / "instruments_all.parquet"
+    if not path.exists():
+        print(f"_load_isin_map: {path} not found -- isin_map will be empty", file=sys.stderr)
+        return {}
+
+    df = pd.read_parquet(path)
+    df = df[df["status"] == "active"]
+    df = df.sort_values("last_seen").drop_duplicates(subset="symbol", keep="last")
+    df = df[df["isin"].fillna("") != ""]
+    return dict(zip(df["symbol"], df["isin"], strict=True))
+
+
+def _secfull_fallback(d: date) -> pd.DataFrame:
+    """Fallback fetch fn for the equities NseUdiffFetcher: fetches the
+    sec_bhavdata_full CSV (same warm-session/retry/404 contract as the
+    primary, via fetch._fetch_with_retry) and reshapes it to the UDiFF raw
+    column shape. Returns a bare DataFrame -- NseUdiffFetcher._fetch_fallbacks
+    wraps it into a FetchResult itself (the Fallback contract)."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": _BROWSER_UA})
+    url = build_secfull_url(d)
+    raw = _fetch_with_retry(session, url, d, parse=_secfull_csv_to_df)
+    isin_map = _load_isin_map()
+    return secfull_to_udiff_shape(raw, isin_map=isin_map)
+
+
+def _secfull_csv_to_df(csv_bytes: bytes) -> pd.DataFrame:
+    return pd.read_csv(io.BytesIO(csv_bytes))
+
+
+def _equities_fetcher() -> Fetcher:
+    """Factory (not a bare class default) so the equities Fetcher always
+    wires the sec_bhavdata_full fallback -- EQUITIES.make_fetcher calls this
+    with no arguments, per the DatasetSpec contract."""
+    return NseUdiffFetcher(fallbacks=[("nse-secfull", _secfull_fallback)])
+
+
 EQUITIES = DatasetSpec(
     key="equities", file_prefix="ohlc", base_dir=config.OHLC_DIR,
     source_label="nse-udiff",
     # M-1 carry-in: bind source via partial at spec-construction time so the
     # per-row "source" column can never diverge from source_label.
     normalizer=functools.partial(normalize_equity_bhavcopy, source="nse-udiff"),
-    make_fetcher=NseUdiffFetcher, abs_rowcount_range=config.ROWCOUNT_ABS_RANGE,
+    make_fetcher=_equities_fetcher, abs_rowcount_range=config.ROWCOUNT_ABS_RANGE,
     # schema_version bumps 1 -> 2 (G1b task 4): the EQ-only filter is dropped
     # (all cash series now stored with their own `series` value) and null/empty
     # ISIN rows get an "NSE:"+symbol sentinel key -- a client-visible change to

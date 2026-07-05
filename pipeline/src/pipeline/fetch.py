@@ -1,11 +1,31 @@
 """Fetch adapter: the injectable I/O seam for acquiring a day's raw bhavcopy.
 
-Source order: NSE UDiFF (primary) -> injected fallbacks (e.g. jugaad-data).
+Source order: NSE UDiFF (primary) -> injected fallbacks (e.g. sec_bhavdata_full
+for equities -- an independent NSE endpoint/format, wired in datasets.py).
 HTTP + retry + session-warming live here so business logic stays pure.
 
-Fallback contract: fallback callables emit primary-raw-shaped frames (full
-contract lands in G2 Task 2) -- a fallback is a drop-in replacement for the
-primary's raw output, not a pre-normalized/canonical frame."""
+Fallback contract (G2 Task 2): a `Fallback = (label, fetch_fn)` pair's
+`fetch_fn(d) -> pd.DataFrame` is a drop-in replacement for the PRIMARY's raw
+output -- it must return a bare DataFrame already reshaped to the primary's
+raw column shape (e.g. for equities: UDiFF's TradDt/ISIN/TckrSymb/SctySrs/
+OpnPric/HghPric/LwPric/ClsPric/PrvsClsgPric/TtlTradgVol/TtlTrfVal/
+TtlNbOfTxsExctd, plus SsnId="F1"/FinInstrmTp="STK"), NEVER a pre-normalized or
+canonical frame.
+
+Why: `spec.normalizer` (bound once per DatasetSpec, e.g.
+`normalize_equity_bhavcopy`) is single-format -- it always expects the
+primary's raw shape and has no branch for a fallback's native format. Rather
+than teach the normalizer -- or `run_daily` -- about every fallback's raw
+format, each fallback owns a private shape-adapter (e.g.
+`sources.nse_secfull.secfull_to_udiff_shape`) that does the reshaping
+up front, so the SAME normalizer call downstream consumes primary and
+fallback output identically. `_fetch_fallbacks` (below) wraps whatever bare
+frame `fetch_fn` returns into a `FetchResult(frame, label)` itself -- a
+fallback callable must never construct or return a FetchResult directly.
+Provenance (the `label`) flows purely through `FetchResult.source`, stamped
+by `run_daily` onto both the stored `source` column and `RunStatus.source`
+(Task 1) -- a fallback's shape-adapter never sets or knows about the source
+label itself."""
 from __future__ import annotations
 
 import contextlib
