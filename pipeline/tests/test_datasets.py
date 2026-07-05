@@ -62,14 +62,12 @@ def test_derived_defaults_false_for_existing_specs():
     assert datasets.INDICES.derived is False
 
 
-def test_dataset_spec_accepts_derived_true():
-    from pipeline import config
-
+def test_dataset_spec_accepts_derived_true(tmp_path):
     def _raiser() -> object:
         raise RuntimeError("derived dataset has no fetcher")
 
     spec = datasets.DatasetSpec(
-        key="fake_derived", file_prefix="fake", base_dir=config.DATA_DIR / "fake",
+        key="fake_derived", file_prefix="fake", base_dir=tmp_path / "fake",
         source_label="derived", normalizer=lambda df: df, make_fetcher=_raiser,
         abs_rowcount_range=(0, 10**9), manifest_name="fake", schema_version=1,
         derived=True,

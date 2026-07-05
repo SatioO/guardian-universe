@@ -1,3 +1,4 @@
+import dataclasses
 from datetime import date
 from pathlib import Path
 
@@ -55,7 +56,7 @@ def test_main_backfill_skips_derived_specs(monkeypatch, tmp_path):
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch)
+    _fake_registry(monkeypatch, tmp_path)
     seen = []
 
     def fake_backfill(spec, end, n, **kw):
@@ -153,29 +154,45 @@ def test_main_daily_runs_all_registered_specs(monkeypatch, tmp_path):
         seen.append(spec.key)
         return RunStatus("success", date(2026, 7, 3), source=spec.source_label)
 
+    def fake_builder(spec, target):
+        return RunStatus("success", target, symbol_count=0, source="derived")
+
     monkeypatch.setattr(cli, "run_daily", fake_run_daily)
+    # This uses the real (unpatched) registry, so DATASET_ORDER includes the
+    # real "reference" derived spec -- with the primary healthy, main()
+    # reaches the Phase 2 derived-builder loop for real. Fake the builder
+    # too, else it would call the real build_reference() bound at cli.py
+    # import time and write to the real config.REFERENCE_DIR.
+    monkeypatch.setattr(cli.builders, "BUILDERS", {"reference": fake_builder})
     assert cli.main(["daily", "--date", "2026-07-03"]) == 0
     assert seen == ["equities", "indices"]  # DATASET_ORDER as of G1b task 3
     assert (tmp_path / "last_run_status.json").exists()
 
 
-def _fake_registry(monkeypatch, *, extra_derived=True):
+def _fake_registry(monkeypatch, tmp_path, *, extra_derived=True):
     """Install a fake registry: equities (primary), indices (secondary
     fetched), and optionally a derived spec 'reference' whose make_fetcher
-    raises if ever called -- proves the fetch loop skips it."""
+    raises if ever called -- proves the fetch loop skips it.
 
-    from pipeline import config, datasets
+    Every spec's base_dir is scoped under tmp_path (via dataclasses.replace
+    for the real EQUITIES/INDICES specs, and directly for the fake derived
+    spec) so no test can ever write into the real pipeline/data/ tree, even
+    if run_daily/backfill/builders stop being faked in the future."""
+
+    from pipeline import datasets
 
     def _raiser():
         raise RuntimeError("derived dataset has no fetcher -- must never be called")
 
+    equities = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
+    indices = dataclasses.replace(datasets.INDICES, base_dir=tmp_path / "indices")
     derived_spec = datasets.DatasetSpec(
-        key="reference", file_prefix="reference", base_dir=config.DATA_DIR / "reference",
+        key="reference", file_prefix="reference", base_dir=tmp_path / "reference",
         source_label="derived", normalizer=lambda df: df, make_fetcher=_raiser,
         abs_rowcount_range=(0, 10**9), manifest_name="reference", schema_version=1,
         derived=True,
     )
-    registry = {"equities": datasets.EQUITIES, "indices": datasets.INDICES}
+    registry = {"equities": equities, "indices": indices}
     order = ["equities", "indices"]
     if extra_derived:
         registry["reference"] = derived_spec
@@ -194,7 +211,7 @@ def test_daily_fetch_loop_skips_derived_specs(monkeypatch, tmp_path):
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch)
+    _fake_registry(monkeypatch, tmp_path)
     seen = []
 
     def fake_run_daily(spec, target, **kw):
@@ -218,7 +235,7 @@ def test_daily_writes_primary_and_secondary_status_files(monkeypatch, tmp_path):
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch, extra_derived=False)
+    _fake_registry(monkeypatch, tmp_path, extra_derived=False)
 
     def fake_run_daily(spec, target, **kw):
         return RunStatus("success", date(2026, 7, 3), source=spec.source_label)
@@ -242,7 +259,7 @@ def test_daily_dataset_indices_writes_only_secondary_status_file(monkeypatch, tm
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch, extra_derived=False)
+    _fake_registry(monkeypatch, tmp_path, extra_derived=False)
 
     def fake_run_daily(spec, target, **kw):
         return RunStatus("success", date(2026, 7, 3), source=spec.source_label)
@@ -263,7 +280,7 @@ def test_daily_secondary_failure_exits_0_when_primary_succeeds(monkeypatch, tmp_
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch, extra_derived=False)
+    _fake_registry(monkeypatch, tmp_path, extra_derived=False)
 
     def fake_run_daily(spec, target, **kw):
         if spec.key == "equities":
@@ -285,7 +302,7 @@ def test_daily_primary_failure_exits_1(monkeypatch, tmp_path):
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch, extra_derived=False)
+    _fake_registry(monkeypatch, tmp_path, extra_derived=False)
 
     def fake_run_daily(spec, target, **kw):
         if spec.key == "equities":
@@ -304,7 +321,7 @@ def test_daily_dataset_derived_key_errors_out(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch)  # registers "reference" as derived
+    _fake_registry(monkeypatch, tmp_path)  # registers "reference" as derived
     # argparse choices must accept "reference" (registered key) but main()
     # rejects running it alone.
     rc = cli.main(["daily", "--date", "2026-07-03", "--dataset", "reference"])
@@ -322,7 +339,7 @@ def test_daily_derived_builder_runs_only_when_all_and_primary_ok(monkeypatch, tm
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch)
+    _fake_registry(monkeypatch, tmp_path)
     calls = []
 
     def fake_run_daily(spec, target, **kw):
@@ -349,7 +366,7 @@ def test_daily_derived_builder_skipped_when_primary_fails(monkeypatch, tmp_path)
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch)
+    _fake_registry(monkeypatch, tmp_path)
     calls = []
 
     def fake_run_daily(spec, target, **kw):
@@ -377,7 +394,7 @@ def test_daily_derived_builder_exception_maps_to_failed_status(monkeypatch, tmp_
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch)
+    _fake_registry(monkeypatch, tmp_path)
 
     def fake_run_daily(spec, target, **kw):
         return RunStatus("success", date(2026, 7, 3), source=spec.source_label)
@@ -404,7 +421,7 @@ def test_daily_derived_missing_builder_entry_is_failed_status(monkeypatch, tmp_p
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch)
+    _fake_registry(monkeypatch, tmp_path)
 
     def fake_run_daily(spec, target, **kw):
         return RunStatus("success", date(2026, 7, 3), source=spec.source_label)
@@ -428,7 +445,7 @@ def test_daily_derived_builder_runs_when_primary_idempotent_skip(monkeypatch, tm
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch)
+    _fake_registry(monkeypatch, tmp_path)
     calls = []
 
     def fake_run_daily(spec, target, **kw):
@@ -461,7 +478,7 @@ def test_daily_lone_secondary_failure_exits_1(monkeypatch, tmp_path):
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     (tmp_path / "holidays.json").write_text(json.dumps({}))
-    _fake_registry(monkeypatch, extra_derived=False)
+    _fake_registry(monkeypatch, tmp_path, extra_derived=False)
 
     def fake_run_daily(spec, target, **kw):
         return RunStatus("failed", date(2026, 7, 3), message="boom")
