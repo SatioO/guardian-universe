@@ -151,3 +151,20 @@ def test_deviation_gate_fires_from_stored_trailing_window(tmp_path: Path, monkey
     st = _run(date(2026, 7, 3), StubFetcher(RAW), tmp_path)
     assert st.status == "failed"
     assert not store.has_day(tmp_path, date(2026, 7, 3))
+
+
+def test_quarantined_rows_are_persisted(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(config, "META_DIR", tmp_path / "meta")
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    # Build a fetcher with exactly one quarantined row (OpnPric=0 fails quarantine).
+    dirty_frame = pd.DataFrame([{
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE002A01018",
+        "TckrSymb": "RELIANCE", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 0,
+        "HghPric": 3010, "LwPric": 2985, "ClsPric": 3000, "PrvsClsgPric": 2980,
+        "TtlTradgVol": 1000000, "TtlTrfVal": 3000000000, "TtlNbOfTxsExctd": 50000,
+    }])
+    st = _run(date(2026, 7, 3), StubFetcher(dirty_frame), tmp_path)
+    assert st.status == "failed" and st.quarantined_count == 1
+    qfile = tmp_path / "meta" / "quarantine" / "ohlc_2026-07-03.parquet"
+    assert qfile.exists()
+    assert len(pd.read_parquet(qfile)) == 1

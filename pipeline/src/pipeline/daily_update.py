@@ -8,7 +8,7 @@ from datetime import date
 from pandera.errors import SchemaError
 
 from pipeline import calendar as cal
-from pipeline import store, validate
+from pipeline import config, store, validate
 from pipeline.datasets import DatasetSpec
 from pipeline.errors import NotYetPublished, UnexpectedFailure
 from pipeline.fetch import Fetcher
@@ -60,6 +60,13 @@ def run_daily(
         # negligible in steady state (few rows are ever quarantined).
         validate.check_rowcount(len(df), trailing, abs_range=spec.abs_rowcount_range)
         clean, bad = validate.quarantine_bad_rows(df)
+        if len(bad) > 0:
+            qdir = config.META_DIR / "quarantine"
+            qdir.mkdir(parents=True, exist_ok=True)
+            qtarget = qdir / f"{spec.file_prefix}_{target.isoformat()}.parquet"
+            qtmp = qtarget.with_suffix(".parquet.tmp")
+            bad.to_parquet(qtmp, compression="zstd", index=False)
+            qtmp.replace(qtarget)
         if len(clean) == 0 and len(df) > 0:
             # A day where every row is corrupt is a data failure, not a
             # successful no-op — return "failed" so it is NOT recorded as done
