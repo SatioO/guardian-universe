@@ -52,3 +52,31 @@ def test_trading_days_back_when_end_is_non_trading_day(holidays: set[date]):
 def test_trading_days_back_rejects_non_positive_n(holidays: set[date]):
     with pytest.raises(ValueError):
         cal.trading_days_back(date(2026, 7, 3), 0, holidays)
+
+
+def test_special_session_overrides_weekend_and_holiday(tmp_path):
+    import json
+    from datetime import date
+
+    from pipeline import calendar as cal
+
+    muhurat = date(2026, 11, 8)  # a Sunday
+    assert not cal.is_trading_day(muhurat, set())
+    assert cal.is_trading_day(muhurat, set(), special_sessions={muhurat})
+    assert cal.is_trading_day(muhurat, {muhurat}, special_sessions={muhurat})  # beats holiday too
+
+    p = tmp_path / "special_sessions.json"
+    p.write_text(json.dumps({"sessions": [{"date": "2026-11-08", "label": "muhurat"}]}))
+    assert cal.load_special_sessions(p) == {muhurat}
+    assert cal.load_special_sessions(tmp_path / "absent.json") == set()
+
+
+def test_previous_trading_day_sees_special_session():
+    from datetime import date
+
+    from pipeline import calendar as cal
+
+    muhurat = date(2026, 11, 8)  # Sunday
+    monday = date(2026, 11, 9)
+    assert cal.previous_trading_day(monday, set()) == date(2026, 11, 6)
+    assert cal.previous_trading_day(monday, set(), special_sessions={muhurat}) == muhurat

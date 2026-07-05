@@ -1,16 +1,26 @@
+import dataclasses
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from pipeline import config, store
+from pipeline import config, datasets, store
 from pipeline.daily_update import RunStatus, run_daily
 from pipeline.errors import NotYetPublished, UnexpectedFailure
 from pipeline.fetch import Fetcher
 
 HOLIDAYS = {date(2026, 8, 15)}
 RAW = pd.read_csv(Path(__file__).parent / "fixtures" / "bhavcopy_normal.csv")
+
+
+def datasets_spec(base):
+    # abs_rowcount_range is re-read from config (not just base_dir) so that
+    # tests monkeypatching config.ROWCOUNT_ABS_RANGE still take effect — the
+    # spec field is otherwise frozen at datasets.py import time.
+    return dataclasses.replace(
+        datasets.EQUITIES, base_dir=base, abs_rowcount_range=config.ROWCOUNT_ABS_RANGE
+    )
 
 
 class StubFetcher:
@@ -25,7 +35,7 @@ class StubFetcher:
 
 
 def _run(target: date, fetcher: Fetcher, base: Path) -> RunStatus:
-    return run_daily(target, fetcher=fetcher, holidays=HOLIDAYS, base=base)
+    return run_daily(datasets_spec(base), target, fetcher=fetcher, holidays=HOLIDAYS)
 
 
 def test_normal_day_ingests_and_persists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -91,6 +101,7 @@ def _canon_rows(d: str, n: int) -> pd.DataFrame:
 
 
 def test_all_rows_quarantined_returns_failed(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(config, "META_DIR", tmp_path / "meta")
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
     # Every row has open<=0 -> all quarantined -> clean empty. Must be "failed"
     # (not a success no-op) and nothing written, so the day can be retried.
@@ -103,6 +114,9 @@ def test_all_rows_quarantined_returns_failed(tmp_path: Path, monkeypatch):
     st = _run(date(2026, 7, 3), StubFetcher(bad), tmp_path)
     assert st.status == "failed"
     assert not store.has_day(tmp_path, date(2026, 7, 3))
+    # All-corrupt path also persists a quarantine file (evidence the write still
+    # happens on the "failed" branch, not just on "success").
+    assert (tmp_path / "meta" / "quarantine" / "ohlc_2026-07-03.parquet").exists()
 
 
 def test_malformed_raw_is_reported_not_raised(tmp_path: Path):
@@ -122,6 +136,14 @@ def test_store_error_is_reported_not_raised(tmp_path: Path, monkeypatch):
     assert st.status == "failed"
 
 
+def test_success_emits_delta_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    st = _run(date(2026, 7, 3), StubFetcher(RAW), tmp_path)
+    assert st.status == "success"
+    deltas = store.list_deltas(tmp_path)
+    assert [p.name for p in deltas] == ["ohlc_2026-07-03.parquet"]
+
+
 def test_deviation_gate_fires_from_stored_trailing_window(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
     # Seed the 3 trading days before Fri 2026-07-03 each with 100 rows (mean=100).
@@ -133,3 +155,28 @@ def test_deviation_gate_fires_from_stored_trailing_window(tmp_path: Path, monkey
     st = _run(date(2026, 7, 3), StubFetcher(RAW), tmp_path)
     assert st.status == "failed"
     assert not store.has_day(tmp_path, date(2026, 7, 3))
+
+
+def test_quarantined_rows_are_persisted(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(config, "META_DIR", tmp_path / "meta")
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    # Two rows: RELIANCE is clean, INFY has high<low so it fails quarantine.
+    # Exactly one bad row among >=2 exercises the partial-success path (as
+    # opposed to the all-corrupt "failed" path covered separately above).
+    dirty_frame = pd.DataFrame([{
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE002A01018",
+        "TckrSymb": "RELIANCE", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 2990,
+        "HghPric": 3010, "LwPric": 2985, "ClsPric": 3000, "PrvsClsgPric": 2980,
+        "TtlTradgVol": 1000000, "TtlTrfVal": 3000000000, "TtlNbOfTxsExctd": 50000,
+    }, {
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE009A01021",
+        "TckrSymb": "INFY", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 1500,
+        "HghPric": 1480, "LwPric": 1510, "ClsPric": 1490, "PrvsClsgPric": 1495,
+        "TtlTradgVol": 500000, "TtlTrfVal": 750000000, "TtlNbOfTxsExctd": 20000,
+    }])
+    st = _run(date(2026, 7, 3), StubFetcher(dirty_frame), tmp_path)
+    assert st.status == "success"
+    assert st.quarantined_count == 1
+    qfile = tmp_path / "meta" / "quarantine" / "ohlc_2026-07-03.parquet"
+    assert qfile.exists()
+    assert len(pd.read_parquet(qfile)) == 1

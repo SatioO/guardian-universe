@@ -100,3 +100,49 @@ def test_append_day_is_atomic_on_write_crash(tmp_path, monkeypatch):
 
     # The published year file is untouched by the crashed write.
     assert config.ohlc_path(2026, tmp_path).read_bytes() == good
+
+
+def test_write_delta_and_prune(tmp_path):
+    from datetime import date, timedelta
+
+    import pandas as pd
+
+    from pipeline import config, store
+
+    def frame(day: str) -> pd.DataFrame:
+        df = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+        df["date"] = pd.to_datetime([day])
+        return df
+
+    start = date(2026, 1, 1)
+    for i in range(40):
+        d = start + timedelta(days=i)
+        p = store.write_delta(frame(d.isoformat()), tmp_path, d, keep=35)
+        assert p.exists() and p.parent.name == "deltas"
+
+    deltas = store.list_deltas(tmp_path)
+    assert len(deltas) == 35                          # pruned to keep
+    assert deltas[0].name == "ohlc_2026-01-06.parquet"  # oldest 5 pruned
+    assert deltas[-1].name == "ohlc_2026-02-09.parquet"
+
+
+def test_prefix_writes_independent_dataset_files(tmp_path):
+    from pipeline.store import day_symbol_count
+
+    def frame(day: str, key: str) -> pd.DataFrame:
+        df = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+        df["date"] = pd.to_datetime([day])
+        df["instrument_key"] = [key]
+        return df
+
+    append_day(frame("2026-07-03", "INE1"), tmp_path)
+    append_day(frame("2026-07-03", "NIFTY50"), tmp_path, prefix="indices")
+
+    assert (tmp_path / "ohlc_2026.parquet").exists()
+    assert (tmp_path / "indices_2026.parquet").exists()
+    # No cross-contamination: each file holds only its own dataset's row.
+    assert day_symbol_count(tmp_path, date(2026, 7, 3)) == 1
+    assert day_symbol_count(tmp_path, date(2026, 7, 3), prefix="indices") == 1
+    assert has_day(tmp_path, date(2026, 7, 3), prefix="indices")
+    w = read_trailing_window(tmp_path, date(2026, 7, 3), 5, prefix="indices")
+    assert list(w["instrument_key"]) == ["NIFTY50"]

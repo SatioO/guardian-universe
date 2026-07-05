@@ -232,6 +232,20 @@ A scan is a serializable **criteria AST** (predicates over primitives, AND/OR gr
 
 Run any AST as-of each of the past N (default 120) trading days over the store; measure forward returns at {1,2,3,4,5,10,15,22,30} bars; report per-period win-rate ("73% of 1520") + per-stock overall % + growth-of-10k. Computed numerically over parquet — never via rendered output.
 
+### 7.3.1 Originality mandate (binding for A1–A3)
+
+PKScreener's catalog is **raw material only** — verified formulas, calibrated thresholds, battle-tested trader vocabulary. The product we build is designed from first principles for *this* terminal and must not inherit their interaction model. Binding principles:
+
+1. **Scans answer trader questions, not menu numbers.** No "option 31 of 49". The library is organized by *intent* ("What's setting up?", "What's under accumulation?", "What broke today?", "Where is risk?"), each preset a named, explainable answer. A trader should find the right scan by thinking about their question, not memorizing a catalog.
+2. **Every result explains itself.** A row is never a bare symbol: each matched criterion shows its actual value vs threshold (why it matched), the composite score shows its reasons breakdown, and hovering a criterion highlights the evidence on an inline sparkline. No black boxes — PKScreener's opaque signal soup is the anti-pattern.
+3. **Composition is the product, presets are starting points.** Every preset opens into the criteria builder as an editable AST — "fork this scan" is one click. The 37 curated pipes become editable recipes, not fixed pipelines.
+4. **Evidence before belief.** Backtest stats (hit-rate, forward-return distribution) render *next to* the scan definition before a trader acts on it — not buried in a separate report. A scan without evidence is visibly marked unproven.
+5. **The terminal is the moat.** Deep integration nobody standalone can match: scan results flow to watchlist flags, open charts with the matched criteria drawn as levels, feed rVol/alerts, and respect the active universe. Scan-diff ("new entrants since yesterday") notifies natively.
+6. **Freshness is always visible.** Every scan result carries its data-as-of date; a stale store visibly degrades ("scanning yesterday's close") rather than silently lying.
+7. **Craft over volume.** Ship fewer presets, each validated against known-answer fixtures and backtested — a preset that can't demonstrate its edge doesn't ship in the default library.
+
+A1's preset formulas cite PKScreener where adopted; everything else — engine contract, ranking model, results UX, builder, evidence panels — is designed fresh in the A2 design pass (design-harness, trading-terminal bar).
+
 ### 7.4 Parked
 
 AI/ML predictions (PKScreener's is a single-candle LSTM, ~coin-flip; can slot in later as one more signal column) · Lorentzian classifier (optional "experimental" later — deterministic kNN, feasible) · MF/FII ownership + fair value (needs its own sourcing decision) · F&O short-sell recipes · intraday scanning (belongs to the live broker layer, composed over `latest_eod_date()`).

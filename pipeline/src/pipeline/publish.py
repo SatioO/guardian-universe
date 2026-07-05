@@ -11,22 +11,25 @@ import shutil
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from pipeline.errors import ReleaseError, UnexpectedFailure
-from pipeline.manifest import build_manifest, file_digest, write_json
+from pipeline.manifest import build_manifest, dataset_files, file_digest, write_json
 from pipeline.release import ReleaseClient
 from pipeline.sync import SYNCED_STATE
+
+if TYPE_CHECKING:
+    from pipeline.datasets import DatasetSpec
 
 PROTECTED_ASSETS = frozenset({"manifest.json", "last_run_status.json"})
 GC_GRACE = timedelta(days=7)
 
 
-def latest_trading_date(ohlc_dir: Path) -> date:
+def latest_trading_date(spec: DatasetSpec) -> date:
     latest = date.min
-    for p in sorted(ohlc_dir.glob("ohlc_*.parquet")):
+    for p in sorted(spec.base_dir.glob(f"{spec.file_prefix}_*.parquet")):
         col = pd.to_datetime(pd.read_parquet(p, columns=["date"])["date"])
         if col.empty:
             continue
@@ -48,17 +51,28 @@ def check_cas(live: dict[str, Any] | None, synced: dict[str, Any]) -> None:
 def check_no_shrink(new: dict[str, Any], live: dict[str, Any] | None) -> None:
     if live is None:
         return
-    new_files = {f["name"]: f for f in new["datasets"][0]["files"]}
-    for lf in live["datasets"][0]["files"]:
-        nf = new_files.get(lf["name"])
-        if nf is None:
-            raise UnexpectedFailure(
-                f"shrink-guard: {lf['name']} is on the live release but missing locally"
-            )
-        if "rows" in lf and nf["rows"] < lf["rows"]:
-            raise UnexpectedFailure(
-                f"shrink-guard: {lf['name']} rows {nf['rows']} < live {lf['rows']}"
-            )
+    new_by_name = {ds["name"]: ds for ds in new["datasets"]}
+    for live_ds in live["datasets"]:
+        live_files = dataset_files(live_ds)
+        new_ds = new_by_name.get(live_ds["name"])
+        if new_ds is None:
+            if live_files:
+                raise UnexpectedFailure(
+                    f"shrink-guard: dataset {live_ds['name']!r} is on the live "
+                    "release but missing locally"
+                )
+            continue
+        new_files = {f["name"]: f for f in dataset_files(new_ds)}
+        for lf in live_files:
+            nf = new_files.get(lf["name"])
+            if nf is None:
+                raise UnexpectedFailure(
+                    f"shrink-guard: {lf['name']} is on the live release but missing locally"
+                )
+            if "rows" in lf and nf["rows"] < lf["rows"]:
+                raise UnexpectedFailure(
+                    f"shrink-guard: {lf['name']} rows {nf['rows']} < live {lf['rows']}"
+                )
     if new["latest_trading_date"] < live["latest_trading_date"]:
         raise UnexpectedFailure("shrink-guard: latest_trading_date would regress")
 
@@ -99,7 +113,11 @@ def _verify(client: ReleaseClient, new_manifest: dict[str, Any], work: Path) -> 
         raise UnexpectedFailure(
             "post-publish verification failed: live manifest is not the one just published"
         )
-    files = [e for ds in new_manifest["datasets"] for e in ds["files"]]
+    files = [
+        e
+        for ds in new_manifest["datasets"]
+        for e in [*dataset_files(ds), *ds.get("deltas", [])]
+    ]
     smallest = min(files, key=lambda e: int(e["bytes"]))
     client.download([smallest["asset"]], work)
     sha, _ = file_digest(work / smallest["asset"])
@@ -119,7 +137,11 @@ def _gc(client: ReleaseClient, new_manifest: dict[str, Any], now: datetime) -> N
     still runs.
     """
     try:
-        referenced = {e["asset"] for ds in new_manifest["datasets"] for e in ds["files"]}
+        referenced = {
+            e["asset"]
+            for ds in new_manifest["datasets"]
+            for e in [*dataset_files(ds), *ds.get("deltas", [])]
+        }
         for a in client.list_assets():
             if a.name in referenced or a.name in PROTECTED_ASSETS:
                 continue
@@ -144,20 +166,22 @@ def _gc(client: ReleaseClient, new_manifest: dict[str, Any], now: datetime) -> N
 
 def publish_dataset(
     *,
-    ohlc_dir: Path,
+    specs: list[DatasetSpec],
     meta_dir: Path,
     stage_dir: Path,
     client: ReleaseClient,
-    schema_version: int,
     generated_at: str,
     now: datetime,
 ) -> None:
-    data_files = sorted(ohlc_dir.glob("ohlc_*.parquet"))
-    if not data_files:
+    # Empty-store guard: only the PRIMARY dataset (specs[0], equities) must
+    # have baseline files. Other specs may be legitimately empty (they are
+    # simply omitted from the manifest by build_manifest).
+    primary = specs[0]
+    if not sorted(primary.base_dir.glob(f"{primary.file_prefix}_*.parquet")):
         raise UnexpectedFailure("refusing to publish: no data files (empty store)")
+
     new_manifest = build_manifest(
-        ohlc_dir, schema_version=schema_version,
-        latest_trading_date=latest_trading_date(ohlc_dir), generated_at=generated_at,
+        specs, latest_trading_date=latest_trading_date(primary), generated_at=generated_at,
     )
 
     if not client.exists():
@@ -176,13 +200,35 @@ def publish_dataset(
     check_no_shrink(new_manifest, live)
 
     # Upload new content-addressed data assets (immutable: no clobber).
-    by_name = {p.name: p for p in data_files}
-    for entry in new_manifest["datasets"][0]["files"]:
-        if entry["asset"] in existing:
+    # Reconstruct real per-spec source paths: baseline files live at
+    # spec.base_dir/entry["name"]; deltas live at spec.base_dir/"deltas"/entry["name"].
+    # Resolve against the specs passed in (not the global registry) so a
+    # caller-supplied spec with an overridden base_dir (e.g. tests pointing at
+    # a tmp_path store) is honoured; in production `specs == datasets.all_specs()`
+    # so this is equivalent to `datasets.by_manifest_name`.
+    by_manifest_name = {spec.manifest_name: spec for spec in specs}
+    worklist: list[tuple[Path, str]] = []
+    for ds in new_manifest["datasets"]:
+        spec = by_manifest_name.get(ds["name"])
+        assert spec is not None  # manifest was built from these specs
+        for entry in dataset_files(ds):
+            worklist.append((spec.base_dir / entry["name"], entry["asset"]))
+        for entry in ds.get("deltas", []):
+            worklist.append((spec.base_dir / "deltas" / entry["name"], entry["asset"]))
+    for src, asset in worklist:
+        if asset in existing:
             continue
-        staged = stage_dir / entry["asset"]
-        shutil.copyfile(by_name[entry["name"]], staged)
+        staged = stage_dir / asset
+        shutil.copyfile(src, staged)
         client.upload(staged)
+
+    # Quarantine extras: diagnostic-only, per spec, current latest_trading_date
+    # day only. Not referenced by the manifest, so they self-GC after grace.
+    for spec in specs:
+        qfile = (meta_dir / "quarantine"
+                 / f"{spec.file_prefix}_{new_manifest['latest_trading_date']}.parquet")
+        if qfile.exists():
+            client.upload(qfile, clobber=True)
 
     status_path = meta_dir / "last_run_status.json"
     if status_path.exists():

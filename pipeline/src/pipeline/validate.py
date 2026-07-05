@@ -7,8 +7,13 @@ from pipeline import config
 from pipeline.errors import UnexpectedFailure
 
 
-def check_rowcount(count: int, trailing: list[int]) -> None:
-    lo, hi = config.ROWCOUNT_ABS_RANGE
+def check_rowcount(
+    count: int,
+    trailing: list[int],
+    *,
+    abs_range: tuple[int, int] | None = None,
+) -> None:
+    lo, hi = abs_range if abs_range is not None else config.ROWCOUNT_ABS_RANGE
     if not (lo <= count <= hi):
         raise UnexpectedFailure(f"row count {count} outside absolute range {lo}..{hi}")
     if trailing:

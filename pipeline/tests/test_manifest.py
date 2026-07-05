@@ -21,21 +21,63 @@ def test_file_digest_is_stable(tmp_path: Path):
     assert sha1 == sha2 and len(sha1) == 64 and size1 == size2 > 0
 
 
-def test_build_manifest_lists_ohlc_files_with_digests(tmp_path: Path):
-    _write_parquet(tmp_path / "ohlc_2025.parquet", 2)
-    _write_parquet(tmp_path / "ohlc_2026.parquet", 3)
-    m = manifest.build_manifest(
-        tmp_path, schema_version=1, latest_trading_date=date(2026, 7, 3),
-        generated_at="2026-07-03T12:00:00Z",
-    )
-    assert m["schema_version"] == 1
+def _write_year(dirpath, prefix, year, days):
+    import pandas as pd
+
+    from pipeline import config
+    dirpath.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame({c: ["x"] * len(days) for c in config.CANON_COLUMNS})
+    df["date"] = pd.to_datetime(days)
+    df["instrument_key"] = [f"K{i}" for i in range(len(days))]
+    df.to_parquet(dirpath / f"{prefix}_{year}.parquet", compression="zstd", index=False)
+
+
+def test_build_manifest_v2_shape(tmp_path):
+    import dataclasses
+    from datetime import date
+
+    from pipeline import datasets, store
+    from pipeline.manifest import asset_name, build_manifest
+
+    spec = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path)
+    _write_year(tmp_path, "ohlc", 2026, ["2026-07-02", "2026-07-03"])
+    import pandas as pd
+
+    from pipeline import config
+    day = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+    day["date"] = pd.to_datetime(["2026-07-03"])
+    store.write_delta(day, tmp_path, date(2026, 7, 3))
+
+    m = build_manifest([spec], latest_trading_date=date(2026, 7, 3), generated_at="g")
+    assert m["manifest_version"] == 2 and m["min_client_version"] == "0.1.0"
     assert m["latest_trading_date"] == "2026-07-03"
-    assert m["generated_at"] == "2026-07-03T12:00:00Z"
-    ds = m["datasets"][0]
-    assert ds["name"] == "ohlc"
-    names = [f["name"] for f in ds["files"]]
-    assert names == ["ohlc_2025.parquet", "ohlc_2026.parquet"]  # sorted
-    assert all(len(f["sha256"]) == 64 and f["bytes"] > 0 for f in ds["files"])
+    (ds,) = m["datasets"]
+    assert ds["name"] == "ohlc" and ds["schema_version"] == 1
+    assert ds["latest_date"] == "2026-07-03"
+    (b,) = ds["baseline"]
+    assert b["name"] == "ohlc_2026.parquet" and b["rows"] == 2
+    assert b["asset"] == asset_name("ohlc_2026.parquet", b["sha256"])
+    (d,) = ds["deltas"]
+    assert d["date"] == "2026-07-03" and d["asset"].startswith("delta_ohlc_2026-07-03.")
+
+
+def test_build_manifest_omits_empty_dataset(tmp_path):
+    import dataclasses
+    from datetime import date
+
+    from pipeline import datasets
+    from pipeline.manifest import build_manifest
+
+    empty = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "nothing")
+    m = build_manifest([empty], latest_trading_date=date(2026, 7, 3), generated_at="g")
+    assert m["datasets"] == []
+
+
+def test_dataset_files_reads_v1_and_v2():
+    from pipeline.manifest import dataset_files
+    assert dataset_files({"files": [1]}) == [1]      # v1 (G0 live manifest)
+    assert dataset_files({"baseline": [2]}) == [2]   # v2
+    assert dataset_files({}) == []
 
 
 def test_status_to_dict_serializes_run_status():
@@ -71,20 +113,3 @@ def test_asset_name_inserts_sha8_before_extension():
     assert asset_name("ohlc_2026.parquet", sha) == "ohlc_2026.a1b2c3d4.parquet"
 
 
-def test_build_manifest_entries_have_asset_and_rows(tmp_path):
-    from datetime import date
-
-    import pandas as pd
-
-    from pipeline import config
-    from pipeline.manifest import asset_name, build_manifest
-
-    df = pd.DataFrame({c: [0, 0, 0] for c in config.CANON_COLUMNS})
-    p = tmp_path / "ohlc_2026.parquet"
-    df.to_parquet(p, compression="zstd", index=False)
-
-    m = build_manifest(tmp_path, schema_version=1,
-                       latest_trading_date=date(2026, 7, 3), generated_at="g")
-    entry = m["datasets"][0]["files"][0]
-    assert entry["rows"] == 3
-    assert entry["asset"] == asset_name("ohlc_2026.parquet", entry["sha256"])

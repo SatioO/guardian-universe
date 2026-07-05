@@ -1,13 +1,23 @@
+import dataclasses
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
-from pipeline import store
+from pipeline import config, datasets, store
 from pipeline.backfill import backfill
 
 HOLIDAYS: set[date] = set()
 RAW = pd.read_csv(Path(__file__).parent / "fixtures" / "bhavcopy_normal.csv")
+
+
+def datasets_spec(base):
+    # abs_rowcount_range is re-read from config (not just base_dir) so that
+    # tests monkeypatching config.ROWCOUNT_ABS_RANGE still take effect — the
+    # spec field is otherwise frozen at datasets.py import time.
+    return dataclasses.replace(
+        datasets.EQUITIES, base_dir=base, abs_rowcount_range=config.ROWCOUNT_ABS_RANGE
+    )
 
 
 class StubFetcher:
@@ -31,8 +41,8 @@ def test_backfill_ingests_n_trading_days(tmp_path: Path, monkeypatch):
     from pipeline import config
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
     f = StubFetcher()
-    out = backfill(date(2026, 7, 3), 3, fetcher=f, holidays=HOLIDAYS, base=tmp_path,
-                   sleep=_no_sleep)
+    out = backfill(datasets_spec(tmp_path), date(2026, 7, 3), 3, fetcher=f,
+                   holidays=HOLIDAYS, sleep=_no_sleep)
     assert [s.status for s in out] == ["success", "success", "success"]
     # exact 3 trading days ending 2026-07-03 (Fri), ascending — pins the window,
     # not just non-decreasing order.
@@ -42,12 +52,12 @@ def test_backfill_ingests_n_trading_days(tmp_path: Path, monkeypatch):
 def test_backfill_is_resumable(tmp_path: Path, monkeypatch):
     from pipeline import config
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
-    backfill(date(2026, 7, 3), 3, fetcher=StubFetcher(), holidays=HOLIDAYS,
-             base=tmp_path, sleep=_no_sleep)
+    backfill(datasets_spec(tmp_path), date(2026, 7, 3), 3, fetcher=StubFetcher(),
+             holidays=HOLIDAYS, sleep=_no_sleep)
     # Second run: every day already present -> idempotent skips, no refetch.
     f2 = StubFetcher()
-    out = backfill(date(2026, 7, 3), 3, fetcher=f2, holidays=HOLIDAYS, base=tmp_path,
-                   sleep=_no_sleep)
+    out = backfill(datasets_spec(tmp_path), date(2026, 7, 3), 3, fetcher=f2,
+                   holidays=HOLIDAYS, sleep=_no_sleep)
     assert [s.status for s in out] == ["skipped_idempotent"] * 3
     assert f2.dates == []
     for d in (date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)):

@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+MANIFEST_VERSION = 2
+MIN_CLIENT_VERSION = "0.1.0"
 
 # Canonical long-format columns, in exact order.
 CANON_COLUMNS: list[str] = [
@@ -36,10 +38,14 @@ OHLC_DIR: Path = DATA_DIR / "ohlc"
 META_DIR: Path = DATA_DIR / "meta"
 
 
+def dataset_path(year: int, base: Path, *, prefix: str = "ohlc") -> Path:
+    """Path to a dataset's year-partitioned parquet file: {prefix}_{YYYY}.parquet."""
+    return base / f"{prefix}_{year}.parquet"
+
+
 def ohlc_path(year: int, base: Path | None = None) -> Path:
-    """Path to the year-partitioned OHLC parquet file."""
-    root = (base if base is not None else OHLC_DIR)
-    return root / f"ohlc_{year}.parquet"
+    """Equities shim (kept for existing callers): ohlc_{YYYY}.parquet."""
+    return dataset_path(year, base if base is not None else OHLC_DIR, prefix="ohlc")
 
 
 # Distribution (P1a): rolling GitHub Release served by GitHub's CDN.
