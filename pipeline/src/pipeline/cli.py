@@ -236,7 +236,12 @@ def _secfull_csv_to_df(csv_bytes: bytes) -> pd.DataFrame:
 
 
 def _print_cross_check_table(result: CrossCheckResult) -> None:
-    print(f"cross-check: compared={result.compared} mismatched={result.mismatched}")
+    # Explicit outcome marker (DIVERGENCE vs OK) so the summary line is
+    # unambiguous on its own -- previously distinguishable from the
+    # CANNOT-RUN path only by channel (stdout vs stderr) and prose wording,
+    # which is easy to miss when scanning CI/alert output quickly.
+    marker = "DIVERGENCE" if result.mismatched > 0 else "OK"
+    print(f"cross-check: {marker} compared={result.compared} mismatched={result.mismatched}")
     if result.worst:
         print(f"{'instrument_key':<20}{'primary_close':>16}{'secondary_close':>18}")
         for key, primary_close, secondary_close in result.worst:
@@ -261,21 +266,32 @@ def cmd_cross_check(
     cross-check that can't run is a signal on its own weekly cadence) -- it
     is caught here and reported as a clear, exit-1 error rather than
     propagating a raw traceback.
+
+    Three distinguishable outcomes, each with an explicit prefix so a reader
+    scanning CI/alert output never has to infer which happened from channel
+    or wording alone: `cross-check: CANNOT-RUN — ...` (stderr, exit 1 -- a
+    source's fetch/normalize itself failed), `cross-check: DIVERGENCE
+    compared=N mismatched=M` (stdout, exit 1 -- both sources fetched fine but
+    disagree on `M` of the `N` sampled closes), `cross-check: OK compared=N
+    mismatched=0` (stdout, exit 0 -- both sources fetched fine and agreed).
     """
     try:
         primary_raw = fetch_primary_raw(target)
         primary_canon = normalize_equity_bhavcopy(primary_raw, source="nse-udiff")
     except Exception as e:  # noqa: BLE001 - any primary failure is alert-worthy
-        print(f"cross-check: primary source failed for {target.isoformat()}: {e}",
-              file=sys.stderr)
+        # Explicit CANNOT-RUN marker: this path (stderr, exit 1) must read as
+        # unmistakably distinct from the DIVERGENCE/OK summary line (stdout)
+        # at a glance, not merely by which stream it landed on.
+        print(f"cross-check: CANNOT-RUN — primary source failed for "
+              f"{target.isoformat()}: {e}", file=sys.stderr)
         return 1
 
     try:
         secondary_raw = fetch_secondary_raw(target)
         secondary_canon = normalize_equity_bhavcopy(secondary_raw, source="nse-secfull")
     except Exception as e:  # noqa: BLE001 - any secondary failure is alert-worthy
-        print(f"cross-check: secondary source failed for {target.isoformat()}: {e}",
-              file=sys.stderr)
+        print(f"cross-check: CANNOT-RUN — secondary source failed for "
+              f"{target.isoformat()}: {e}", file=sys.stderr)
         return 1
 
     result = compare_sources(

@@ -519,30 +519,56 @@ cross-check` against the previous trading day. No store writes — this is
 pure detection, never ingestion, and never touches `data/`.
 
 ### What a divergence alert means
-The CLI exits 1 whenever `mismatched > 0` (printing a small table of the
-worst divergences first) **or** whenever the cross-check itself couldn't
-run at all (either source's fetch/normalize failed) — a cross-check that
-can't run is itself alert-worthy on its own weekly cadence, since it means
-the safety net wasn't actually checked that week. The workflow's
-alert-on-failure step opens/appends to the standard `pipeline-failure`-
-labeled issue (same dedupe shape as `data-monitor.yml`/`data-daily.yml`).
+The CLI prints one of three explicit, prefixed outcome markers, so an
+operator scanning CI/alert output never has to infer which happened from
+stdout-vs-stderr or prose wording alone:
 
-**Investigate BOTH sources before trusting either.** A divergence alone
-does not tell you which source is wrong — it only tells you they disagree.
-Do not assume the primary (UDiFF) is automatically correct just because
-it's the primary in the daily ingest chain; cross-check both against a
-third reference (e.g. the exchange's own website for a couple of the
-flagged symbols, or a manual `rebuild-day --via kite` comparison) before
-deciding which source to trust or route around. If a real divergence is
-confirmed, treat the daily pipeline's currently-stored days for the
-affected instrument(s) as suspect until the root cause is identified.
+- **`cross-check: CANNOT-RUN — ...`** (stderr, exit 1) — one of the two
+  sources' fetch/normalize itself failed; the comparison never ran at all.
+  This is itself alert-worthy on its own weekly cadence, since it means the
+  safety net wasn't actually checked that week.
+- **`cross-check: DIVERGENCE compared=N mismatched=M`** (stdout, exit 1) —
+  both sources fetched fine, but `M` of the `N` sampled closes disagreed
+  beyond tolerance (a small table of the worst divergences prints
+  immediately after this line).
+- **`cross-check: OK compared=N mismatched=0`** (stdout, exit 0) — both
+  sources fetched fine and agreed on every sampled close.
+
+The workflow's alert-on-failure step opens/appends to the standard
+`pipeline-failure`-labeled issue on any non-zero exit (same dedupe shape as
+`data-monitor.yml`/`data-daily.yml`), so both `CANNOT-RUN` and `DIVERGENCE`
+page the same way — the marker text in the issue body is what tells you
+which one happened and drives which of the two operator actions below
+applies.
+
+**`CANNOT-RUN` → check source availability/connectivity.** The printed
+message names which source failed (primary/UDiFF or secondary/secfull) and
+the underlying exception. Start there: is the NSE endpoint reachable right
+now (a manual curl/browser check), is this a transient anti-bot/rate-limit
+block (the same class of failure the daily pipeline's own retry+fallback
+chain already handles for that source in normal ingest), or has the
+endpoint's URL/format changed? This is a tooling/connectivity failure of
+the cross-check itself, not evidence that the two sources disagree — do
+not treat a `CANNOT-RUN` as a data-quality signal on its own.
+
+**`DIVERGENCE` → investigate BOTH sources before trusting either.** A
+divergence alone does not tell you which source is wrong — it only tells
+you they disagree. Do not assume the primary (UDiFF) is automatically
+correct just because it's the primary in the daily ingest chain;
+cross-check both against a third reference (e.g. the exchange's own
+website for a couple of the flagged symbols, or a manual `rebuild-day --via
+kite` comparison) before deciding which source to trust or route around.
+If a real divergence is confirmed, treat the daily pipeline's
+currently-stored days for the affected instrument(s) as suspect until the
+root cause is identified.
 
 ### Running manually
 ```
 cd pipeline && uv run python -m pipeline cross-check [--date YYYY-MM-DD]
 ```
 `--date` defaults to the previous trading day (via the same trading
-calendar + special-sessions logic used elsewhere); exit 0 means the sampled
-comparison found no divergence beyond tolerance, exit 1 means either a
-divergence was found (see the printed table) or the cross-check itself
-failed to run (see the printed error naming which source failed).
+calendar + special-sessions logic used elsewhere). Exit 0 pairs with the
+`OK` marker (agreement); exit 1 pairs with either the `DIVERGENCE` marker
+(comparison ran, disagreement found — see the printed table) or the
+`CANNOT-RUN` marker (comparison never ran — see the printed error naming
+which source failed and why).

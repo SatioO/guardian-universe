@@ -6,7 +6,7 @@ import pandas as pd
 
 from pipeline import calendar as cal
 from pipeline import cli, config, datasets
-from pipeline.errors import NotYetPublished
+from pipeline.errors import NotYetPublished, UnexpectedFailure
 from pipeline.fetch import FetchResult
 
 
@@ -795,7 +795,7 @@ def test_parser_cross_check_reads_date():
     assert args.date == "2026-07-03"
 
 
-def test_cmd_cross_check_sources_agree_exits_0():
+def test_cmd_cross_check_sources_agree_exits_0(capsys):
     target = date(2026, 7, 3)
 
     def fetch_primary(d: date) -> pd.DataFrame:
@@ -808,6 +808,11 @@ def test_cmd_cross_check_sources_agree_exits_0():
         target, fetch_primary_raw=fetch_primary, fetch_secondary_raw=fetch_secondary,
     )
     assert rc == 0
+    out = capsys.readouterr().out
+    # explicit success marker, distinguishing "compared and agreed" from a
+    # divergence purely by prefix text, not by inferring it from exit code
+    # or channel alone
+    assert "cross-check: OK compared=3 mismatched=0" in out
 
 
 def test_cmd_cross_check_divergence_exits_1_and_prints_table(capsys):
@@ -831,6 +836,9 @@ def test_cmd_cross_check_divergence_exits_1_and_prints_table(capsys):
     out = capsys.readouterr().out
     assert "INE002A01002" in out  # the diverging key appears in the printed table
     assert "200" in out and "400" in out
+    # explicit divergence marker, distinguishing this from an OK/CANNOT-RUN
+    # outcome purely by prefix text
+    assert "cross-check: DIVERGENCE compared=3 mismatched=1" in out
 
 
 def test_cmd_cross_check_one_source_down_exits_1_with_clear_message(capsys):
@@ -847,7 +855,9 @@ def test_cmd_cross_check_one_source_down_exits_1_with_clear_message(capsys):
     )
     assert rc == 1
     err = capsys.readouterr().err
-    assert "cross-check" in err
+    # explicit can't-run marker, distinguishing this from a DIVERGENCE outcome
+    # by more than channel (stderr) + wording alone
+    assert "cross-check: CANNOT-RUN —" in err
     assert "secfull endpoint unreachable" in err
 
 
@@ -865,7 +875,9 @@ def test_cmd_cross_check_primary_source_down_exits_1_with_clear_message(capsys):
     )
     assert rc == 1
     err = capsys.readouterr().err
-    assert "cross-check" in err
+    # explicit can't-run marker, distinguishing this from a DIVERGENCE outcome
+    # by more than channel (stderr) + wording alone
+    assert "cross-check: CANNOT-RUN —" in err
     assert "udiff endpoint unreachable" in err
 
 
@@ -908,3 +920,86 @@ def test_main_cross_check_explicit_date_bypasses_default(monkeypatch, tmp_path):
     rc = cli.main(["cross-check", "--date", "2026-07-01"])
     assert rc == 0
     assert seen_dates == [date(2026, 7, 1)]
+
+
+# --- G2 Task 6 fast-follow: wiring-layer isolation regression -----------------
+#
+# Every test above drives `cmd_cross_check` directly with injected stub
+# callables -- that proves the COMPARISON logic is correct, but never
+# exercises `_cross_check_fetch_primary_raw`/`_cross_check_fetch_secondary_raw`
+# themselves, which is where the feature's actual load-bearing property lives:
+# the primary fetch must be constructed with NO fallback chain
+# (`fallbacks=()`). If a fallback were ever wired in there, a real primary
+# outage would silently fall through to the secondary -- and cross-check would
+# then be comparing the secondary against itself, reporting `mismatched=0`
+# ("sources agree!") while never having touched the primary at all. That
+# false-agreement failure mode would be invisible to every stub-based test
+# above, since the stubs bypass the wiring entirely. These two tests close
+# that gap by exercising the REAL production functions.
+
+def test_cross_check_primary_wiring_has_no_fallbacks(monkeypatch):
+    """`_cross_check_fetch_primary_raw` must construct `NseUdiffFetcher` with
+    `fallbacks=()` -- an empty tuple, not merely "falsy" or omitted-with-some-
+    default-that-happens-to-be-empty. Proven by monkeypatching
+    `cli.NseUdiffFetcher` (the name as imported/used by cli.py) with a
+    recording wrapper that captures its constructor kwargs, then invoking the
+    REAL `_cross_check_fetch_primary_raw`. The network is short-circuited by
+    having the wrapper's `fetch_raw` raise immediately after construction --
+    construction already happened by then, so the kwargs are already
+    captured; what `fetch_raw` does past that point is irrelevant to this
+    test and is never reached for real (no network, no real HTTP session)."""
+    captured_kwargs: dict[str, object] = {}
+
+    class _RecordingFetcher:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured_kwargs.update(kwargs)
+
+        def fetch_raw(self, d: date) -> FetchResult:
+            raise UnexpectedFailure("short-circuited: construction already recorded")
+
+    monkeypatch.setattr(cli, "NseUdiffFetcher", _RecordingFetcher)
+
+    import pytest
+    with pytest.raises(UnexpectedFailure):
+        cli._cross_check_fetch_primary_raw(date(2026, 7, 3))
+
+    assert "fallbacks" in captured_kwargs
+    assert captured_kwargs["fallbacks"] == ()
+
+
+def test_cross_check_secondary_wiring_has_no_fallback_machinery(monkeypatch):
+    """`_cross_check_fetch_secondary_raw` has no fallback path to disable in
+    the first place: unlike the primary side, it never constructs a
+    `Fetcher`-protocol object at all (no `NseUdiffFetcher`/`Fallback` tuples
+    anywhere in it) -- it calls the shared `_fetch_with_retry(session, url,
+    d, *, parse=...)` FUNCTION directly, which has no `fallbacks` parameter
+    in its signature. There is no fallback machinery to bypass, so isolation
+    holds by construction rather than by an explicit empty-tuple argument.
+
+    Proven by monkeypatching `cli._fetch_with_retry` (the name as imported/
+    used by cli.py) with a recorder, invoking the REAL
+    `_cross_check_fetch_secondary_raw`, and asserting the call it actually
+    received carries only the plain fetch arguments -- no `fallbacks`
+    keyword, because the function it calls doesn't accept one."""
+    captured_kwargs: dict[str, object] = {}
+
+    def _recording_fetch_with_retry(session: object, url: str, d: date, *,
+                                     parse: object) -> pd.DataFrame:
+        captured_kwargs["session"] = session
+        captured_kwargs["url"] = url
+        captured_kwargs["d"] = d
+        captured_kwargs["parse"] = parse
+        raise UnexpectedFailure("short-circuited: call already recorded")
+
+    monkeypatch.setattr(cli, "_fetch_with_retry", _recording_fetch_with_retry)
+
+    import pytest
+    with pytest.raises(UnexpectedFailure):
+        cli._cross_check_fetch_secondary_raw(date(2026, 7, 3))
+
+    # The call cli actually made carries exactly the plain fetch arguments --
+    # no `fallbacks` (or any other fallback-shaped) keyword crossed this
+    # boundary, because `_fetch_with_retry`'s signature has nowhere to put
+    # one. Isolation is structural here, not an empty-tuple flag to assert.
+    assert set(captured_kwargs) == {"session", "url", "d", "parse"}
+    assert "fallbacks" not in captured_kwargs
