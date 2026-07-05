@@ -14,3 +14,8 @@ def test_equities_spec_fields():
 def test_by_manifest_name():
     assert datasets.by_manifest_name("ohlc") is datasets.EQUITIES
     assert datasets.by_manifest_name("nope") is None
+
+
+def test_manifest_names_are_unique():
+    names = [s.manifest_name for s in datasets.DATASETS.values()]
+    assert len(set(names)) == len(names)

@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
-from pipeline import config
 from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.manifest import build_manifest, dataset_files, file_digest, write_json
 from pipeline.release import ReleaseClient
@@ -226,7 +225,7 @@ def publish_dataset(
     # Quarantine extras: diagnostic-only, per spec, current latest_trading_date
     # day only. Not referenced by the manifest, so they self-GC after grace.
     for spec in specs:
-        qfile = (config.META_DIR / "quarantine"
+        qfile = (meta_dir / "quarantine"
                  / f"{spec.file_prefix}_{new_manifest['latest_trading_date']}.parquet")
         if qfile.exists():
             client.upload(qfile, clobber=True)

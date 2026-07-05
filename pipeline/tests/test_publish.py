@@ -310,9 +310,8 @@ def test_latest_trading_date_reads_max(tmp_path: Path):
     assert latest_trading_date(specs_for(ohlc)[0]) == date(2026, 7, 3)
 
 
-def test_publish_uploads_quarantine_extra(tmp_path: Path, monkeypatch):
+def test_publish_uploads_quarantine_extra(tmp_path: Path):
     ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
-    monkeypatch.setattr(config, "META_DIR", meta)
     qdir = meta / "quarantine"
     qdir.mkdir()
     pd.DataFrame({"x": [1]}).to_parquet(qdir / "ohlc_2026-07-03.parquet")

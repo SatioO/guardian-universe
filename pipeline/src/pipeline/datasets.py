@@ -37,6 +37,11 @@ EQUITIES = DatasetSpec(
 DATASETS: dict[str, DatasetSpec] = {"equities": EQUITIES}
 DATASET_ORDER: list[str] = ["equities"]
 
+# publish.py resolves specs by manifest_name (by_manifest_name); manifest_name
+# must be unique across the registry or that resolution would be ambiguous.
+if len({s.manifest_name for s in DATASETS.values()}) != len(DATASETS):
+    raise ValueError("DATASETS registry has duplicate manifest_name values")
+
 
 def by_manifest_name(name: str) -> DatasetSpec | None:
     for spec in DATASETS.values():

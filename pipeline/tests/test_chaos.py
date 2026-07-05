@@ -67,6 +67,10 @@ def test_publish_killed_after_every_op_never_tears_the_release(tmp_path: Path):
         k += 1
         fake, ohlc, meta, stage = _published_fixture(tmp_path / f"run{k}")
         _write_store(ohlc, ["2026-07-02", "2026-07-03"])  # day-2 grows the store
+        day2 = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+        day2["date"] = pd.to_datetime(["2026-07-03"])
+        day2["instrument_key"] = ["INE1"]
+        store.write_delta(day2, ohlc, date(2026, 7, 3))  # day-2 also uploads a delta
         fake.ops = 0
         fake.fail_after = k
         try:
@@ -95,6 +99,10 @@ def test_interrupted_publish_leaves_old_manifest_serving_old_data(tmp_path: Path
     fake, ohlc, meta, stage = _published_fixture(tmp_path)
     old_manifest = json.loads(fake.assets["manifest.json"].decode())
     _write_store(ohlc, ["2026-07-02", "2026-07-03"])
+    day2 = pd.DataFrame({c: ["x"] for c in config.CANON_COLUMNS})
+    day2["date"] = pd.to_datetime(["2026-07-03"])
+    day2["instrument_key"] = ["INE1"]
+    store.write_delta(day2, ohlc, date(2026, 7, 3))  # day-2 also uploads a delta
     fake.ops = 0
     fake.fail_after = 4  # dies before reaching the manifest flip
     with pytest.raises((ReleaseError, UnexpectedFailure)):
