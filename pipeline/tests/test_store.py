@@ -126,6 +126,43 @@ def test_write_delta_and_prune(tmp_path):
     assert deltas[-1].name == "ohlc_2026-02-09.parquet"
 
 
+def test_day_series_counts(tmp_path: Path):
+    from pipeline.store import day_series_counts
+
+    assert day_series_counts(tmp_path, date(2026, 7, 3)) == {}
+
+    def row(key: str, series: str) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "date": pd.Timestamp("2026-07-03"), "instrument_key": key, "isin": key,
+            "symbol": key, "series": series,
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+            "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
+            "source": "nse-udiff",
+        }])[config.CANON_COLUMNS]
+
+    append_day(pd.concat([
+        row("K1", "EQ"), row("K2", "EQ"), row("K3", "BE"),
+    ], ignore_index=True), tmp_path)
+    assert day_series_counts(tmp_path, date(2026, 7, 3)) == {"EQ": 2, "BE": 1}
+
+
+def test_day_series_counts_respects_prefix(tmp_path: Path):
+    from pipeline.store import day_series_counts
+
+    def row(key: str, series: str) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "date": pd.Timestamp("2026-07-03"), "instrument_key": key, "isin": key,
+            "symbol": key, "series": series,
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+            "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
+            "source": "nse-udiff",
+        }])[config.CANON_COLUMNS]
+
+    append_day(row("NIFTY50", "INDEX"), tmp_path, prefix="indices")
+    assert day_series_counts(tmp_path, date(2026, 7, 3)) == {}
+    assert day_series_counts(tmp_path, date(2026, 7, 3), prefix="indices") == {"INDEX": 1}
+
+
 def test_prefix_writes_independent_dataset_files(tmp_path):
     from pipeline.store import day_symbol_count
 
@@ -146,3 +183,71 @@ def test_prefix_writes_independent_dataset_files(tmp_path):
     assert has_day(tmp_path, date(2026, 7, 3), prefix="indices")
     w = read_trailing_window(tmp_path, date(2026, 7, 3), 5, prefix="indices")
     assert list(w["instrument_key"]) == ["NIFTY50"]
+
+
+def test_append_keyed_with_non_canonical_columns_round_trips(tmp_path: Path):
+    """append_keyed is column-agnostic -- it needs only `date` + key_cols, not
+    the full CANON_COLUMNS schema (G1b task 7 generalization)."""
+    from pipeline.store import append_keyed
+
+    df = pd.DataFrame([
+        {"date": pd.Timestamp("2026-07-03"), "instrument_key": "K1",
+         "close_prev": 1000.0, "prevclose_today": 500.0, "implied_ratio": 2.0},
+    ])
+    append_keyed(df, tmp_path, prefix="ca_flags")
+
+    out_path = tmp_path / "ca_flags_2026.parquet"
+    assert out_path.exists()
+    out = pd.read_parquet(out_path)
+    assert list(out.columns) == ["date", "instrument_key", "close_prev",
+                                  "prevclose_today", "implied_ratio"]
+    assert len(out) == 1
+    assert out.iloc[0]["implied_ratio"] == 2.0
+
+
+def test_append_keyed_dedupes_on_custom_key_cols(tmp_path: Path):
+    from pipeline.store import append_keyed
+
+    def row(ratio: float) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "date": pd.Timestamp("2026-07-03"), "instrument_key": "K1",
+            "implied_ratio": ratio,
+        }])
+
+    append_keyed(row(2.0), tmp_path, prefix="ca_flags")
+    append_keyed(row(2.5), tmp_path, prefix="ca_flags")  # corrected re-run, same key
+
+    out = pd.read_parquet(tmp_path / "ca_flags_2026.parquet")
+    assert len(out) == 1
+    assert out.iloc[0]["implied_ratio"] == 2.5  # keep=last
+
+
+def test_append_keyed_respects_custom_key_cols_param(tmp_path: Path):
+    """Passing a different key_cols tuple dedupes on those columns instead of
+    the (date, instrument_key) default."""
+    from pipeline.store import append_keyed
+
+    df1 = pd.DataFrame([{"date": pd.Timestamp("2026-07-03"), "id": "A", "v": 1}])
+    df2 = pd.DataFrame([{"date": pd.Timestamp("2026-07-03"), "id": "A", "v": 2}])
+    append_keyed(df1, tmp_path, prefix="custom", key_cols=("date", "id"))
+    append_keyed(df2, tmp_path, prefix="custom", key_cols=("date", "id"))
+
+    out = pd.read_parquet(tmp_path / "custom_2026.parquet")
+    assert len(out) == 1
+    assert out.iloc[0]["v"] == 2
+
+
+def test_append_day_is_thin_wrapper_over_append_keyed(tmp_path: Path):
+    """append_day's existing behavior (CANON_COLUMNS empty-frame default,
+    dedupe on (date, instrument_key)) must be unchanged after the
+    generalization -- this pins that contract explicitly."""
+    df = pd.DataFrame([{
+        "date": pd.Timestamp("2026-07-03"), "instrument_key": "INE1", "isin": "INE1",
+        "symbol": "AAA", "series": "EQ",
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+        "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
+        "source": "nse-udiff",
+    }])[config.CANON_COLUMNS]
+    append_day(df, tmp_path)
+    out = pd.read_parquet(config.ohlc_path(2026, tmp_path))
+    assert list(out.columns) == config.CANON_COLUMNS

@@ -106,7 +106,9 @@ def write_json(obj: dict[str, Any], path: Path) -> None:
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n")
 
 
-def write_status(status_obj: Any, meta_dir: Path) -> Path:
-    path = meta_dir / "last_run_status.json"
+def write_status(
+    status_obj: Any, meta_dir: Path, *, filename: str = "last_run_status.json"
+) -> Path:
+    path = meta_dir / filename
     write_json(status_to_dict(status_obj), path)
     return path

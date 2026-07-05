@@ -8,8 +8,10 @@ pipeline/.venv/
 .coverage
 # generated data artifacts (published to CDN, not committed)
 pipeline/data/ohlc/*.parquet
+pipeline/data/reference/*.parquet
 pipeline/data/meta/manifest.json
 pipeline/data/meta/last_run_status.json
+pipeline/data/meta/last_run_status_*.json
 pipeline/data/stage/
 pipeline/data/meta/synced_manifest.json
 pipeline/data/meta/quarantine/

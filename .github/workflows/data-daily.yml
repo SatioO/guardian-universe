@@ -56,6 +56,18 @@ jobs:
       - name: Publish the updated dataset
         if: steps.decide.outputs.status == 'success'
         run: python -m pipeline publish
+      - name: Surface secondary-dataset failures
+        if: always() && steps.decide.outputs.status == 'success'
+        run: |
+          bad=0
+          for f in data/meta/last_run_status_*.json; do
+            [ -e "$f" ] || continue
+            s=$(jq -r '.status // "missing"' "$f")
+            case "$s" in success|skipped_holiday|skipped_idempotent|not_yet) ;; *)
+              echo "::error::secondary dataset failed: $f status=$s"; bad=1 ;;
+            esac
+          done
+          exit $bad
       - name: Alert on failure
         if: failure()
         working-directory: ${{ github.workspace }}

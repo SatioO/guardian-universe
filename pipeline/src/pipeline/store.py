@@ -9,29 +9,54 @@ import pandas as pd
 from pipeline import config
 
 
-def _read_year(base: Path, year: int, prefix: str = "ohlc") -> pd.DataFrame:
+def _read_year(
+    base: Path, year: int, prefix: str = "ohlc", *, columns: list[str] | None = None
+) -> pd.DataFrame:
+    """Read one year-partitioned file, or an empty frame if it doesn't exist yet.
+
+    The empty-case columns come from the caller (`columns`), not a hardcoded
+    schema -- `append_keyed` is column-agnostic (G1b task 7 generalization),
+    so it passes the incoming frame's own columns; `append_day` still passes
+    `config.CANON_COLUMNS` explicitly to keep its existing contract."""
     p = config.dataset_path(year, base, prefix=prefix)
     if p.exists():
         return pd.read_parquet(p)
-    return pd.DataFrame(columns=config.CANON_COLUMNS)
+    return pd.DataFrame(columns=columns if columns is not None else config.CANON_COLUMNS)
 
 
-def append_day(df: pd.DataFrame, base: Path, *, prefix: str = "ohlc") -> None:
+def append_keyed(
+    df: pd.DataFrame,
+    base: Path,
+    *,
+    prefix: str,
+    key_cols: tuple[str, ...] = ("date", "instrument_key"),
+) -> None:
+    """Column-agnostic year-partitioned append+dedupe+atomic-write.
+
+    Needs only a `date` column (for year partitioning) plus `key_cols` (for
+    dedup identity) -- no dependency on `config.CANON_COLUMNS`, so callers
+    with entirely different schemas (e.g. ca_flags' close_prev/implied_ratio
+    columns) can use the same store mechanics as the equities/indices OHLC
+    data. `append_day` is a thin wrapper calling this with the historical
+    (date, instrument_key) default."""
     base.mkdir(parents=True, exist_ok=True)
+    key_cols_list = list(key_cols)
     for year, chunk in df.groupby(df["date"].dt.year):
-        existing = _read_year(base, int(year), prefix)
+        existing = _read_year(base, int(year), prefix, columns=list(chunk.columns))
         # Warning-free concat: skip concat entirely when existing is empty to avoid
         # pandas 2.x FutureWarning about concatenating empty/all-NA frames.
         combined = chunk if existing.empty else pd.concat([existing, chunk], ignore_index=True)
-        combined = combined.drop_duplicates(
-            subset=["date", "instrument_key"], keep="last"
-        )
-        combined = combined.sort_values(["date", "instrument_key"]).reset_index(drop=True)
+        combined = combined.drop_duplicates(subset=key_cols_list, keep="last")
+        combined = combined.sort_values(key_cols_list).reset_index(drop=True)
         # Crash-atomic: write to a temp sibling, then atomically replace.
         target = config.dataset_path(int(year), base, prefix=prefix)
         tmp = target.with_suffix(".parquet.tmp")
         combined.to_parquet(tmp, compression="zstd", index=False)
         tmp.replace(target)
+
+
+def append_day(df: pd.DataFrame, base: Path, *, prefix: str = "ohlc") -> None:
+    append_keyed(df, base, prefix=prefix, key_cols=("date", "instrument_key"))
 
 
 def has_day(base: Path, d: date, *, prefix: str = "ohlc") -> bool:
@@ -46,6 +71,17 @@ def day_symbol_count(base: Path, d: date, *, prefix: str = "ohlc") -> int:
     if df.empty:
         return 0
     return int((df["date"] == pd.Timestamp(d)).sum())
+
+
+def day_series_counts(base: Path, d: date, *, prefix: str = "ohlc") -> dict[str, int]:
+    """Per-series row counts for one day (G1b task 4 per-series gate input)."""
+    df = _read_year(base, d.year, prefix)
+    if df.empty:
+        return {}
+    day_df = df[df["date"] == pd.Timestamp(d)]
+    if day_df.empty:
+        return {}
+    return {str(k): int(v) for k, v in day_df.groupby("series").size().items()}
 
 
 def read_trailing_window(

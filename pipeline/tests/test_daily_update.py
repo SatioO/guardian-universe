@@ -42,9 +42,11 @@ def test_normal_day_ingests_and_persists(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
     st = _run(date(2026, 7, 3), StubFetcher(RAW), tmp_path)
     assert st.status == "success"
-    assert st.symbol_count == 2  # RELIANCE + INFY (BE row filtered out)
+    # Spec change (G1b task 4): the BE row (HDFCBANK) now survives normalization
+    # alongside RELIANCE + INFY (the SctySrs == "EQ" filter is dropped).
+    assert st.symbol_count == 3
     out = pd.read_parquet(base_year(tmp_path))
-    assert set(out["symbol"]) == {"RELIANCE", "INFY"}
+    assert set(out["symbol"]) == {"RELIANCE", "INFY", "HDFCBANK"}
 
 
 def test_holiday_skips_cleanly_without_fetching(tmp_path: Path):
@@ -153,6 +155,79 @@ def test_deviation_gate_fires_from_stored_trailing_window(tmp_path: Path, monkey
     # the deviation gate (fed by _trailing_counts over the real stored window)
     # must fire end-to-end -> "failed", nothing written.
     st = _run(date(2026, 7, 3), StubFetcher(RAW), tmp_path)
+    assert st.status == "failed"
+    assert not store.has_day(tmp_path, date(2026, 7, 3))
+
+
+def _multi_series_raw(n_eq: int, n_be: int) -> pd.DataFrame:
+    rows = []
+    for i in range(n_eq):
+        rows.append({
+            "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": f"EQ{i:05d}",
+            "TckrSymb": f"EQS{i}", "SctySrs": "EQ", "SsnId": "F1",
+            "OpnPric": 100, "HghPric": 101, "LwPric": 99, "ClsPric": 100,
+            "PrvsClsgPric": 100, "TtlTradgVol": 1, "TtlTrfVal": 1, "TtlNbOfTxsExctd": 1,
+        })
+    for i in range(n_be):
+        rows.append({
+            "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": f"BE{i:05d}",
+            "TckrSymb": f"BES{i}", "SctySrs": "BE", "SsnId": "F1",
+            "OpnPric": 100, "HghPric": 101, "LwPric": 99, "ClsPric": 100,
+            "PrvsClsgPric": 100, "TtlTradgVol": 1, "TtlTrfVal": 1, "TtlNbOfTxsExctd": 1,
+        })
+    return pd.DataFrame(rows)
+
+
+def test_widened_universe_day_passes_against_eq_only_trailing_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # End-to-end migration property: seed EQ-only trailing history (as if
+    # ingested pre-migration), then run a widened day (EQ roughly stable count
+    # + a brand-new BE series) through run_daily. Must succeed even though the
+    # TOTAL row count is ~2x the EQ-only trailing mean.
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (2000, 10000))
+    for d in ("2026-06-30", "2026-07-01", "2026-07-02"):
+        store.append_day(_canon_rows(d, 2000), tmp_path)
+    raw = _multi_series_raw(n_eq=2000, n_be=1800)
+    st = _run(date(2026, 7, 3), StubFetcher(raw), tmp_path)
+    assert st.status == "success"
+    assert st.symbol_count == 3800
+    assert store.has_day(tmp_path, date(2026, 7, 3))
+
+
+def test_truncated_eq_file_fails_even_with_new_series_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Migration property (failure side): EQ count halved relative to EQ-only
+    # trailing history must still fail the per-series gate, even though a new
+    # BE series is present and the total is within abs_range.
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (2000, 10000))
+    for d in ("2026-06-30", "2026-07-01", "2026-07-02"):
+        store.append_day(_canon_rows(d, 2000), tmp_path)
+    raw = _multi_series_raw(n_eq=1000, n_be=1800)  # EQ halved
+    st = _run(date(2026, 7, 3), StubFetcher(raw), tmp_path)
+    assert st.status == "failed"
+    assert not store.has_day(tmp_path, date(2026, 7, 3))
+
+
+def _be_rows(d: str, n: int) -> pd.DataFrame:
+    return pd.DataFrame([{
+        "date": pd.Timestamp(d), "instrument_key": f"BEK{i:05d}", "isin": f"BEK{i:05d}",
+        "symbol": f"BES{i}", "series": "BE",
+        "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "prevclose": 100.0,
+        "volume": 1, "value": 1.0, "trades": 1, "source": "seed",
+    } for i in range(n)])[config.CANON_COLUMNS]
+
+
+def test_vanished_major_series_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # A major series (trailing mean >= 50) absent from today's data is a
+    # truncation signal and must fail the gate.
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (2000, 10000))
+    for d in ("2026-06-30", "2026-07-01", "2026-07-02"):
+        combined = pd.concat([_canon_rows(d, 2000), _be_rows(d, 200)], ignore_index=True)
+        store.append_day(combined, tmp_path)
+    raw = _multi_series_raw(n_eq=2000, n_be=0)  # BE series vanished entirely
+    st = _run(date(2026, 7, 3), StubFetcher(raw), tmp_path)
     assert st.status == "failed"
     assert not store.has_day(tmp_path, date(2026, 7, 3))
 

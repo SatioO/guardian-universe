@@ -78,7 +78,7 @@ Each successful day also publishes `delta_{date}.<sha8>.parquet` (~150 KB). The 
 ### 3.1 Universe: widen at ingest, filter at read
 
 - `normalize` keeps `FinInstrmTp=='STK'` + F-session filters but **drops the EQ-only filter**: all cash series (EQ, BE, BZ, SM, ST, …) stored with their `series` value. The scanner defaults to EQ client-side.
-- Row-count gates become **per-series trailing deviation** (>15% vs trailing-10-day mean per series) with loose absolute total bounds (1,000–10,000) — universe growth never requires a code change.
+- Row-count gates become **per-series trailing deviation** (>15% vs trailing-10-day mean per series) with loose absolute total bounds (2,000–10,000) — universe growth never requires a code change.
 - **Indices adapter** `sources/nse_indices.py`: NSE daily indices file; rows tagged `series='INDEX'`, `instrument_key` = stable slug (`IDX:NIFTY50`), `isin` empty. Same store, same schema.
 
 ### 3.2 Identity & quarantine
@@ -106,6 +106,12 @@ Each successful day also publishes `delta_{date}.<sha8>.parquet` (~150 KB). The 
   ] }
 ```
 
+- The `schema_version` values in the example above are **illustrative**, not
+  frozen numbers — each dataset's actual value tracks its own registration in
+  `datasets.py` and bumps only on a client-visible change to that dataset
+  (never in lockstep across datasets). As implemented in G1b: `ohlc` is `2`
+  (bumped 1→2 for the universe-widening + sentinel-key change, §3.1/§4),
+  `indices` is `1`, `reference` is `1`, `ca_flags` is `1`.
 - Per-dataset `schema_version`; clients ignore unknown datasets (forward-compatible).
 - Reserved dataset names: `corporate_actions`, `breadth`, `fundamentals`.
 - Reserved adjustment enum: `raw | split | total_return`.

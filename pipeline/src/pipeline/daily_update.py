@@ -54,11 +54,21 @@ def run_daily(
     # OSError, ...) all map to a "failed" status so the scheduler never crashes.
     try:
         df = spec.normalizer(raw)
-        trailing = _trailing_counts(spec, target, holidays, special_sessions)
-        # NOTE: the deviation gate compares today's PRE-quarantine row count
-        # against the POST-quarantine counts of stored days; the difference is
-        # negligible in steady state (few rows are ever quarantined).
-        validate.check_rowcount(len(df), trailing, abs_range=spec.abs_rowcount_range)
+        trailing = _trailing_series_counts(spec, target, holidays, special_sessions)
+        # NOTE: the per-series deviation gate compares today's PRE-quarantine
+        # row counts against the POST-quarantine counts of stored days; the
+        # difference is negligible in steady state (few rows are ever
+        # quarantined). This REPLACES the old total-deviation gate (a
+        # universe-widening day would otherwise trip a large total deviation
+        # vs EQ-only trailing history).
+        today_series_counts = (
+            {str(k): int(v) for k, v in df.groupby("series").size().items()}
+            if len(df) > 0
+            else {}
+        )
+        validate.check_rowcount_by_series(
+            len(df), today_series_counts, trailing, abs_range=spec.abs_rowcount_range
+        )
         clean, bad = validate.quarantine_bad_rows(df)
         if len(bad) > 0:
             qdir = config.META_DIR / "quarantine"
@@ -91,15 +101,22 @@ def run_daily(
         return RunStatus("failed", target, message=f"unexpected pipeline error: {e}")
 
 
-def _trailing_counts(
+def _trailing_series_counts(
     spec: DatasetSpec,
     target: date,
     holidays: set[date],
     special_sessions: set[date] | None = None,
-) -> list[int]:
-    counts: list[int] = []
+) -> dict[str, list[int]]:
+    """Per-series trailing row counts over the trailing window, keyed by
+    series. A series absent on a given trailing day simply contributes no
+    entry for that day (not a zero) -- `check_rowcount_by_series` treats an
+    empty list as "no history yet" and a present-but-short list on its own
+    merits (mean over however many days it actually appeared)."""
+    counts: dict[str, list[int]] = {}
     prev = cal.previous_trading_day(target, holidays, special_sessions)
     for d in cal.trading_days_back(prev, _TRAILING_DAYS, holidays, special_sessions):
         if store.has_day(spec.base_dir, d, prefix=spec.file_prefix):
-            counts.append(store.day_symbol_count(spec.base_dir, d, prefix=spec.file_prefix))
+            day_counts = store.day_series_counts(spec.base_dir, d, prefix=spec.file_prefix)
+            for series, n in day_counts.items():
+                counts.setdefault(series, []).append(n)
     return counts

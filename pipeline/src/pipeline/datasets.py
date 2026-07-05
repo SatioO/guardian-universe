@@ -1,8 +1,13 @@
-"""DatasetSpec registry: identity for each ingested dataset (equities today, more
-later). Shared code (run_daily/backfill) threads a spec instead of hardcoding
-a dataset name."""
+"""DatasetSpec registry: identity for each ingested dataset (equities, indices
+today, more later). Shared code (run_daily/backfill) threads a spec instead of
+hardcoding a dataset name.
+
+Reserved manifest dataset names for future phases: corporate_actions, breadth,
+fundamentals, reference, ca_flags. Client adjustment enum (P4b): raw | split |
+total_return."""
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,8 +15,9 @@ from pathlib import Path
 import pandas as pd
 
 from pipeline import config
-from pipeline.fetch import Fetcher, NseUdiffFetcher
+from pipeline.fetch import Fetcher, NseIndicesFetcher, NseUdiffFetcher
 from pipeline.normalize import normalize_equity_bhavcopy
+from pipeline.normalize_indices import normalize_indices
 
 
 @dataclass(frozen=True)
@@ -28,17 +34,67 @@ class DatasetSpec:
     abs_rowcount_range: tuple[int, int]
     manifest_name: str          # dataset name in manifest.json
     schema_version: int
+    # Derived datasets are built from other datasets already in the store
+    # (via builders.BUILDERS) rather than fetched from an external source.
+    # normalizer/make_fetcher are never invoked by the CLI for these specs —
+    # additive field, default False preserves all existing constructions.
+    derived: bool = False
 
 
 EQUITIES = DatasetSpec(
     key="equities", file_prefix="ohlc", base_dir=config.OHLC_DIR,
-    source_label="nse-udiff", normalizer=normalize_equity_bhavcopy,
+    source_label="nse-udiff",
+    # M-1 carry-in: bind source via partial at spec-construction time so the
+    # per-row "source" column can never diverge from source_label.
+    normalizer=functools.partial(normalize_equity_bhavcopy, source="nse-udiff"),
     make_fetcher=NseUdiffFetcher, abs_rowcount_range=config.ROWCOUNT_ABS_RANGE,
-    manifest_name="ohlc", schema_version=1,
+    # schema_version bumps 1 -> 2 (G1b task 4): the EQ-only filter is dropped
+    # (all cash series now stored with their own `series` value) and null/empty
+    # ISIN rows get an "NSE:"+symbol sentinel key -- a client-visible change to
+    # the ohlc dataset's multi-series semantics.
+    manifest_name="ohlc", schema_version=2,
 )
 
-DATASETS: dict[str, DatasetSpec] = {"equities": EQUITIES}
-DATASET_ORDER: list[str] = ["equities"]
+INDICES = DatasetSpec(
+    key="indices", file_prefix="indices", base_dir=config.INDICES_DIR,
+    source_label="nse-indices",
+    normalizer=functools.partial(normalize_indices, source="nse-indices"),
+    make_fetcher=NseIndicesFetcher, abs_rowcount_range=config.INDICES_ROWCOUNT_ABS_RANGE,
+    manifest_name="indices", schema_version=1,
+)
+
+def _no_fetcher() -> Fetcher:
+    """Derived datasets are built from the store, not fetched -- this must
+    never be invoked; the CLI's phase-1 fetch loop always skips `derived`
+    specs before it can call make_fetcher()."""
+    raise RuntimeError("derived dataset has no fetcher")
+
+
+REFERENCE = DatasetSpec(
+    key="reference", file_prefix="instruments", base_dir=config.REFERENCE_DIR,
+    source_label="derived",
+    normalizer=lambda df: df,  # identity: builders.build_reference shapes rows itself
+    make_fetcher=_no_fetcher,
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="reference", schema_version=1,
+    derived=True,
+)
+
+CA_FLAGS = DatasetSpec(
+    key="ca_flags", file_prefix="ca_flags", base_dir=config.CA_FLAGS_DIR,
+    source_label="derived",
+    normalizer=lambda df: df,  # identity: builders.build_ca_flags shapes rows itself
+    make_fetcher=_no_fetcher,
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="ca_flags", schema_version=1,
+    derived=True,
+)
+
+DATASETS: dict[str, DatasetSpec] = {
+    "equities": EQUITIES, "indices": INDICES, "reference": REFERENCE,
+    "ca_flags": CA_FLAGS,
+}
+DATASET_ORDER: list[str] = ["equities", "indices", "reference", "ca_flags"]
 
 # publish.py resolves specs by manifest_name (by_manifest_name); manifest_name
 # must be unique across the registry or that resolution would be ambiguous.

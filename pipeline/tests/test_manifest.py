@@ -52,7 +52,7 @@ def test_build_manifest_v2_shape(tmp_path):
     assert m["manifest_version"] == 2 and m["min_client_version"] == "0.1.0"
     assert m["latest_trading_date"] == "2026-07-03"
     (ds,) = m["datasets"]
-    assert ds["name"] == "ohlc" and ds["schema_version"] == 1
+    assert ds["name"] == "ohlc" and ds["schema_version"] == 2
     assert ds["latest_date"] == "2026-07-03"
     (b,) = ds["baseline"]
     assert b["name"] == "ohlc_2026.parquet" and b["rows"] == 2
@@ -105,6 +105,17 @@ def test_write_status_writes_last_run_status(tmp_path: Path):
     assert p == tmp_path / "last_run_status.json"
     import json
     assert json.loads(p.read_text())["symbol_count"] == 2406
+
+
+def test_write_status_accepts_custom_filename(tmp_path: Path):
+    from pipeline.daily_update import RunStatus
+    p = manifest.write_status(
+        RunStatus("success", date(2026, 7, 3), symbol_count=12, source="derived"),
+        tmp_path, filename="last_run_status_reference.json",
+    )
+    assert p == tmp_path / "last_run_status_reference.json"
+    import json
+    assert json.loads(p.read_text())["symbol_count"] == 12
 
 
 def test_asset_name_inserts_sha8_before_extension():
