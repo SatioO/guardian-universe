@@ -157,6 +157,12 @@ def build_ca_flags(
     Appends (never overwrites) via `store.append_keyed`, deduped on
     (date, instrument_key) -- idempotent re-runs for the same target date
     replace that date's flags rather than duplicating them.
+
+    Known limitation (dual-key join, until reference-remap linking lands in
+    P4a): an instrument that switches its `instrument_key` between days (e.g.
+    the `NSE:{symbol}` sentinel resolving to its real ISIN once one appears)
+    is absent from the same-key join on the day of the switch, so a
+    corporate action coinciding with that switch is silently missed that day.
     """
     df = _read_all_years_for_ca_flags(source_spec)
 

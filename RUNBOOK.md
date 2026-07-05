@@ -148,6 +148,130 @@ directly. Because it's never added to the GC `referenced` set, it self-GCs
 under the same 7-day aged-asset sweep (`publish._gc`) as any other
 unreferenced asset — no separate cleanup step is needed.
 
+## G1b: indices, widened universe, derived datasets (reference, ca_flags)
+
+### Indices dataset
+`indices` is the second fetched dataset (`datasets.INDICES`, `source_label
+"nse-indices"`), sourced from NSE's daily `ind_close_all_{DDMMYYYY}.csv`.
+Rows are tagged `series='INDEX'`, keyed as `instrument_key = "IDX:" +
+NAME.upper().replace(" ", "")` (e.g. `IDX:NIFTY50`), with `isin=""`. Same
+store/manifest/publish mechanism as equities — nothing dataset-specific in
+`cli.py`/`publish.py`/`sync.py`. Row-count sanity uses its own absolute range,
+`config.INDICES_ROWCOUNT_ABS_RANGE`.
+
+### Widened cash-series universe + per-series gates
+`normalize_equity_bhavcopy` no longer filters to `SctySrs == "EQ"` — every
+cash series (EQ, BE, BZ, SM, ST, …) is stored under its own `series` value
+(the scanner still defaults to EQ client-side). Rows with a null/empty ISIN
+key as an `"NSE:" + symbol` sentinel instead of being quarantined for a
+missing ISIN (quarantine still rejects rows where BOTH isin and symbol are
+empty).
+
+Because the widened universe roughly doubles daily row counts and adds
+series with no prior history, the OLD **total**-deviation gate would trip on
+every widening day. `run_daily` now gates on **per-series trailing
+deviation** (`validate.check_rowcount_by_series`): each series with trailing
+history is checked against its own trailing mean (>15% deviation, or a major
+series — trailing mean ≥ 50 — vanishing entirely, both fail); a series with
+no trailing history yet (new to the store) passes and starts accumulating
+history. The absolute total-rowcount bounds are `config.ROWCOUNT_ABS_RANGE =
+(2000, 10000)` (widened from the EQ-only `(1800, 3000)`). This is a
+client-visible change to `ohlc`'s multi-series semantics, hence
+`EQUITIES.schema_version` bumped `1 -> 2` (see `datasets.py`).
+
+### Derived datasets: `reference/instruments` and `ca_flags/`
+Two more registry entries, `REFERENCE` and `CA_FLAGS`, both `derived=True`.
+Derived specs have **no fetcher** — `daily`'s CLI loop runs in two phases:
+first the fetched specs (equities, indices) as before, then — only for a
+full `--dataset all` run, and only when the primary (equities) status came
+back healthy — the derived specs, built from the local store via
+`builders.BUILDERS[key](spec, target)`:
+
+- **`reference/instruments`** (`builders.build_reference`) — a full-rewrite
+  SCD2 symbol master: one row per distinct `(instrument_key, symbol, series)`
+  version seen in the equities store, with `first_seen`/`last_seen`/
+  `valid_from`/`valid_to` and a v1 `status` (`active` if seen within the last
+  10 trading days, else `inactive`; `suspended`/`delisted` need an exchange
+  reference feed and are deferred to P4a).
+- **`ca_flags/`** (`builders.build_ca_flags`) — corporate-action ex-date
+  detector: for each trading day, joins today's `prevclose` against the
+  previous trading day's stored `close` per `instrument_key` and flags a
+  discontinuity beyond `config.CA_DISCONTINUITY_THRESHOLD` (a split, bonus,
+  or other ex-date event — not ordinary price movement). Appended
+  year-partitioned via `store.append_keyed`, deduped on `(date,
+  instrument_key)` — idempotent re-runs replace rather than duplicate a
+  day's flags.
+
+`--dataset <derived-key>` (e.g. a lone `--dataset reference`) is **not
+supported** — the CLI rejects it with an explanatory message and exit code 2.
+Derived datasets only build as part of a full `--dataset all` daily run.
+
+### Per-dataset status files: primary vs. secondary
+Exactly one dataset — `DATASET_ORDER[0]` (`equities`) — is "primary" and
+drives the publish gate and exit code, same contract as G1a. G1b adds:
+
+- **`last_run_status.json`** is written **only if the primary key
+  (`equities`) is among the resolved dataset keys for that run.** A run of
+  `--dataset indices`, `--dataset reference`, or `--dataset ca_flags` alone
+  **never touches** `last_run_status.json` — the file some other, earlier
+  run (of `--dataset all`, or of `equities` alone) left behind stays exactly
+  as-is.
+- Every OTHER resolved dataset — fetched (`indices`) or derived
+  (`reference`, `ca_flags`) — gets its own **`last_run_status_<key>.json`**
+  (e.g. `last_run_status_indices.json`), written every run that includes it.
+- `main()`'s exit code is driven by the primary's status when the primary
+  ran; a run that doesn't include the primary exits by its own dataset(s)'
+  statuses instead.
+- A secondary/derived dataset failing does **not** block publishing a
+  healthy primary: `daily`'s exit code still goes non-zero (so the CI step
+  is visibly red), but `publish`'s gate only reads `last_run_status.json`
+  (the primary), so equities keeps publishing. The workflow's **"Surface
+  secondary-dataset failures"** step (after the publish step in
+  `data-daily.yml`) loops every `last_run_status_*.json`, and fails the job
+  if any secondary's status is outside the OK set
+  (`success|skipped_holiday|skipped_idempotent|not_yet`) — this reddens the
+  job (firing the existing Alert-on-failure step) without having blocked a
+  healthy primary's publish. It only runs when the ingest step's own
+  primary-status decision (`steps.decide`) was `success`, so a primary
+  failure is reported once, not twice.
+
+**STALENESS WARNING — read before trusting the gate after a manual
+non-primary run.** Because a lone `--dataset <non-primary>` run (e.g.
+`--dataset reference` to rebuild the symbol master, or `--dataset indices`
+to retry a late indices file) never writes `last_run_status.json`, that file
+keeps reflecting whatever the **last equities run** recorded — which may be
+from an earlier day. If you then run `publish` (or the workflow does), it
+will proceed — CAS content-addressing and the shrink-guard make that
+publish itself benign/idempotent (no data corruption, nothing goes
+backwards) — but the publish gate is now trusting a **stale** status file
+that may not reflect today's actual equities health. **Operators must
+re-run `daily` (all, or at least `equities`) before trusting the gate again**
+whenever a manual non-primary run has intervened. This is a monitoring/trust
+gap, not a data-integrity one.
+
+### ca_flags: dual-key limitation (until reference-remap linking, P4a)
+`build_ca_flags` joins today's and the previous trading day's rows **by
+`instrument_key`**. An instrument that switches its key between those two
+days — most commonly the `"NSE:" + symbol` sentinel resolving to the
+instrument's real ISIN once one appears in the bhavcopy — has no matching
+row on the other side of the join *on the day of the switch*, so if a
+corporate action happens to coincide with that same-day key switch, it is
+**silently missed** that day (no flag emitted, no error either — this is not
+distinguishable from "new listing, nothing to compare against" in v1).
+This is a known, accepted gap until `reference/`'s remap-linking work lands
+(P4a wires the ISIN-appears event back into the detector's join). It affects
+only the rare day where a sentinel-to-ISIN remap and a real corporate action
+land on the exact same day for the exact same instrument.
+
+### ca_flags: what a flag means for clients
+A flagged instrument (`ca_flags` row for a given `(date, instrument_key)`)
+signals a probable ex-date discontinuity (split, bonus, or similar) in the
+`ohlc` series, not a genuine price move. **Clients should exclude flagged
+instruments from level-based scans** (support/resistance, breakout,
+%-from-52w-high, and similar absolute-price criteria) for that date until
+P4b's adjustment-factor machinery (`raw | split | total_return`) is in place
+to properly rebase the series across the ex-date.
+
 ### Migration note (G0 -> G1a manifest v2)
 The first G1a publish reads the live G0 manifest (v1, `files` key) via
 `dataset_files()` in both the shrink-guard (`check_no_shrink`) and `sync.py`;
