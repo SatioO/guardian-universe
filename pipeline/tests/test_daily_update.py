@@ -101,6 +101,7 @@ def _canon_rows(d: str, n: int) -> pd.DataFrame:
 
 
 def test_all_rows_quarantined_returns_failed(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(config, "META_DIR", tmp_path / "meta")
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
     # Every row has open<=0 -> all quarantined -> clean empty. Must be "failed"
     # (not a success no-op) and nothing written, so the day can be retried.
@@ -113,6 +114,9 @@ def test_all_rows_quarantined_returns_failed(tmp_path: Path, monkeypatch):
     st = _run(date(2026, 7, 3), StubFetcher(bad), tmp_path)
     assert st.status == "failed"
     assert not store.has_day(tmp_path, date(2026, 7, 3))
+    # All-corrupt path also persists a quarantine file (evidence the write still
+    # happens on the "failed" branch, not just on "success").
+    assert (tmp_path / "meta" / "quarantine" / "ohlc_2026-07-03.parquet").exists()
 
 
 def test_malformed_raw_is_reported_not_raised(tmp_path: Path):
@@ -156,15 +160,23 @@ def test_deviation_gate_fires_from_stored_trailing_window(tmp_path: Path, monkey
 def test_quarantined_rows_are_persisted(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(config, "META_DIR", tmp_path / "meta")
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
-    # Build a fetcher with exactly one quarantined row (OpnPric=0 fails quarantine).
+    # Two rows: RELIANCE is clean, INFY has high<low so it fails quarantine.
+    # Exactly one bad row among >=2 exercises the partial-success path (as
+    # opposed to the all-corrupt "failed" path covered separately above).
     dirty_frame = pd.DataFrame([{
         "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE002A01018",
-        "TckrSymb": "RELIANCE", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 0,
+        "TckrSymb": "RELIANCE", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 2990,
         "HghPric": 3010, "LwPric": 2985, "ClsPric": 3000, "PrvsClsgPric": 2980,
         "TtlTradgVol": 1000000, "TtlTrfVal": 3000000000, "TtlNbOfTxsExctd": 50000,
+    }, {
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE009A01021",
+        "TckrSymb": "INFY", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 1500,
+        "HghPric": 1480, "LwPric": 1510, "ClsPric": 1490, "PrvsClsgPric": 1495,
+        "TtlTradgVol": 500000, "TtlTrfVal": 750000000, "TtlNbOfTxsExctd": 20000,
     }])
     st = _run(date(2026, 7, 3), StubFetcher(dirty_frame), tmp_path)
-    assert st.status == "failed" and st.quarantined_count == 1
+    assert st.status == "success"
+    assert st.quarantined_count == 1
     qfile = tmp_path / "meta" / "quarantine" / "ohlc_2026-07-03.parquet"
     assert qfile.exists()
     assert len(pd.read_parquet(qfile)) == 1
