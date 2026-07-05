@@ -6,6 +6,7 @@ import pandas as pd
 
 from pipeline import config, datasets, store
 from pipeline.backfill import backfill
+from pipeline.errors import NotYetPublished
 from pipeline.fetch import FetchResult
 
 HOLIDAYS: set[date] = set()
@@ -63,3 +64,55 @@ def test_backfill_is_resumable(tmp_path: Path, monkeypatch):
     assert f2.dates == []
     for d in (date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3)):
         assert store.has_day(tmp_path, d)  # all 3 days persisted, not just the last
+
+
+class _RaisingOnDateFetcher:
+    """Raises `NotYetPublished` for exactly one configured date; serves a
+    normal one-day frame (tagged with the requested date, like `StubFetcher`)
+    for every other date."""
+
+    def __init__(self, raise_on: date):
+        self._raise_on = raise_on
+        self.dates: list[date] = []
+
+    def fetch_raw(self, d: date) -> FetchResult:
+        self.dates.append(d)
+        if d == self._raise_on:
+            raise NotYetPublished(f"404 for {d.isoformat()}")
+        df = RAW.copy()
+        df["TradDt"] = d.isoformat()
+        return FetchResult(df, "nse-udiff")
+
+
+def test_backfill_non_final_day_404_is_failed_not_not_yet(tmp_path: Path, monkeypatch):
+    """Consistency fold with the catch-up loop (G2 Task 4): every backfill day
+    except the most-recent/final one is, by construction, strictly in the
+    past relative to `end` -- a 404 there means NSE's archive genuinely has a
+    hole, not that the day is running late. Only the final day keeps
+    `not_yet` lateness semantics."""
+    from pipeline import config
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    # 3 trading days ending 2026-07-03 (Fri): 2026-07-01, 07-02, 07-03 (final).
+    non_final_day = date(2026, 7, 1)
+    f = _RaisingOnDateFetcher(raise_on=non_final_day)
+    out = backfill(datasets_spec(tmp_path), date(2026, 7, 3), 3, fetcher=f,
+                   holidays=HOLIDAYS, sleep=_no_sleep)
+    by_date = {s.date: s for s in out}
+    assert by_date[non_final_day].status == "failed"
+    assert "archive missing for past trading day" in by_date[non_final_day].message
+    assert by_date[date(2026, 7, 3)].status == "success"  # final day unaffected
+
+
+def test_backfill_final_day_404_is_not_yet(tmp_path: Path, monkeypatch):
+    """The final/most-recent backfill day keeps `not_yet` lateness semantics
+    -- a 404 there is ordinary lateness (the bhavcopy for the most recent
+    requested day just isn't out yet), same as the catch-up loop's target
+    day."""
+    from pipeline import config
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    final_day = date(2026, 7, 3)
+    f = _RaisingOnDateFetcher(raise_on=final_day)
+    out = backfill(datasets_spec(tmp_path), date(2026, 7, 3), 3, fetcher=f,
+                   holidays=HOLIDAYS, sleep=_no_sleep)
+    by_date = {s.date: s for s in out}
+    assert by_date[final_day].status == "not_yet"

@@ -709,3 +709,46 @@ def test_catchup_window_skips_holiday_inside_window(monkeypatch, tmp_path):
     rc = cli.main(["daily", "--date", target.isoformat()])
     assert rc == 0
     assert holiday not in fetcher.requested
+
+
+def test_daily_holiday_target_reports_that_days_skip_not_window_fallback(
+    monkeypatch, tmp_path
+):
+    """Regression guard for the `if not cal.is_trading_day(target, ...):
+    window = [target]` branch in cli.py's daily loop. `target` here (Sunday
+    2026-07-05, empty holidays) is NOT a trading day, so `trading_days_back`
+    would silently substitute the PREVIOUS trading day (Friday 2026-07-03) as
+    the window's last element if the guard were absent/deleted -- the status
+    FILE would then wrongly report Friday's outcome (a fetch attempt, not a
+    holiday-skip) under a run the operator asked for on Sunday, and the
+    RecordingFetcher would see a real network request that must never happen
+    for a non-trading day.
+
+    Asserts, precisely because this is what the guard branch (and only that
+    branch) guarantees:
+      1. the primary status FILE's `date` is the TARGET (2026-07-05), not
+         Friday's date -- proving the window was NOT silently substituted;
+      2. `status == "skipped_holiday"` -- the pre-existing single-day
+         behavior for a non-trading-day target, preserved;
+      3. exit code 0;
+      4. `fetcher.requested == []` -- zero network calls, i.e. the window
+         mechanism never ran at all for a non-trading-day target.
+    """
+    import json
+
+    from pipeline import config
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))  # empty holidays
+
+    target = date(2026, 7, 5)  # a Sunday -- not a trading day, no holiday entry needed
+    fetcher = RecordingFetcher()
+    _catchup_registry(monkeypatch, tmp_path, fetcher)
+
+    rc = cli.main(["daily", "--date", target.isoformat()])
+
+    assert rc == 0
+    assert fetcher.requested == []  # no network: the guard short-circuits before any fetch
+    status = json.loads((tmp_path / "last_run_status.json").read_text())
+    assert status["status"] == "skipped_holiday"
+    assert status["date"] == target.isoformat()  # target's OWN date, not Friday's

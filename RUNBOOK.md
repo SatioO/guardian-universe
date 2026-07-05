@@ -322,7 +322,9 @@ explicitly (`catch-up: <key> <date> failed: <message>`, stderr) and, for the
 must never look like a clean run just because today's ingest was fine.
 
 **Holes older than the window.** The catch-up loop only looks back 7 trading
-days from the target. A hole older than that — the pipeline was down for
+days from the target — inclusive: the target day itself counts as one of
+the 7, so the oldest self-repairable hole is 6 trading days before the
+target, not 7. A hole older than that — the pipeline was down for
 over a week, or a hole predates this mechanism entirely — is NOT
 self-healed by `daily`; use `backfill --days N` (with N covering the gap) or,
 if both NSE sources are down for that day, `rebuild-day` (see below).
