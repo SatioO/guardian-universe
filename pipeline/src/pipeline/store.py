@@ -48,6 +48,17 @@ def day_symbol_count(base: Path, d: date, *, prefix: str = "ohlc") -> int:
     return int((df["date"] == pd.Timestamp(d)).sum())
 
 
+def day_series_counts(base: Path, d: date, *, prefix: str = "ohlc") -> dict[str, int]:
+    """Per-series row counts for one day (G1b task 4 per-series gate input)."""
+    df = _read_year(base, d.year, prefix)
+    if df.empty:
+        return {}
+    day_df = df[df["date"] == pd.Timestamp(d)]
+    if day_df.empty:
+        return {}
+    return {str(k): int(v) for k, v in day_df.groupby("series").size().items()}
+
+
 def read_trailing_window(
     base: Path, end: date, n_rows_per_key: int, *, prefix: str = "ohlc"
 ) -> pd.DataFrame:

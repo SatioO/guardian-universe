@@ -32,15 +32,30 @@ def normalize_equity_bhavcopy(raw: pd.DataFrame, source: str = "nse-udiff") -> p
     missing = _REQUIRED_RAW - set(raw.columns)
     if missing:
         raise UnexpectedFailure(f"bhavcopy missing required columns: {sorted(missing)}")
+    # G1b task 4 (spec change): the SctySrs == "EQ" filter is DROPPED — all cash
+    # series (STK + final-session) are stored, each tagged with its own
+    # `series` value. Only the FinInstrmTp/session filters remain.
     df = raw[
         (raw["FinInstrmTp"] == "STK")
-        & (raw["SctySrs"] == "EQ")
         & (raw["SsnId"].isin(_FINAL_SESSIONS))
     ].copy()
 
     df = df.rename(columns=_COLMAP)
     df["date"] = pd.to_datetime(df["date"])
-    df["instrument_key"] = df["isin"]
+
+    # ISIN normalized to a plain string first ("" for null/NaN) so downstream
+    # logic and dtype stay simple.
+    isin = df["isin"].fillna("").astype(str)
+    symbol = df["symbol"].fillna("").astype(str)
+    df["isin"] = isin
+
+    # Sentinel keys: null/empty-ISIN rows key off "NSE:" + symbol instead of
+    # dying in quarantine for a missing ISIN. Rows where BOTH isin and symbol
+    # are empty get an empty instrument_key so quarantine's key_ok check still
+    # rejects them (no fake key is invented from nothing).
+    df["instrument_key"] = isin.where(isin != "", "NSE:" + symbol)
+    df.loc[(isin == "") & (symbol == ""), "instrument_key"] = ""
+
     df["source"] = source
 
     df["volume"] = df["volume"].astype("int64")

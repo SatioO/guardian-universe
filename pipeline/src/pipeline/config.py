@@ -25,10 +25,12 @@ CANON_COLUMNS: list[str] = [
     "source",
 ]
 
-# Validation thresholds. The real NSE EQ universe is ~2384 symbols (2026); the abs
-# range is only a coarse full-market sanity bound (a truncated file is far smaller) —
-# the deviation gate does the fine day-to-day anomaly detection.
-ROWCOUNT_ABS_RANGE: tuple[int, int] = (1800, 3000)
+# Validation thresholds. G1b task 4 widens the stored universe from EQ-only to
+# ALL cash series (STK + final session), so the abs range widens accordingly —
+# it remains only a coarse full-market sanity bound (a truncated file is far
+# smaller); the per-series deviation gate does the fine day-to-day anomaly
+# detection (see validate.check_rowcount_by_series).
+ROWCOUNT_ABS_RANGE: tuple[int, int] = (2000, 10000)
 ROWCOUNT_DEVIATION: float = 0.15
 
 # Coarse full-market sanity bound for the indices dataset -- calibrated live

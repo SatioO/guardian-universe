@@ -3,11 +3,11 @@ import pytest
 
 from pipeline import config
 from pipeline.errors import UnexpectedFailure
-from pipeline.validate import check_rowcount, quarantine_bad_rows
+from pipeline.validate import check_rowcount, check_rowcount_by_series, quarantine_bad_rows
 
 
 def test_rowcount_within_range_and_stable_passes():
-    check_rowcount(2000, [1990, 2010, 2005])  # no raise
+    check_rowcount(5000, [4990, 5010, 5005])  # no raise
 
 
 def test_rowcount_below_absolute_floor_fails():
@@ -16,15 +16,15 @@ def test_rowcount_below_absolute_floor_fails():
 
 
 def test_rowcount_deviation_over_threshold_fails():
-    # count 1800 is INSIDE the abs range [1800, 3000] but deviates ~18% (400/2200)
-    # from the trailing mean of 2200 -> must fail on the DEVIATION check, not abs-range.
+    # count 5000 is INSIDE the abs range [2000, 10000] but deviates ~18% (900/4900)
+    # from the trailing mean of 5900 -> must fail on the DEVIATION check, not abs-range.
     with pytest.raises(UnexpectedFailure):
-        check_rowcount(1800, [2200, 2200, 2200])
+        check_rowcount(5000, [5900, 5900, 5900])
 
 
 def test_rowcount_above_absolute_ceiling_fails():
     with pytest.raises(UnexpectedFailure):
-        check_rowcount(3500, [2000, 2000])
+        check_rowcount(15000, [5000, 5000])
 
 
 def test_rowcount_nonpositive_trailing_mean_fails():
@@ -34,7 +34,7 @@ def test_rowcount_nonpositive_trailing_mean_fails():
 
 
 def test_rowcount_empty_trailing_uses_abs_range_only():
-    check_rowcount(1900, [])  # no raise (within 1800..3000)
+    check_rowcount(9000, [])  # no raise (within 2000..10000)
 
 
 def _row(**over) -> dict:
@@ -75,3 +75,82 @@ def test_check_rowcount_custom_abs_range():
     check_rowcount(120, [], abs_range=(50, 500))  # accepted
     with pytest.raises(UnexpectedFailure, match="absolute range"):
         check_rowcount(20, [], abs_range=(50, 500))
+
+
+# --- check_rowcount_by_series (Task 4: per-series gate) ---------------------
+
+
+def test_by_series_total_outside_abs_range_fails():
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            1000, {"EQ": 1000}, {"EQ": [1000, 1000]}, abs_range=(2000, 10000)
+        )
+
+
+def test_by_series_total_within_abs_range_and_stable_passes():
+    check_rowcount_by_series(
+        2500, {"EQ": 2500}, {"EQ": [2500, 2500, 2500]}, abs_range=(2000, 10000)
+    )  # no raise
+
+
+def test_by_series_uses_config_abs_range_by_default(monkeypatch):
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (100, 200))
+    check_rowcount_by_series(150, {"EQ": 150}, {"EQ": [150]})  # no raise
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(50, {"EQ": 50}, {"EQ": [150]})
+
+
+def test_by_series_deviation_over_threshold_fails():
+    # EQ deviates ~50% from its trailing mean of 2000 -> must fail even though
+    # the total is within abs_range.
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            3000, {"EQ": 1000, "BE": 2000}, {"EQ": [2000, 2000, 2000], "BE": [2000, 2000]},
+            abs_range=(2000, 10000),
+        )
+
+
+def test_by_series_new_series_with_no_trailing_passes():
+    # A series with an empty trailing list is "new today" -- it accumulates
+    # history instead of failing.
+    check_rowcount_by_series(
+        2100, {"EQ": 2000, "BE": 100}, {"EQ": [2000, 2000], "BE": []}, abs_range=(2000, 10000)
+    )  # no raise
+
+
+def test_by_series_major_series_vanished_fails():
+    # BE had a trailing mean >= 50 but is absent from today's series_counts ->
+    # a truncation signal, must fail even though EQ alone is fine.
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            2000, {"EQ": 2000}, {"EQ": [2000, 2000], "BE": [60, 55, 58]},
+            abs_range=(2000, 10000),
+        )
+
+
+def test_by_series_minor_series_vanished_passes():
+    # A series with trailing mean < 50 disappearing is not treated as a
+    # truncation signal.
+    check_rowcount_by_series(
+        2000, {"EQ": 2000}, {"EQ": [2000, 2000], "BZ": [3, 4, 2]}, abs_range=(2000, 10000)
+    )  # no raise
+
+
+def test_migration_widened_day_against_eq_only_trailing_passes():
+    # The core migration property: a widened day (~2x rows via new series,
+    # EQ itself roughly stable) validated against EQ-ONLY trailing history
+    # (pre-migration data) must PASS.
+    trailing = {"EQ": [2000, 2010, 1995]}  # EQ-only history, no BE/BZ trailing yet
+    today_series = {"EQ": 2005, "BE": 1800, "BZ": 200}  # ~4000 total, new series
+    total = sum(today_series.values())
+    check_rowcount_by_series(total, today_series, trailing, abs_range=(2000, 10000))  # no raise
+
+
+def test_migration_truncated_eq_file_fails():
+    # A truncated file: EQ count halved relative to EQ-only trailing history.
+    # Even with new series present, the EQ deviation must trip the gate.
+    trailing = {"EQ": [2000, 2010, 1995]}
+    today_series = {"EQ": 1000, "BE": 1800, "BZ": 200}  # EQ halved
+    total = sum(today_series.values())
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(total, today_series, trailing, abs_range=(2000, 10000))

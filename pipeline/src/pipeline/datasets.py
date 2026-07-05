@@ -43,7 +43,11 @@ EQUITIES = DatasetSpec(
     # per-row "source" column can never diverge from source_label.
     normalizer=functools.partial(normalize_equity_bhavcopy, source="nse-udiff"),
     make_fetcher=NseUdiffFetcher, abs_rowcount_range=config.ROWCOUNT_ABS_RANGE,
-    manifest_name="ohlc", schema_version=1,
+    # schema_version bumps 1 -> 2 (G1b task 4): the EQ-only filter is dropped
+    # (all cash series now stored with their own `series` value) and null/empty
+    # ISIN rows get an "NSE:"+symbol sentinel key -- a client-visible change to
+    # the ohlc dataset's multi-series semantics.
+    manifest_name="ohlc", schema_version=2,
 )
 
 INDICES = DatasetSpec(

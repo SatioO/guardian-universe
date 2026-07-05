@@ -52,7 +52,7 @@ def test_build_manifest_v2_shape(tmp_path):
     assert m["manifest_version"] == 2 and m["min_client_version"] == "0.1.0"
     assert m["latest_trading_date"] == "2026-07-03"
     (ds,) = m["datasets"]
-    assert ds["name"] == "ohlc" and ds["schema_version"] == 1
+    assert ds["name"] == "ohlc" and ds["schema_version"] == 2
     assert ds["latest_date"] == "2026-07-03"
     (b,) = ds["baseline"]
     assert b["name"] == "ohlc_2026.parquet" and b["rows"] == 2

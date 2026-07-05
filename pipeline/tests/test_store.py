@@ -126,6 +126,43 @@ def test_write_delta_and_prune(tmp_path):
     assert deltas[-1].name == "ohlc_2026-02-09.parquet"
 
 
+def test_day_series_counts(tmp_path: Path):
+    from pipeline.store import day_series_counts
+
+    assert day_series_counts(tmp_path, date(2026, 7, 3)) == {}
+
+    def row(key: str, series: str) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "date": pd.Timestamp("2026-07-03"), "instrument_key": key, "isin": key,
+            "symbol": key, "series": series,
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+            "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
+            "source": "nse-udiff",
+        }])[config.CANON_COLUMNS]
+
+    append_day(pd.concat([
+        row("K1", "EQ"), row("K2", "EQ"), row("K3", "BE"),
+    ], ignore_index=True), tmp_path)
+    assert day_series_counts(tmp_path, date(2026, 7, 3)) == {"EQ": 2, "BE": 1}
+
+
+def test_day_series_counts_respects_prefix(tmp_path: Path):
+    from pipeline.store import day_series_counts
+
+    def row(key: str, series: str) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "date": pd.Timestamp("2026-07-03"), "instrument_key": key, "isin": key,
+            "symbol": key, "series": series,
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+            "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
+            "source": "nse-udiff",
+        }])[config.CANON_COLUMNS]
+
+    append_day(row("NIFTY50", "INDEX"), tmp_path, prefix="indices")
+    assert day_series_counts(tmp_path, date(2026, 7, 3)) == {}
+    assert day_series_counts(tmp_path, date(2026, 7, 3), prefix="indices") == {"INDEX": 1}
+
+
 def test_prefix_writes_independent_dataset_files(tmp_path):
     from pipeline.store import day_symbol_count
 

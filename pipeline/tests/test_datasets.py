@@ -11,7 +11,9 @@ def test_equities_spec_fields():
     assert s.key == "equities" and s.file_prefix == "ohlc"
     assert s.base_dir == config.OHLC_DIR and s.source_label == "nse-udiff"
     assert s.abs_rowcount_range == config.ROWCOUNT_ABS_RANGE
-    assert s.manifest_name == "ohlc" and s.schema_version == 1
+    # schema_version bumps 1 -> 2 (G1b task 4): EQ-only filter dropped and
+    # NSE: sentinel keys introduced -- a client-visible ohlc dataset change.
+    assert s.manifest_name == "ohlc" and s.schema_version == 2
     assert datasets.DATASETS["equities"] is s
     assert datasets.DATASET_ORDER == ["equities", "indices"]
 
