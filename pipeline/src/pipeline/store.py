@@ -9,17 +9,17 @@ import pandas as pd
 from pipeline import config
 
 
-def _read_year(base: Path, year: int) -> pd.DataFrame:
-    p = config.ohlc_path(year, base)
+def _read_year(base: Path, year: int, prefix: str = "ohlc") -> pd.DataFrame:
+    p = config.dataset_path(year, base, prefix=prefix)
     if p.exists():
         return pd.read_parquet(p)
     return pd.DataFrame(columns=config.CANON_COLUMNS)
 
 
-def append_day(df: pd.DataFrame, base: Path) -> None:
+def append_day(df: pd.DataFrame, base: Path, *, prefix: str = "ohlc") -> None:
     base.mkdir(parents=True, exist_ok=True)
     for year, chunk in df.groupby(df["date"].dt.year):
-        existing = _read_year(base, int(year))
+        existing = _read_year(base, int(year), prefix)
         # Warning-free concat: skip concat entirely when existing is empty to avoid
         # pandas 2.x FutureWarning about concatenating empty/all-NA frames.
         combined = chunk if existing.empty else pd.concat([existing, chunk], ignore_index=True)
@@ -28,30 +28,36 @@ def append_day(df: pd.DataFrame, base: Path) -> None:
         )
         combined = combined.sort_values(["date", "instrument_key"]).reset_index(drop=True)
         # Crash-atomic: write to a temp sibling, then atomically replace.
-        target = config.ohlc_path(int(year), base)
+        target = config.dataset_path(int(year), base, prefix=prefix)
         tmp = target.with_suffix(".parquet.tmp")
         combined.to_parquet(tmp, compression="zstd", index=False)
         tmp.replace(target)
 
 
-def has_day(base: Path, d: date) -> bool:
-    df = _read_year(base, d.year)
+def has_day(base: Path, d: date, *, prefix: str = "ohlc") -> bool:
+    df = _read_year(base, d.year, prefix)
     if df.empty:
         return False
     return bool((df["date"] == pd.Timestamp(d)).any())
 
 
-def day_symbol_count(base: Path, d: date) -> int:
-    df = _read_year(base, d.year)
+def day_symbol_count(base: Path, d: date, *, prefix: str = "ohlc") -> int:
+    df = _read_year(base, d.year, prefix)
     if df.empty:
         return 0
     return int((df["date"] == pd.Timestamp(d)).sum())
 
 
-def read_trailing_window(base: Path, end: date, n_rows_per_key: int) -> pd.DataFrame:
+def read_trailing_window(
+    base: Path, end: date, n_rows_per_key: int, *, prefix: str = "ohlc"
+) -> pd.DataFrame:
     # Warning-free concat: drop empty year frames before concatenating to avoid
     # pandas 2.x FutureWarning about concatenating empty/all-NA frames.
-    frames = [f for f in (_read_year(base, y) for y in (end.year - 1, end.year)) if not f.empty]
+    frames = [
+        f
+        for f in (_read_year(base, y, prefix) for y in (end.year - 1, end.year))
+        if not f.empty
+    ]
     if not frames:
         return pd.DataFrame(columns=config.CANON_COLUMNS)
     df = pd.concat(frames, ignore_index=True)
