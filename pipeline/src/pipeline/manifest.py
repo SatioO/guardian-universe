@@ -7,6 +7,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 _CHUNK = 1 << 20
 
 
@@ -20,6 +22,21 @@ def file_digest(path: Path) -> tuple[str, int]:
     return h.hexdigest(), size
 
 
+def asset_name(logical: str, sha256: str) -> str:
+    """Content-addressed release asset name: sha8 spliced before the extension.
+
+    Assets named this way are immutable by construction — new content gets a
+    new name, so nothing on the release is ever clobbered except manifest.json."""
+    stem, _, ext = logical.rpartition(".")
+    return f"{stem}.{sha256[:8]}.{ext}"
+
+
+def parquet_rows(path: Path) -> int:
+    # Column-pruned read: cheap at this scale and avoids a pyarrow-stubs
+    # dependency for mypy --strict.
+    return int(len(pd.read_parquet(path, columns=["date"])))
+
+
 def build_manifest(
     ohlc_dir: Path,
     *,
@@ -30,7 +47,13 @@ def build_manifest(
     files: list[dict[str, Any]] = []
     for p in sorted(ohlc_dir.glob("ohlc_*.parquet")):
         sha, size = file_digest(p)
-        files.append({"name": p.name, "sha256": sha, "bytes": size})
+        files.append({
+            "name": p.name,
+            "asset": asset_name(p.name, sha),
+            "sha256": sha,
+            "bytes": size,
+            "rows": parquet_rows(p),
+        })
     return {
         "schema_version": schema_version,
         "generated_at": generated_at,

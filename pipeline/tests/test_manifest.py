@@ -63,3 +63,28 @@ def test_write_status_writes_last_run_status(tmp_path: Path):
     assert p == tmp_path / "last_run_status.json"
     import json
     assert json.loads(p.read_text())["symbol_count"] == 2406
+
+
+def test_asset_name_inserts_sha8_before_extension():
+    from pipeline.manifest import asset_name
+    sha = "a1b2c3d4" + "0" * 56
+    assert asset_name("ohlc_2026.parquet", sha) == "ohlc_2026.a1b2c3d4.parquet"
+
+
+def test_build_manifest_entries_have_asset_and_rows(tmp_path):
+    from datetime import date
+
+    import pandas as pd
+
+    from pipeline import config
+    from pipeline.manifest import asset_name, build_manifest
+
+    df = pd.DataFrame({c: [0, 0, 0] for c in config.CANON_COLUMNS})
+    p = tmp_path / "ohlc_2026.parquet"
+    df.to_parquet(p, compression="zstd", index=False)
+
+    m = build_manifest(tmp_path, schema_version=1,
+                       latest_trading_date=date(2026, 7, 3), generated_at="g")
+    entry = m["datasets"][0]["files"][0]
+    assert entry["rows"] == 3
+    assert entry["asset"] == asset_name("ohlc_2026.parquet", entry["sha256"])
