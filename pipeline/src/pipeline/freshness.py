@@ -59,3 +59,30 @@ def missing_days(
     floor = min(dates_present)
     clamped_expected = {d for d in expected if d >= floor}
     return sorted(clamped_expected - dates_present)
+
+
+def holidays_need_refresh(holidays: set[date], today: date) -> bool:
+    """Calendar-hygiene nag rule (G2 task 8): is `holidays.json` due for its
+    yearly refresh?
+
+    True when BOTH: (1) `today` is on or after December 1st of `today`'s own
+    year (the point at which NSE's next-year trading-holiday circular is
+    normally published, so refreshing earlier would just be premature noise
+    the operator can't act on yet), AND (2) `holidays` contains no entry
+    dated in `today.year + 1` -- i.e. the refresh genuinely hasn't happened
+    yet for the upcoming year.
+
+    Pure and independent of `is_stale`/`missing_days`: this says nothing
+    about whether any PUBLISHED dataset is behind, only whether the
+    trading-calendar INPUT the pipeline relies on (holidays.json) is about
+    to go stale for next year. Deliberately keyed off `today`'s own year (not
+    a fixed calendar constant) so the same rule works correctly across any
+    year boundary, including a holidays.json that was never refreshed across
+    a PRIOR year-end (in which case this keeps returning True every day
+    after the following Dec 1 too, since `today.year + 1` still has no
+    entry)."""
+    dec_1_this_year = date(today.year, 12, 1)
+    if today < dec_1_this_year:
+        return False
+    next_year = today.year + 1
+    return not any(d.year == next_year for d in holidays)

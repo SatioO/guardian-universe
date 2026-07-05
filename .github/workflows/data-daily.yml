@@ -29,13 +29,15 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v7   # TODO: SHA-pin for supply-chain hardening
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
           cache: pip
       - name: Install
-        run: pip install -e ".[dev]"
+        run: pip install -r requirements.lock -e . --no-deps
       - name: Sync baseline from the data-latest release (fail-closed)
         run: python -m pipeline sync
       - name: Ingest the trading day (today, or the dispatch date)

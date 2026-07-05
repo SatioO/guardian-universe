@@ -140,6 +140,59 @@ def test_cmd_check_freshness_flags_missing_release(tmp_path: Path):
     assert rc == 1  # download failed -> treated as stale/missing
 
 
+# -- check-freshness calendar hygiene (G2 task 8: holidays-refresh nag) --
+
+def test_cmd_check_freshness_fails_when_holidays_need_refresh(tmp_path: Path, capsys):
+    import json
+    # today = Dec 1 2026 (Tuesday, a trading day); last completed trading
+    # day = Mon 2026-11-30 -- manifest is otherwise perfectly fresh, and
+    # "datasets": [] means every real fetched spec hits the never-published
+    # grace warning (same shape as the pre-existing fresh/missing-release
+    # tests above), so the ONLY thing that can fail this run is the
+    # calendar-hygiene check. holidays=set() has no 2027 entry -> due.
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "latest_trading_date": "2026-11-30", "datasets": [],
+    }))
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(),
+        today=date(2026, 12, 1), runner=lambda _cmd: 0, work_dir=tmp_path,
+        client=FakeReleaseClient(),
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "holidays" in out.lower()
+    assert "2027" in out  # names the year that's missing, not just "stale"
+
+
+def test_cmd_check_freshness_passes_when_holidays_already_refreshed(tmp_path: Path):
+    import json
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "latest_trading_date": "2026-11-30", "datasets": [],
+    }))
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays={date(2027, 1, 26)},
+        today=date(2026, 12, 1), runner=lambda _cmd: 0, work_dir=tmp_path,
+        client=FakeReleaseClient(),
+    )
+    assert rc == 0  # 2027 already present -> no nag, despite today >= Dec 1
+
+
+def test_cmd_check_freshness_ignores_holiday_refresh_before_dec_1(tmp_path: Path):
+    import json
+    # Nov 30 2026 (Monday, a trading day); last completed trading day is the
+    # prior Friday 2026-11-27. Still no 2027 holiday present, but it's one
+    # day before the Dec-1 boundary -- must not fail on calendar hygiene yet.
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "latest_trading_date": "2026-11-27", "datasets": [],
+    }))
+    rc = cli.cmd_check_freshness(
+        repo="o/r", tag="data-latest", holidays=set(),
+        today=date(2026, 11, 30), runner=lambda _cmd: 0, work_dir=tmp_path,
+        client=FakeReleaseClient(),
+    )
+    assert rc == 0
+
+
 def test_parser_daily_dataset_choices():
     args = cli.build_parser().parse_args(["daily", "--dataset", "equities"])
     assert args.dataset == "equities"

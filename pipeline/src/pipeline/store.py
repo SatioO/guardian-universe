@@ -1,12 +1,56 @@
 """Year-partitioned Parquet store with append+dedupe and trailing-window reads."""
 from __future__ import annotations
 
+import sys
+import time
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 from pipeline import config
+
+
+def sweep_orphan_tmp(base: Path, *, older_than_hours: float = 24) -> int:
+    """Best-effort cleanup of orphaned crash-write `.tmp` siblings (G2 task 8
+    hygiene). `append_keyed`'s own atomic-write pattern always writes to
+    `target.with_suffix(".parquet.tmp")` before `tmp.replace(target)` -- a
+    crash between those two steps (process killed, disk full, ...) leaves a
+    torn `.tmp` file behind forever, since nothing else in the normal write
+    path ever revisits it. Left alone, these accumulate as disk-space
+    litter across every run.
+
+    Recursively globs `*.parquet.tmp` under `base` (this reaches `deltas/`
+    too, since it's a subdirectory of `base` -- see `write_delta`). Any match
+    older than `older_than_hours` (by mtime) is unlinked; anything fresher is
+    left alone, since it may be the CURRENT in-flight write of a still-running
+    process and must never be swept out from under it.
+
+    Best-effort by design: an unlink failure for one file (permissions, a
+    filesystem race, a locked file, ...) is warned to stderr and skipped, not
+    raised -- this is called at the top of every `append_keyed`/`append_day`
+    write, and a sweep hiccup must never block an otherwise-healthy ingest.
+    Returns the count of files actually removed (never the count attempted).
+    A `base` that doesn't exist yet has nothing to sweep and returns 0."""
+    if not base.exists():
+        return 0
+    threshold_seconds = older_than_hours * 3600
+    now = time.time()
+    removed = 0
+    for path in base.rglob("*.parquet.tmp"):
+        try:
+            age_seconds = now - path.stat().st_mtime
+        except OSError as e:
+            print(f"sweep_orphan_tmp: could not stat {path}: {e}", file=sys.stderr)
+            continue
+        if age_seconds < threshold_seconds:
+            continue  # fresh enough to be a current in-flight write -- spare it
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as e:
+            print(f"sweep_orphan_tmp: could not remove stale tmp {path}: {e}", file=sys.stderr)
+    return removed
 
 
 def _read_year(
@@ -38,7 +82,13 @@ def append_keyed(
     with entirely different schemas (e.g. ca_flags' close_prev/implied_ratio
     columns) can use the same store mechanics as the equities/indices OHLC
     data. `append_day` is a thin wrapper calling this with the historical
-    (date, instrument_key) default."""
+    (date, instrument_key) default -- this sweep therefore covers both entry
+    points; it is not duplicated in `append_day` itself.
+
+    G2 task 8 hygiene: sweeps orphaned crash-write `.tmp` siblings under
+    `base` (see `sweep_orphan_tmp`) before doing anything else -- best-effort,
+    never raises, so a sweep hiccup never blocks this write."""
+    sweep_orphan_tmp(base)
     base.mkdir(parents=True, exist_ok=True)
     key_cols_list = list(key_cols)
     for year, chunk in df.groupby(df["date"].dt.year):

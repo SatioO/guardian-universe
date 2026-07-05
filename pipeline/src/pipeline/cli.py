@@ -434,12 +434,24 @@ def cmd_check_freshness(
     client: ReleaseClient,
     special_sessions: set[date] | None = None,
 ) -> int:
-    """Freshness monitor: two independent checks, run in order.
+    """Freshness monitor: three independent checks, run in order.
 
     1. STALENESS (unchanged from pre-G2 behavior): is the manifest's
        `latest_trading_date` current as of `today`? This only ever looks at
        a single date field -- it says nothing about holes further back.
-    2. CONTINUITY (G2 task 7): for EVERY FETCHED dataset in the registry
+    2. CALENDAR HYGIENE (G2 task 8): is `holidays.json` (the `holidays` set
+       passed in by the caller) due for its yearly refresh? On/after
+       December 1st, a `holidays` set with no entry dated in NEXT year is
+       flagged -- see `freshness.holidays_need_refresh` for the exact rule
+       and rationale. This is independent of dataset staleness/continuity:
+       it is about the trading-CALENDAR input going stale, not about
+       published data falling behind. Failing this prints a clear message
+       naming the missing year so an operator knows exactly what to refresh
+       (see the RUNBOOK's yearly holiday-refresh procedure and
+       `.github/workflows/holidays-refresh.yml`, which nags via a GitHub
+       issue on the same yearly cadence so this CLI-level check is a second,
+       independent tripwire rather than the only signal).
+    3. CONTINUITY (G2 task 7): for EVERY FETCHED dataset in the registry
        (equities AND indices -- see the scope-amendment note at the top of
        the continuity test suite in test_cli.py for why this covers more
        than just the primary), are there any missing trading days inside the
@@ -482,6 +494,16 @@ def cmd_check_freshness(
         return 1
 
     ok = True
+    if freshness.holidays_need_refresh(holidays, today):
+        ok = False
+        print(
+            f"check-freshness: holidays.json needs its yearly refresh -- "
+            f"today ({today.isoformat()}) is on/after December 1st and no "
+            f"holiday dated in {today.year + 1} is present yet; refresh "
+            "holidays.json (and special_sessions.json alongside it) from "
+            "the NSE trading-holiday circular -- see RUNBOOK.md 'Yearly'"
+        )
+
     for key in datasets.DATASET_ORDER:
         spec = datasets.DATASETS[key]
         if spec.derived:

@@ -1,0 +1,29 @@
+name: holidays-refresh
+
+on:
+  schedule:
+    - cron: "0 6 1 12 *"   # December 1st, 06:00 UTC — yearly calendar-hygiene nag
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  nag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Open/refresh the pipeline-maintenance nag issue
+        run: |
+          next_year=$(( $(date -u +%Y) + 1 ))
+          gh label create pipeline-maintenance --color 0E8A16 --force >/dev/null 2>&1 || true
+          title="Data pipeline: refresh holidays.json for ${next_year}"
+          body="Refresh \`pipeline/data/meta/holidays.json\` + \`pipeline/data/meta/special_sessions.json\` for ${next_year} from the NSE trading-holiday circulars (manual — no scraping; see RUNBOOK.md 'Yearly'). This is a yearly reminder, not an automatic fix: \`check-freshness\` will also start failing on/after Dec 1 if ${next_year} isn't in holidays.json yet (see \`freshness.holidays_need_refresh\`)."
+          n=$(gh issue list --label pipeline-maintenance --state open --json number -q '.[0].number' || true)
+          if [ -z "$n" ]; then
+            gh issue create --title "$title" --label pipeline-maintenance --body "$body"
+          else
+            gh issue comment "$n" --body "$body"
+          fi

@@ -36,6 +36,20 @@ def test_exists_raises_on_other_error():
         GhReleaseClient(repo="o/r", tag="t", runner=r).exists()
 
 
+def test_exists_raises_on_message_containing_bare_404_without_http_prefix():
+    # Strict match (G2 task 8 hygiene): "HTTP 404" is the actual gh CLI
+    # stderr contract for a genuine not-found response (see the fixture in
+    # test_exists_false_on_404 above). A message that merely happens to
+    # contain the substring "404" WITHOUT the "HTTP 404" wrapping (e.g. a
+    # rate-limit message quoting an unrelated numeric code, or a proxy error
+    # that echoes back a request id containing "404") must NOT be
+    # misinterpreted as "release does not exist" -- that would silently mask
+    # a real error as a false negative. Any non-"HTTP 404" error path raises.
+    r = RecordingRunner([(1, "", "gh: rate limited, retry-after 404s")])
+    with pytest.raises(ReleaseError):
+        GhReleaseClient(repo="o/r", tag="t", runner=r).exists()
+
+
 def test_list_assets_parses_names_and_dates():
     out = '[{"name": "a.parquet", "created_at": "2026-07-01T00:00:00Z"}]'
     r = RecordingRunner([(0, out, "")])

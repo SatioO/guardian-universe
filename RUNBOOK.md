@@ -733,3 +733,244 @@ This is the one workflow in the repo that needs `permissions: actions:
 write` (every other workflow only needs `contents`/`issues` — see each
 workflow's own `permissions:` block) since re-enabling a workflow is an
 Actions-API write, not a repo-content or issue write.
+
+## G2: workflow hardening (SHA-pinned actions, locked deps, calendar-refresh nag, hygiene)
+
+### SHA-pinned actions — what's pinned and why
+
+Every workflow step that uses a third-party GitHub Action (`actions/checkout`,
+`actions/setup-python`) is pinned to a full commit SHA, not a mutable tag
+(`@v7`), across all five workflows that have any `uses:` steps
+(`data-daily.yml`, `data-monitor.yml`, `data-crosscheck.yml`,
+`pipeline-ci.yml`; `keepalive.yml` and `holidays-refresh.yml` have no
+`uses:` steps at all — both are pure `gh`-CLI jobs with nothing to check
+out, so there is nothing to pin in either):
+
+```yaml
+- uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+  with:
+    persist-credentials: false
+- uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+  with:
+    python-version: "3.11"
+    cache: pip
+```
+
+**Why:** a mutable version tag (`@v7`) can be force-moved by the action's
+maintainer (or, in a supply-chain-attack scenario, by anyone who compromises
+the action repo) to point at different, potentially malicious code without
+the pin in this repo ever changing — the workflow would silently start
+running whatever `v7` points to *today*, not what it pointed to when this
+was reviewed and merged. A commit SHA is immutable: `actions/checkout@9c091b...`
+always resolves to the exact same reviewed code, forever. The trailing
+`# v7` comment is purely for human readability (which tag the SHA
+corresponds to at pin time) and has no functional effect.
+
+`persist-credentials: false` is set on every `actions/checkout` step: by
+default, checkout leaves the ephemeral `GITHUB_TOKEN` credential configured
+in the local git config after checkout completes, which any subsequent step
+in the job (including a compromised dependency's install/build script) could
+read and use to push to the repo. None of this pipeline's steps need git
+push access from the checkout's own credential (the `gh` CLI steps
+authenticate via their own explicit `GH_TOKEN` env var instead), so it's
+disabled outright.
+
+**How each SHA was derived (verify-before-pin procedure):** resolve the tag
+to its underlying git object, then confirm that object is a COMMIT (not an
+annotated tag object one level removed from the commit):
+
+```bash
+gh api repos/actions/checkout/git/ref/tags/v7 --jq '.object'
+# {"sha":"9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0","type":"commit",...}
+```
+
+If `.object.type` were `"tag"` (an annotated tag), the SHA returned there is
+the annotated-tag OBJECT's own sha, not the commit — a second dereference is
+needed: `gh api repos/{owner}/{repo}/git/tags/{that_sha} --jq '.object.sha'`
+to reach the actual commit. Both `actions/checkout@v7` and
+`actions/setup-python@v6` resolved directly to `type: commit` (both are
+lightweight tags), so no second deref was needed for either at pin time —
+but always check `.object.type` when re-pinning, since a project can switch
+tagging styles between releases. Cross-verified independently via
+`git ls-remote https://github.com/{owner}/{repo} "refs/tags/{tag}"` (and
+`"refs/tags/{tag}^{}"` to peel an annotated tag if `ls-remote` shows one) —
+both methods agreed on both SHAs above.
+
+**Re-pinning to a newer release:** repeat the same `gh api` (or
+`git ls-remote`) resolution against the new tag, replace the SHA in every
+`uses:` line across every workflow that references that action, keep the
+`# vN` comment in sync with the new tag, and re-run the YAML-parse check
+below before committing.
+
+**YAML-parse verification (always run after touching any workflow file):**
+
+```bash
+cd pipeline && uv run python -c "
+import yaml, pathlib
+for f in sorted(pathlib.Path('../.github/workflows').glob('*.yml')):
+    yaml.safe_load(f.open())
+    print(f.name, 'OK')
+"
+```
+
+This is a syntax check only (confirms the YAML itself parses); it does not
+validate GitHub Actions semantics (job/step schema, expression syntax) — a
+`workflow_dispatch` run or a real push is still the actual correctness
+signal for that.
+
+### Locked dependencies
+
+`pipeline/requirements.lock` (runtime-only) and `pipeline/requirements-dev.lock`
+(runtime + the `dev` extra — pytest, mypy, ruff, pandas-stubs,
+types-requests, etc.) are both generated FROM `pipeline/pyproject.toml`'s
+declared dependencies, not from `pip freeze`-ing a venv's incidental
+installed extras. Workflows install from whichever lock matches what that
+job actually does:
+
+- **Runtime jobs** (`data-daily.yml`, `data-monitor.yml`,
+  `data-crosscheck.yml` — these only ever run `python -m pipeline <cmd>`,
+  never pytest/mypy/ruff): `pip install -r requirements.lock -e . --no-deps`.
+  `--no-deps` is required here — without it, `pip install -e .` would
+  re-resolve `pyproject.toml`'s dependency ranges itself (ignoring the lock
+  entirely for the package's own direct deps) the moment it installs the
+  local editable package; `-r requirements.lock` first satisfies every
+  pinned version, and `--no-deps` on the `-e .` install means "register this
+  package in editable mode, trust the lock for its dependencies, don't
+  second-guess it."
+- **CI test job** (`pipeline-ci.yml` — runs `ruff check`, `mypy`, `pytest`):
+  `pip install -r requirements-dev.lock -e . --no-deps`, same shape, dev
+  lock instead — this preserves the exact same installed set that
+  `pip install -e ".[dev]"` used to produce (proven by installing the dev
+  lock into a brand-new venv and running the full gate against it before
+  this landed: full suite + mypy + ruff all passed identically).
+
+**Tool choice: `uv pip compile`** (not `pip-compile`/`pip-tools`) — `uv` was
+already present on the implementation machine and in the pinned `.venv`'s
+toolchain (see the RUNBOOK's own `uv run`/`uv venv` usage above), whereas
+`pip-compile` was not installed and would have needed a separate
+`pip install pip-tools` step; `uv pip compile` reads a `pyproject.toml`
+directly (no separate `requirements.in` needed) and produces the same kind
+of pinned, `pip install -r`-installable output.
+
+**Regenerating the locks (`just relock`-style procedure — no justfile in
+this repo, so this IS the command; run both from `pipeline/`):**
+
+```bash
+cd pipeline
+uv pip compile pyproject.toml -o requirements.lock --python-version 3.11 \
+    --no-header --no-annotate
+uv pip compile pyproject.toml --extra dev -o requirements-dev.lock --python-version 3.11 \
+    --no-header --no-annotate
+```
+
+`--no-header`/`--no-annotate` keep the lockfiles as a flat, portable list of
+`name==version` pins with no embedded absolute paths or "resolved via"
+provenance comments (which would otherwise leak whatever local path the
+command happened to be run from into a checked-in file).
+
+**Read this before blindly re-running the bare command above the day a real
+dependency bump is needed:** the bare `uv pip compile pyproject.toml` command
+resolves to the NEWEST version satisfying each range in `pyproject.toml`
+(`uv`'s default resolution strategy is `highest`) — at the time this hardening
+task was done, that resolved `pandas` to `3.0.3`, a MAJOR version bump over
+the `2.2.3` this codebase has actually ever been tested against (the G2 plan
+explicitly defers "pandas-3.x CI matrix" work — this codebase is not yet
+validated against pandas 3.x). Locking that unvalidated version would have
+meant "hygiene: lock the dependencies" silently became "ship an untested
+major-version bump" the next time CI ran. **The lock therefore pins to the
+exact versions already proven by the full gate in the pinned `.venv`**
+(`pandas==2.2.3`, `pandera==0.32.1`, etc.) via a constraints file passed to
+`uv pip compile --constraints <file>`, so the dependency GRAPH still comes
+from `pyproject.toml` (transitive deps, extras, markers — all real
+resolution) while the specific versions match what's actually been run.
+**When you intentionally want to bump a dependency** (e.g. adopting pandas
+3.x once that CI matrix work lands), do it deliberately: bump the version in
+a scratch constraints file (or temporarily tighten the range in
+`pyproject.toml`), regenerate, run the FULL gate
+(`pytest -q && mypy && ruff check .`) against a FRESH venv installed purely
+from the new lock, and only commit the new lock once that's green — never
+let an unreviewed transitive bump ride in silently via a bare re-lock.
+
+**Verifying a regenerated lock before committing it** (install into a
+throwaway venv, never the working `.venv`, and run the full gate):
+
+```bash
+uv venv /tmp/lock-verify --python 3.11
+uv pip install -r requirements-dev.lock -e . --no-deps --python /tmp/lock-verify/bin/python
+/tmp/lock-verify/bin/python -m pytest -q
+/tmp/lock-verify/bin/python -m mypy
+/tmp/lock-verify/bin/python -m ruff check .
+rm -rf /tmp/lock-verify
+```
+
+### Holiday/calendar-refresh — automated nag (new) + existing manual procedure
+
+The manual refresh procedure itself is unchanged — see the "Yearly" section
+near the top of this document for exactly what to edit and the
+`holidays.json`/`special_sessions.json` formats. What's new in G2 task 8 is
+two independent tripwires that make it much harder to forget:
+
+1. **`.github/workflows/holidays-refresh.yml`** — a yearly cron (December
+   1st, 06:00 UTC, plus `workflow_dispatch` for an on-demand check) that
+   opens (or comments on, if already open) a deduped GitHub issue labeled
+   `pipeline-maintenance` naming next year explicitly ("refresh
+   holidays.json for {next year}"). This is a NAG, not an automatic fix —
+   it deliberately does not scrape NSE or write the JSON files itself (NSE's
+   holiday circular is a PDF/webpage, not a stable API — see the "Yearly"
+   section's own manual-refresh instructions); it exists purely so the
+   reminder shows up in the repo's Issues tab once a year without anyone
+   having to remember the date.
+2. **`freshness.holidays_need_refresh(holidays, today) -> bool`** (pure
+   function, `pipeline/src/pipeline/freshness.py`) — wired into
+   `cli.cmd_check_freshness`, so the DAILY/regular `check-freshness` monitor
+   run (`data-monitor.yml`, 07:30 IST every day) ALSO fails (exit 1, clear
+   message naming the missing year) once `today` is on/after December 1st
+   AND `holidays.json` has no entry dated in `today.year + 1` yet. This is
+   independent of and in addition to the yearly nag issue above — the nag
+   nudges a human once a year; this check pages the SAME on-call channel
+   (`data-monitor`'s existing `pipeline-failure` alert issue) every day
+   starting Dec 1 until the refresh actually lands, so it can't be
+   dismissed/forgotten the way a single once-a-year issue comment might be.
+   Rule recap: before Dec 1, never flagged (too early — NSE's circular for
+   next year may not even be published yet, so nagging earlier would just be
+   noise nobody can act on); on/after Dec 1, flagged until a next-year
+   holiday is present in `holidays.json`, then silent again until next
+   December.
+
+**Operator note:** refreshing `holidays.json` (and `special_sessions.json`
+alongside it, per the existing "Yearly" instructions) is the ONE action that
+silences both of the above simultaneously — there is no separate
+acknowledgment step for either.
+
+### Hygiene: strict release-404 match + orphaned `.tmp` sweep
+
+**`release.py`'s `GhReleaseClient.exists()`** now matches the literal
+substring `"HTTP 404"` in `gh`'s stderr (not a bare `"404"`) to decide "the
+release genuinely does not exist" versus "gh failed for some other reason
+that happens to mention 404 in passing" (a rate-limit retry-after value, a
+request id, etc.) — the bare substring match was too loose and risked
+silently downgrading a real, unrelated failure into a false "release absent"
+result. `"HTTP 404"` is `gh api`'s actual, observed stderr format for a
+not-found response (e.g. `gh: Not Found (HTTP 404)`) and is treated as the
+contract; there is no looser fallback guard by design — anything else
+raises `ReleaseError` rather than being silently absorbed.
+
+**`store.sweep_orphan_tmp(base, *, older_than_hours=24) -> int`** cleans up
+orphaned crash-write `.tmp` siblings: `append_keyed`'s (and therefore
+`append_day`'s, which delegates to it) atomic-write pattern always writes to
+a `*.parquet.tmp` sibling before atomically replacing the real target, so a
+crash between those two steps (killed process, disk full, ...) can leave a
+torn `.tmp` file behind forever — nothing in the normal write path ever
+revisits it otherwise. `sweep_orphan_tmp` is called automatically at the top
+of every `append_keyed` call (both direct callers and `append_day` callers,
+since `append_day` is a thin wrapper over `append_keyed` — the sweep is
+implemented once, at the shared entry point, not duplicated in both), so a
+stale orphan is cleaned up as a side effect of the very next normal write,
+with no separate maintenance step required. It recursively globs
+`*.parquet.tmp` under `base` (reaching the `deltas/` subdirectory too),
+unlinks anything older than `older_than_hours` (default 24h) by mtime, and
+is deliberately best-effort: an unlink failure for one file is warned to
+stderr and skipped, never raised — a sweep hiccup must never block an
+otherwise-healthy ingest write. A fresh `.tmp` file (younger than the
+threshold) is always left alone, since it may be the CURRENT in-flight write
+of a still-running process.

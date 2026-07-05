@@ -1,7 +1,7 @@
 from datetime import date
 
 from pipeline import calendar as cal
-from pipeline.freshness import is_stale, missing_days
+from pipeline.freshness import holidays_need_refresh, is_stale, missing_days
 
 HOLIDAYS: set[date] = set()
 
@@ -196,3 +196,72 @@ def test_missing_days_year_boundary_with_young_store_no_prev_year_data():
     current_year_only = {d for d in expected if d.year == 2026}
     assert current_year_only  # fixture sanity: some current-year days exist
     assert missing_days(current_year_only, today, HOLIDAYS) == []
+
+
+# -- holidays_need_refresh (G2 task 8: yearly calendar-hygiene nag) --
+#
+# Rule: on/after Dec 1 of `today`'s year, `holidays.json` is considered stale
+# for calendar-planning purposes unless it already carries at least one
+# holiday dated in NEXT year (today.year + 1). Before Dec 1, it is never
+# flagged regardless of content -- there's no operational urgency yet (NSE's
+# holiday circular for next year may not even be published), so nagging any
+# earlier would just be noise the operator can't act on yet.
+
+def test_holidays_need_refresh_false_before_dec_1_even_if_next_year_absent():
+    # Nov 30: one day before the boundary. Next year's holidays are absent
+    # (only this year's are loaded), but it's still too early to nag.
+    today = date(2026, 11, 30)
+    holidays = {date(2026, 1, 26)}  # only current-year entries
+    assert holidays_need_refresh(holidays, today) is False
+
+
+def test_holidays_need_refresh_true_on_dec_1_when_next_year_absent():
+    # Dec 1 itself is the boundary (inclusive) -- today >= Dec 1 AND no
+    # next-year (2027) holiday present.
+    today = date(2026, 12, 1)
+    holidays = {date(2026, 1, 26)}  # only current-year entries
+    assert holidays_need_refresh(holidays, today) is True
+
+
+def test_holidays_need_refresh_true_after_dec_1_when_next_year_absent():
+    today = date(2026, 12, 15)
+    holidays = {date(2026, 1, 26)}
+    assert holidays_need_refresh(holidays, today) is True
+
+
+def test_holidays_need_refresh_false_after_dec_1_when_next_year_present():
+    # Next year's holidays.json refresh already landed -- no nag needed even
+    # though today is well past Dec 1.
+    today = date(2026, 12, 15)
+    holidays = {date(2026, 1, 26), date(2027, 1, 26)}
+    assert holidays_need_refresh(holidays, today) is False
+
+
+def test_holidays_need_refresh_false_well_before_dec_1():
+    # Comfortably mid-year -- not remotely close to the boundary.
+    today = date(2026, 7, 6)
+    holidays = {date(2026, 1, 26)}
+    assert holidays_need_refresh(holidays, today) is False
+
+
+def test_holidays_need_refresh_true_early_january_next_year_when_still_absent():
+    # A different calendar year's Dec-1 framing: today is itself already in
+    # "next year" relative to a stale holidays.json that never got refreshed
+    # over the turn of the year. This isn't the Dec-1-of-this-year boundary
+    # -- it's the case where the nag should have fired the previous December
+    # and the file was never updated. today.year=2027, so the rule looks for
+    # a 2028 holiday; none exists, so it's still True regardless of month
+    # (the Dec-1 gate is keyed off `today`'s OWN year, not a fixed calendar
+    # month in isolation).
+    today = date(2027, 12, 1)
+    holidays = {date(2026, 1, 26)}  # never refreshed past the original year
+    assert holidays_need_refresh(holidays, today) is True
+
+
+def test_holidays_need_refresh_ignores_past_year_entries():
+    # A holidays.json with only past-year entries (no current AND no
+    # next-year data at all) is still governed purely by the next-year
+    # check -- past-year noise must not accidentally satisfy the rule.
+    today = date(2026, 12, 1)
+    holidays = {date(2024, 1, 26), date(2025, 1, 26)}
+    assert holidays_need_refresh(holidays, today) is True

@@ -2,7 +2,18 @@
 
 `ReleaseClient` is the injectable protocol; production uses `GhReleaseClient`
 (subprocess `gh`), tests use `tests.fakes.FakeReleaseClient`. Keeping every
-`gh` invocation here means publish/sync logic stays pure and offline-testable."""
+`gh` invocation here means publish/sync logic stays pure and offline-testable.
+
+CONTRACT (G2 task 8 hygiene): `GhReleaseClient.exists()` distinguishes "the
+release genuinely does not exist" from "gh itself failed for some other
+reason" by matching the literal substring `"HTTP 404"` in `gh`'s stderr --
+this is `gh api`'s actual, observed stderr format for a not-found response
+(e.g. `"gh: Not Found (HTTP 404)"`). This match is intentionally STRICT: a
+bare `"404"` substring is too loose (it would also match unrelated messages
+that merely contain the digits "404" -- a rate-limit retry-after value, a
+request id, etc. -- silently misreporting a real failure as "release
+absent"). There is no looser fallback guard; any stderr not containing
+`"HTTP 404"` is treated as an unexpected failure and raises `ReleaseError`."""
 from __future__ import annotations
 
 import json
@@ -47,7 +58,17 @@ class GhReleaseClient:
         rc, _, err = self._run(["gh", "api", f"repos/{self._repo}/releases/tags/{self._tag}"])
         if rc == 0:
             return True
-        if "404" in err:
+        # Strict match (G2 task 8 hygiene): gh CLI's stderr contract for a
+        # genuine not-found response wraps the status code as "HTTP 404"
+        # (e.g. "gh: Not Found (HTTP 404)") -- that exact substring is the
+        # ONLY thing this treats as "the release does not exist". A bare
+        # "404" substring match is too loose: it would also match on
+        # unrelated messages that merely happen to contain the digits "404"
+        # (a rate-limit retry-after value, a request id, etc.), silently
+        # misreporting a real error as "release absent" instead of raising.
+        # Deliberately no fallback/looser guard -- "HTTP 404" is the
+        # contract; anything else is an unexpected failure and must raise.
+        if "HTTP 404" in err:
             return False
         raise ReleaseError(f"cannot determine release state: {err.strip()}")
 

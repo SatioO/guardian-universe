@@ -1,10 +1,12 @@
+import os
+import time
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 from pipeline import config
-from pipeline.store import append_day, has_day, read_trailing_window
+from pipeline.store import append_day, has_day, read_trailing_window, sweep_orphan_tmp
 
 
 def _day(d: str, close: float, key: str = "INE002A01018") -> pd.DataFrame:
@@ -251,3 +253,146 @@ def test_append_day_is_thin_wrapper_over_append_keyed(tmp_path: Path):
     append_day(df, tmp_path)
     out = pd.read_parquet(config.ohlc_path(2026, tmp_path))
     assert list(out.columns) == config.CANON_COLUMNS
+
+
+# -- sweep_orphan_tmp (G2 task 8 hygiene: orphaned crash-write .tmp files) --
+#
+# A crash mid-write (process killed, disk full, etc.) between "write to
+# `*.parquet.tmp`" and "atomic replace" can leave a torn `.tmp` sibling
+# behind forever -- `append_keyed`'s own atomic-write pattern always writes
+# to `target.with_suffix(".parquet.tmp")` first (see the crash-atomicity
+# test above), so this is exactly the file shape a real crash leaves. Left
+# alone indefinitely, these accumulate as disk-space litter; a fresh
+# in-flight `.tmp` (the CURRENT write, not yet replaced) must never be swept
+# out from under an in-progress write.
+
+def _touch_tmp(path: Path, *, hours_old: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"torn")
+    stamp = time.time() - hours_old * 3600
+    os.utime(path, (stamp, stamp))
+
+
+def test_sweep_orphan_tmp_removes_stale_tmp_file(tmp_path: Path):
+    stale = tmp_path / "ohlc_2026.parquet.tmp"
+    _touch_tmp(stale, hours_old=25)  # older than the 24h default threshold
+    count = sweep_orphan_tmp(tmp_path)
+    assert count == 1
+    assert not stale.exists()
+
+
+def test_sweep_orphan_tmp_spares_fresh_tmp_file(tmp_path: Path):
+    fresh = tmp_path / "ohlc_2026.parquet.tmp"
+    _touch_tmp(fresh, hours_old=1)  # well within the 24h default threshold
+    count = sweep_orphan_tmp(tmp_path)
+    assert count == 0
+    assert fresh.exists()
+
+
+def test_sweep_orphan_tmp_respects_custom_threshold(tmp_path: Path):
+    borderline = tmp_path / "ohlc_2026.parquet.tmp"
+    _touch_tmp(borderline, hours_old=2)
+    # 2h old, default 24h threshold -> spared.
+    assert sweep_orphan_tmp(tmp_path) == 0
+    assert borderline.exists()
+    # Same file, 1h threshold -> now stale -> swept.
+    assert sweep_orphan_tmp(tmp_path, older_than_hours=1) == 1
+    assert not borderline.exists()
+
+
+def test_sweep_orphan_tmp_recurses_into_deltas_subdirectory(tmp_path: Path):
+    stale_delta = tmp_path / "deltas" / "ohlc_2026-07-01.parquet.tmp"
+    _touch_tmp(stale_delta, hours_old=48)
+    count = sweep_orphan_tmp(tmp_path)
+    assert count == 1
+    assert not stale_delta.exists()
+
+
+def test_sweep_orphan_tmp_ignores_non_tmp_files_regardless_of_age(tmp_path: Path):
+    real_file = tmp_path / "ohlc_2026.parquet"
+    _touch_tmp(real_file, hours_old=999)  # ancient, but not a .tmp file
+    count = sweep_orphan_tmp(tmp_path)
+    assert count == 0
+    assert real_file.exists()
+
+
+def test_sweep_orphan_tmp_sweeps_multiple_stale_and_spares_fresh(tmp_path: Path):
+    stale_a = tmp_path / "ohlc_2026.parquet.tmp"
+    stale_b = tmp_path / "deltas" / "ohlc_2026-07-02.parquet.tmp"
+    fresh = tmp_path / "indices_2026.parquet.tmp"
+    _touch_tmp(stale_a, hours_old=30)
+    _touch_tmp(stale_b, hours_old=100)
+    _touch_tmp(fresh, hours_old=0.5)
+    count = sweep_orphan_tmp(tmp_path)
+    assert count == 2
+    assert not stale_a.exists()
+    assert not stale_b.exists()
+    assert fresh.exists()
+
+
+def test_sweep_orphan_tmp_returns_zero_when_base_does_not_exist(tmp_path: Path):
+    missing = tmp_path / "never-created"
+    assert sweep_orphan_tmp(missing) == 0
+
+
+def test_sweep_orphan_tmp_never_raises_on_unlink_error(tmp_path: Path, monkeypatch, capsys):
+    """Best-effort: an unlink failure (permissions, file vanished from under
+    us in a race, a locked file on some filesystem, etc.) must never crash
+    the caller -- append_day/append_keyed call this at their own entry, and
+    a sweep hiccup must never block an otherwise-healthy ingest write. The
+    failure is warned to stderr, not raised, and other stale files still get
+    swept in the same pass."""
+    stale_ok = tmp_path / "ohlc_2026.parquet.tmp"
+    stale_boom = tmp_path / "indices_2026.parquet.tmp"
+    _touch_tmp(stale_ok, hours_old=48)
+    _touch_tmp(stale_boom, hours_old=48)
+
+    original_unlink = Path.unlink
+
+    def flaky_unlink(self: Path, *a: object, **kw: object) -> None:
+        if self.name == "indices_2026.parquet.tmp":
+            raise OSError("simulated: file busy")
+        return original_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    count = sweep_orphan_tmp(tmp_path)  # must not raise
+
+    assert not stale_ok.exists()       # the sweepable one still got removed
+    assert stale_boom.exists()         # the flaky one is left in place, not lost
+    assert count == 1                  # only the successful unlink is counted
+    err = capsys.readouterr().err
+    assert "indices_2026.parquet.tmp" in err  # names the file that failed
+
+
+def test_append_keyed_sweeps_stale_orphan_tmp_on_entry(tmp_path: Path):
+    """sweep_orphan_tmp is called at append_keyed's own entry -- a stale
+    orphaned .tmp sitting in the store base from an earlier crashed write is
+    cleaned up as a side effect of the very next normal append, with no
+    separate maintenance step required."""
+    stale = tmp_path / "ca_flags_2026.parquet.tmp"
+    _touch_tmp(stale, hours_old=48)
+
+    df = pd.DataFrame([{"date": pd.Timestamp("2026-07-03"), "instrument_key": "K1", "v": 1}])
+    from pipeline.store import append_keyed
+    append_keyed(df, tmp_path, prefix="ca_flags")
+
+    assert not stale.exists()
+
+
+def test_append_day_sweeps_stale_orphan_tmp_on_entry(tmp_path: Path):
+    """append_day delegates to append_keyed, which performs the sweep -- this
+    pins that the sweep-on-entry behavior reaches append_day callers too,
+    not just direct append_keyed callers."""
+    stale = tmp_path / "ohlc_2026.parquet.tmp"
+    _touch_tmp(stale, hours_old=48)
+
+    df = pd.DataFrame([{
+        "date": pd.Timestamp("2026-07-03"), "instrument_key": "INE1", "isin": "INE1",
+        "symbol": "AAA", "series": "EQ",
+        "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+        "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
+        "source": "nse-udiff",
+    }])[config.CANON_COLUMNS]
+    append_day(df, tmp_path)
+
+    assert not stale.exists()
