@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import date
 
 from pipeline import calendar as cal
+from pipeline import store
 from pipeline.daily_update import RunStatus, run_daily
 from pipeline.datasets import DatasetSpec
 from pipeline.fetch import Fetcher
@@ -23,6 +24,15 @@ def backfill(
     delay_s: float = 1.0,
 ) -> list[RunStatus]:
     dates = cal.trading_days_back(end, n, holidays, special_sessions)
+    # G3 Task 2: ONE ReadCache shared across every run_daily call in this
+    # loop -- the actual perf payoff. Across a 300-iteration backfill, each
+    # year's file is read from disk once per version instead of up to ~10x
+    # per day-check (run_daily's idempotency gate + its trailing-window
+    # lookup both re-read the same year file). append_keyed invalidates the
+    # cache entry for whatever (base, year, prefix) it just wrote, so the
+    # next iteration's read always sees that write -- see store.ReadCache's
+    # docstring for the invalidate-on-write contract this relies on.
+    cache = store.ReadCache()
     results: list[RunStatus] = []
     for i, d in enumerate(dates):
         results.append(
@@ -37,6 +47,7 @@ def backfill(
                 # non-alerting "not_yet". Only the final day keeps `not_yet`
                 # lateness semantics.
                 is_target_day=(d == dates[-1]),
+                cache=cache,
             )
         )
         if i < len(dates) - 1:

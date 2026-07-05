@@ -36,6 +36,7 @@ def run_daily(
     holidays: set[date],
     special_sessions: set[date] | None = None,
     is_target_day: bool = True,
+    cache: store.ReadCache | None = None,
 ) -> RunStatus:
     if not cal.is_trading_day(target, holidays, special_sessions=special_sessions):
         return RunStatus("skipped_holiday", target, message="non-trading day")
@@ -67,12 +68,12 @@ def run_daily(
     # missing/truncated WITHIN the stored day's own regime still fails the
     # ratio exactly as before, since it remains in `shared`.
     topup_note = ""
-    if store.has_day(spec.base_dir, target, prefix=spec.file_prefix):
+    if store.has_day(spec.base_dir, target, prefix=spec.file_prefix, cache=cache):
         stored_series_counts = store.day_series_counts(
-            spec.base_dir, target, prefix=spec.file_prefix
+            spec.base_dir, target, prefix=spec.file_prefix, cache=cache
         )
         completeness_trailing = _trailing_series_counts(
-            spec, target, holidays, special_sessions
+            spec, target, holidays, special_sessions, cache=cache
         )
         # shared = series present in BOTH the stored day (any stored rows) AND
         # the trailing dict (a non-empty trailing entry -- i.e. it actually
@@ -159,7 +160,9 @@ def run_daily(
                     f"requested target {target}"
                 ),
             )
-        trailing = _trailing_series_counts(spec, target, holidays, special_sessions)
+        trailing = _trailing_series_counts(
+            spec, target, holidays, special_sessions, cache=cache
+        )
         # NOTE: the per-series deviation gate compares today's PRE-quarantine
         # row counts against the POST-quarantine counts of stored days; the
         # difference is negligible in steady state (few rows are ever
@@ -191,7 +194,7 @@ def run_daily(
                 message=f"all {len(df)} rows failed quarantine",
             )
         clean = validate_ohlc(clean)  # runtime contract gate (same schema as tests)
-        store.append_day(clean, spec.base_dir, prefix=spec.file_prefix)
+        store.append_day(clean, spec.base_dir, prefix=spec.file_prefix, cache=cache)
         store.write_delta(clean, spec.base_dir, target, prefix=spec.file_prefix)
         return RunStatus(
             status="success",
@@ -212,17 +215,29 @@ def _trailing_series_counts(
     target: date,
     holidays: set[date],
     special_sessions: set[date] | None = None,
+    *,
+    cache: store.ReadCache | None = None,
 ) -> dict[str, list[int]]:
     """Per-series trailing row counts over the trailing window, keyed by
     series. A series absent on a given trailing day simply contributes no
     entry for that day (not a zero) -- `check_rowcount_by_series` treats an
     empty list as "no history yet" and a present-but-short list on its own
-    merits (mean over however many days it actually appeared)."""
+    merits (mean over however many days it actually appeared).
+
+    `cache` (G3 Task 2) is opt-in and threaded straight through to every
+    internal `store.has_day`/`store.day_series_counts` call: `None` (the
+    default) preserves the always-read-fresh behavior exactly, while a
+    caller iterating many days in one process (backfill; the CLI's
+    catch-up window) can share one `store.ReadCache()` across every one of
+    these trailing lookups so each year-file is read from disk once per
+    version instead of once per lookup."""
     counts: dict[str, list[int]] = {}
     prev = cal.previous_trading_day(target, holidays, special_sessions)
     for d in cal.trading_days_back(prev, _TRAILING_DAYS, holidays, special_sessions):
-        if store.has_day(spec.base_dir, d, prefix=spec.file_prefix):
-            day_counts = store.day_series_counts(spec.base_dir, d, prefix=spec.file_prefix)
+        if store.has_day(spec.base_dir, d, prefix=spec.file_prefix, cache=cache):
+            day_counts = store.day_series_counts(
+                spec.base_dir, d, prefix=spec.file_prefix, cache=cache
+            )
             for series, n in day_counts.items():
                 counts.setdefault(series, []).append(n)
     return counts

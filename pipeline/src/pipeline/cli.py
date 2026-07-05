@@ -32,6 +32,7 @@ from pipeline import (
     manifest,
     rebuild,
     sources,  # noqa: F401  # broker-source registration side-effects
+    store,
 )
 from pipeline import calendar as cal
 from pipeline.crosscheck import CrossCheckResult, compare_sources
@@ -622,11 +623,19 @@ def main(argv: list[str] | None = None) -> int:
                 window = cal.trading_days_back(
                     target, config.CATCHUP_WINDOW_DAYS, holidays, special
                 )
+            # G3 Task 2: ONE ReadCache per spec per `daily` invocation,
+            # shared across every day in that spec's catch-up window -- the
+            # same perf win as backfill.backfill applied to the nightly
+            # cron's 7-day window, not just the one-time backfill. A fresh
+            # cache per spec (not shared across specs) mirrors the existing
+            # one-fetcher-per-spec lifetime above.
+            cache = store.ReadCache()
             st = None
             for d in window:
                 st = run_daily(
                     spec, d, fetcher=fetcher, holidays=holidays,
                     special_sessions=special, is_target_day=(d == target),
+                    cache=cache,
                 )
                 if d != target and st.status == "failed":
                     print(

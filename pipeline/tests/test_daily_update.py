@@ -624,3 +624,70 @@ def test_quarantined_rows_are_persisted(tmp_path: Path, monkeypatch):
     qfile = tmp_path / "meta" / "quarantine" / "ohlc_2026-07-03.parquet"
     assert qfile.exists()
     assert len(pd.read_parquet(qfile)) == 1
+
+
+# G3 Task 2: run_daily accepts an optional `cache: store.ReadCache | None`
+# and threads it into every internal _read_year-backed store call (has_day,
+# day_series_counts, and the trailing-window loop in
+# _trailing_series_counts) -- but never into write_delta, which is
+# delta-file I/O with no cache parameter at all.
+
+def test_run_daily_threads_passed_cache_into_read_year_backed_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    target = date(2026, 7, 3)
+    # Seed a stored, complete day (idempotent-skip path) plus trailing
+    # history so BOTH cache call-sites inside run_daily actually execute:
+    # the idempotency gate's has_day/day_series_counts, AND
+    # _trailing_series_counts' own has_day/day_series_counts loop.
+    for d in (date(2026, 6, 29), date(2026, 6, 30), date(2026, 7, 1), date(2026, 7, 2)):
+        _run(d, StubFetcher(RAW), tmp_path)
+    _run(target, StubFetcher(RAW), tmp_path)
+
+    seen_caches: list[object] = []
+    real_read_year = store._read_year
+
+    def spying_read_year(base, year, prefix="ohlc", *, columns=None, cache=None):
+        seen_caches.append(cache)
+        return real_read_year(base, year, prefix, columns=columns, cache=cache)
+
+    monkeypatch.setattr(store, "_read_year", spying_read_year)
+
+    cache = store.ReadCache()
+    st = run_daily(
+        datasets_spec(tmp_path), target, fetcher=StubFetcher(exc=AssertionError("must not fetch")),
+        holidays=HOLIDAYS, cache=cache,
+    )
+    assert st.status == "skipped_idempotent"  # already-complete day: no fetch needed
+
+    assert seen_caches, "expected at least one _read_year call during the idempotent path"
+    assert all(c is cache for c in seen_caches), (
+        "every _read_year call inside run_daily must receive the SAME cache "
+        "instance that was passed in, not a fresh/None cache"
+    )
+
+
+def test_run_daily_never_passes_cache_to_write_delta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """write_delta is delta-file I/O, not year-file I/O -- it has no `cache`
+    parameter at all, so run_daily must never attempt to pass one through."""
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+
+    calls: list[dict] = []
+    real_write_delta = store.write_delta
+
+    def spying_write_delta(df, base, d, *, prefix="ohlc", keep=35):
+        calls.append({"prefix": prefix, "keep": keep})
+        return real_write_delta(df, base, d, prefix=prefix, keep=keep)
+
+    monkeypatch.setattr(store, "write_delta", spying_write_delta)
+
+    cache = store.ReadCache()
+    st = run_daily(
+        datasets_spec(tmp_path), date(2026, 7, 3), fetcher=StubFetcher(RAW),
+        holidays=HOLIDAYS, cache=cache,
+    )
+    assert st.status == "success"
+    assert len(calls) == 1  # write_delta was still called (success path emits a delta)

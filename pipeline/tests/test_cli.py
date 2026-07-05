@@ -699,6 +699,42 @@ def test_catchup_window_fetches_only_the_missing_middle_day(monkeypatch, tmp_pat
     assert status["date"] == target.isoformat()  # status file reflects the TARGET day
 
 
+def test_daily_catchup_window_shares_one_cache_across_the_window(monkeypatch, tmp_path):
+    """G3 Task 2: the CLI's per-spec catch-up-window loop constructs exactly
+    ONE `store.ReadCache()` per spec per `daily` invocation and reuses it
+    across every day in that spec's window -- not a fresh cache per day.
+    Reuses the EXACT registry/fetcher/monkeypatch setup from
+    `test_catchup_window_fetches_only_the_missing_middle_day` above, adding
+    only a spy on `store._read_year` (same wrapper pattern as
+    `test_backfill.py`'s `test_backfill_reuses_one_cache_across_the_whole_run`)
+    to record every `cache` argument passed through."""
+    import json
+
+    from pipeline import config, store
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fetcher = RecordingFetcher()
+    _catchup_registry(monkeypatch, tmp_path, fetcher)
+
+    seen_caches: list[object] = []
+    real_read_year = store._read_year
+
+    def spying_read_year(base, year, prefix="ohlc", *, columns=None, cache=None):
+        seen_caches.append(cache)
+        return real_read_year(base, year, prefix, columns=columns, cache=cache)
+
+    monkeypatch.setattr(store, "_read_year", spying_read_year)
+
+    target = date(2026, 7, 6)  # a Monday -- deliberately not a Friday
+    rc = cli.main(["daily", "--date", target.isoformat()])
+    assert rc == 0
+
+    non_none = [c for c in seen_caches if c is not None]
+    assert non_none, "expected at least one cache-bearing _read_year call"
+    assert len({id(c) for c in non_none}) == 1  # every call shared the SAME cache instance
+
+
 def test_catchup_past_day_404_exits_0_and_writes_window_failures_marker(
     monkeypatch, tmp_path
 ):
