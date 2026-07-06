@@ -1,5 +1,7 @@
 {
   "sessions": [
-    { "date": "2026-11-08", "label": "muhurat-2026 (VERIFY against NSE circular before November)" }
+    { "date": "2025-10-21", "label": "muhurat-2025 (Diwali Laxmi Pujan — evening Muhurat trading; NSE publishes a bhavcopy)" },
+    { "date": "2026-02-01", "label": "budget-2026 (Union Budget special live session; Sunday — NSE publishes a bhavcopy)" },
+    { "date": "2026-11-08", "label": "muhurat-2026 (Diwali Laxmi Pujan — VERIFY against NSE circular before November 2026)" }
   ]
 }
