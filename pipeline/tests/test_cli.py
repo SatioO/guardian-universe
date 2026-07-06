@@ -1909,3 +1909,73 @@ def test_main_restore_from_snapshot_prints_dataset_summary(monkeypatch, tmp_path
     out = capsys.readouterr().out
     assert "ohlc" in out
     assert "2026-07-03" in out
+
+
+def test_main_restore_from_snapshot_phase2_oserror_gives_clean_message(
+    monkeypatch, tmp_path, capsys,
+):
+    """A phase-2-only failure (materialize-time I/O: disk full, permissions,
+    an OS race mid-loop) is NOT covered by restore_from_tag's two-phase
+    "target_root untouched" guarantee -- that guarantee only covers phase-1
+    (verification) failures. The raw OSError propagates out of
+    restore_from_tag uncaught; the CLI must present it as a clean,
+    actionable message (never a raw traceback) naming the remediation:
+    delete target_root and retry (the restore is idempotent).
+
+    Runs the REAL restore_from_tag (not a monkeypatched stand-in) against a
+    two-file baseline manifest, with Path.replace patched to succeed on the
+    1st call and raise OSError on the 2nd -- so the failure is provably
+    phase-2 (the 1st file DID materialize into target_root before the
+    failure), not phase-1."""
+    import json
+
+    monkeypatch.setattr(cli.config, "DATA_DIR", tmp_path)
+
+    data_a, data_b = b"OHLCDATA-A", b"OHLCDATA-B"
+    sha_a = hashlib.sha256(data_a).hexdigest()
+    sha_b = hashlib.sha256(data_b).hexdigest()
+    manifest_obj = {
+        "manifest_version": 2, "generated_at": "g", "latest_trading_date": "2026-07-03",
+        "datasets": [
+            {"name": "ohlc", "schema_version": 2, "latest_date": "2026-07-03",
+             "baseline": [{"name": "ohlc_2026.parquet",
+                           "asset": asset_name("ohlc_2026.parquet", sha_a),
+                           "sha256": sha_a, "bytes": len(data_a), "rows": 1}]},
+            {"name": "indices", "schema_version": 2, "latest_date": "2026-07-03",
+             "baseline": [{"name": "indices_2026.parquet",
+                           "asset": asset_name("indices_2026.parquet", sha_b),
+                           "sha256": sha_b, "bytes": len(data_b), "rows": 1}]},
+        ],
+    }
+    client = FakeReleaseClient(exists=True)
+    client.seed("manifest.json", json.dumps(manifest_obj).encode())
+    client.seed(asset_name("ohlc_2026.parquet", sha_a), data_a)
+    client.seed(asset_name("indices_2026.parquet", sha_b), data_b)
+    monkeypatch.setattr(cli, "GhReleaseClient", lambda **_kw: client)
+
+    real_replace = Path.replace
+    calls = {"n": 0}
+
+    def _flaky_replace(self: Path, target: Path) -> Path:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("[Errno 28] No space left on device")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _flaky_replace)
+
+    rc = cli.main(["restore-from-snapshot", "--tag", "data-snapshot-202607"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    expected_target = tmp_path / "_restore_drill" / "data-snapshot-202607"
+    assert (
+        f"restore-from-snapshot failed (materialize error): "
+        f"[Errno 28] No space left on device — delete {expected_target} and retry"
+    ) in err
+    assert "Traceback" not in err
+    # Provably phase-2, not phase-1: the 1st file DID land before the 2nd call raised.
+    assert calls["n"] == 2
+    landed = list((expected_target / "ohlc").glob("*.parquet")) + \
+        list((expected_target / "indices").glob("*.parquet"))
+    assert len(landed) == 1

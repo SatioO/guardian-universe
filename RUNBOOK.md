@@ -1136,10 +1136,22 @@ satisfied the first time this command completes cleanly against a real tag.
 A failed drill (a corrupted asset, a network/`gh` failure, an unreachable
 tag) exits 1 with `restore-from-snapshot failed: ...` on stderr, and —
 because of the two-phase guarantee above — leaves **no** `_restore_drill/
-<tag>/` directory behind at all. Re-running the same command is always safe:
-each drill run targets a tag-scoped subdirectory, so nothing needs cleaning
-up between attempts, and a from-scratch retry after fixing the underlying
-issue (network, `gh` auth, ...) starts from a clean slate automatically.
+<tag>/` directory behind at all, **for a phase-1 (checksum/verification)
+failure**. Re-running the same command is always safe in that case: each
+drill run targets a tag-scoped subdirectory, so nothing needs cleaning up
+between attempts, and a from-scratch retry after fixing the underlying issue
+(network, `gh` auth, a corrupted asset, ...) starts from a clean slate
+automatically.
+
+A materialize-time I/O failure (disk full, permissions — phase 2, after
+every file already verified) is a different case: it prints
+`restore-from-snapshot failed (materialize error): ... — delete <target> and
+retry` on stderr and exits 1, and it **can** leave a partially-materialized
+`_restore_drill/<tag>/` directory (some files landed before the failure,
+later ones missing). Delete that directory before retrying — the restore
+itself is idempotent (a clean re-run re-verifies and re-materializes
+everything), but the leftover partial directory is not otherwise cleaned up
+for you.
 
 ### Real recovery procedure (separate — human-only, explicitly flagged)
 **This is a distinct, higher-stakes procedure from the drill above — it is
@@ -1174,6 +1186,14 @@ recovery is never needed just to rehearse.
    for the tag chosen. Remember deltas were NOT restored — the restored store
    only reaches the snapshot's baseline `latest_date`; run a normal `daily`/
    backfill catch-up afterward to bring it current again.
+
+   If it instead exits 1 with `restore-from-snapshot failed (materialize
+   error): ...` (a real recovery hit a phase-2 disk-full/permissions failure
+   against the live `data/` tree), do NOT assume `data/` is untouched — the
+   same partial-materialize caveat as the drill above applies, except here
+   the partial directory IS the production `data/` tree. Delete/clear it and
+   re-run the exact same command from step 3 before doing anything else; the
+   restore is idempotent, so a clean re-run fully repairs it.
 5. Record the incident (what broke, which tag was restored, who performed
    it, when) — a real recovery is a significant operational event, not a
    routine action.

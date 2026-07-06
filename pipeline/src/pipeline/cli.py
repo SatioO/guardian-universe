@@ -753,6 +753,22 @@ def main(argv: list[str] | None = None) -> int:
         except (ReleaseError, UnexpectedFailure) as e:
             print(f"restore-from-snapshot failed: {e}", file=sys.stderr)
             return 1
+        except OSError as e:
+            # Phase-2-only failure (disk full, permissions, an OS race
+            # mid-materialize) -- restore_from_tag's two-phase guarantee only
+            # covers phase-1 (verification) failures; this can leave
+            # target_root partially materialized. See restore.py's module
+            # docstring and RUNBOOK.md's DR-drill section for the full
+            # scoping discussion. Presented as a clean, actionable message
+            # (never a raw traceback) with the exact remediation: the restore
+            # is idempotent, so deleting the partial target and re-running
+            # the same command fully repairs it.
+            print(
+                f"restore-from-snapshot failed (materialize error): {e} — "
+                f"delete {target_root} and retry",
+                file=sys.stderr,
+            )
+            return 1
         print(f"restore-from-snapshot: target {target_root}")
         for ds in restored_manifest.get("datasets", []):
             total_bytes = sum(f.get("bytes", 0) for f in ds.get("baseline", []))
