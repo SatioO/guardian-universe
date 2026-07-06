@@ -21,10 +21,18 @@ def check_rowcount_by_series(
     a brand-new series is exempt until it accumulates its own baseline.
 
     - total outside abs_range (None-sentinel to config.ROWCOUNT_ABS_RANGE) -> fail
-    - each series with non-empty trailing data: deviation of today's count vs
-      its trailing mean > config.ROWCOUNT_DEVIATION -> fail
-    - a series with trailing mean >= 50 absent from today's series_counts ->
-      fail (a major series vanishing is a truncation signal)
+    - each series with non-empty trailing data AND trailing mean >=
+      config.SERIES_MIN_FOR_GATE: deviation of today's count vs its trailing
+      mean > config.ROWCOUNT_DEVIATION -> fail
+    - a series with trailing mean >= config.SERIES_MIN_FOR_GATE absent from
+      today's series_counts -> fail (a major series vanishing is a
+      truncation signal)
+    - a series with trailing mean < config.SERIES_MIN_FOR_GATE is exempt from
+      BOTH the absence and deviation checks -- too small for a percentage
+      band or a vanishing-series signal to be statistically meaningful (G3
+      backfill live finding: real NSE bhavcopy has ~55 such tiny series,
+      e.g. the empty-series null-SctySrs bucket, where normal day-to-day
+      noise routinely swings >15%)
     - a series new today (no trailing data) -> pass (accumulates history)
     """
     lo, hi = abs_range if abs_range is not None else config.ROWCOUNT_ABS_RANGE
@@ -37,12 +45,14 @@ def check_rowcount_by_series(
         mean = sum(series_trailing) / len(series_trailing)
         today_count = series_counts.get(series)
         if today_count is None:
-            if mean >= 50:
+            if mean >= config.SERIES_MIN_FOR_GATE:
                 raise UnexpectedFailure(
                     f"series {series!r} absent today but trailing mean is "
-                    f"{mean:.0f} (>=50) -- possible truncation"
+                    f"{mean:.0f} (>={config.SERIES_MIN_FOR_GATE}) -- possible truncation"
                 )
             continue
+        if mean < config.SERIES_MIN_FOR_GATE:
+            continue  # tiny-mean series: exempt from the deviation band
         if mean <= 0:
             raise UnexpectedFailure(
                 f"series {series!r} trailing row-count mean is non-positive "

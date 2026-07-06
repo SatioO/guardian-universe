@@ -33,6 +33,15 @@ CANON_COLUMNS: list[str] = [
 ROWCOUNT_ABS_RANGE: tuple[int, int] = (2000, 10000)
 ROWCOUNT_DEVIATION: float = 0.15
 
+# G3 backfill live finding: a series with a trailing mean below this floor is
+# too small for the deviation/absence gates to be statistically meaningful;
+# real truncations manifest in the large series (e.g. EQ ~2384) and the
+# abs-total gate, never in a sub-floor bucket's day-to-day wobble. Calibrated
+# against real NSE bhavcopy (~55 tiny bond/misc series + the empty-series
+# null-SctySrs bucket, all single-to-low-double-digit daily counts) during
+# the G3 backfill.
+SERIES_MIN_FOR_GATE: int = 50
+
 # Coarse full-market sanity bound for the indices dataset -- calibrated live
 # in Task 9 against a real ind_close_all CSV (precedent: the equities
 # (1800, 3000) live fix).

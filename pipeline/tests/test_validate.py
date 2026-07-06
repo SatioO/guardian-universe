@@ -117,3 +117,62 @@ def test_migration_truncated_eq_file_fails():
     total = sum(today_series.values())
     with pytest.raises(UnexpectedFailure):
         check_rowcount_by_series(total, today_series, trailing, abs_range=(2000, 10000))
+
+
+# --- G3 backfill live finding: sub-floor deviation exemption ----------------
+# Real 10-day multi-day backfill against live NSE bhavcopy tripped the
+# per-series DEVIATION check on tiny series (the empty-series "" bucket from
+# null-SctySrs rows, thin bond/misc series like BZ/GS) where a normal
+# 4->6-row wobble is +50%, trivially exceeding the 15% band. The ABSENCE
+# check already exempts mean < 50; the DEVIATION check must match it.
+
+
+def test_tiny_series_deviation_is_exempt():
+    # series "" trailing [4, 4, 5] (mean ~4.3), today 6 -- a +50%-ish wobble
+    # in a sub-50-mean bucket must NOT raise. EQ is included alongside it
+    # (stable, large) so the call reflects a realistic multi-series day.
+    check_rowcount_by_series(
+        2384 + 6,
+        {"EQ": 2384, "": 6},
+        {"EQ": [2384, 2380, 2390], "": [4, 4, 5]},
+        abs_range=(2000, 10000),
+    )  # no raise
+
+
+def test_large_series_deviation_still_fails():
+    # EQ trailing mean ~2385, today 1200 -- a real truncation. The sub-50
+    # exemption must not weaken protection for series at/above the floor.
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            1200,
+            {"EQ": 1200},
+            {"EQ": [2384, 2380, 2390]},
+            abs_range=(1000, 10000),
+        )
+
+
+def test_absence_floor_uses_named_constant():
+    # mean >= 50 absent today -> still fails (unchanged truncation signal).
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            2000, {"EQ": 2000}, {"EQ": [2000, 2000], "BE": [60, 55, 58]},
+            abs_range=(2000, 10000),
+        )
+    # mean < 50 absent today -> still exempt (unchanged).
+    check_rowcount_by_series(
+        2000, {"EQ": 2000}, {"EQ": [2000, 2000], "BZ": [3, 4, 2]}, abs_range=(2000, 10000)
+    )  # no raise
+    assert config.SERIES_MIN_FOR_GATE == 50
+
+
+def test_series_mean_exactly_at_floor_is_gated():
+    # Boundary: mean == SERIES_MIN_FOR_GATE (50) is >= floor, so the
+    # deviation gate still APPLIES (only mean < floor is exempt). A >15%
+    # swing at exactly the floor must still fail.
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            2384 + 60,
+            {"EQ": 2384, "GS": 60},
+            {"EQ": [2384, 2380, 2390], "GS": [50, 50, 50]},
+            abs_range=(2000, 10000),
+        )
