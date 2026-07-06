@@ -169,7 +169,7 @@ def test_series_mean_exactly_at_floor_is_gated():
     # Boundary: mean == SERIES_MIN_FOR_GATE (50) is >= floor, so the
     # deviation gate still APPLIES (only mean < floor is exempt) -- it is
     # NOT treated as tiny/exempt. Since 50 < SERIES_LARGE_MEAN (1000), the
-    # LOOSE 60% band applies at this boundary (superseded by the G3
+    # LOOSE 50% band applies at this boundary (superseded by the G3
     # 300-day backfill size-tiering fix below: a +20% swing here, e.g. GS's
     # real observed churn, is business-as-usual and must NOT raise; only a
     # swing beyond the loose band still fails).
@@ -178,7 +178,7 @@ def test_series_mean_exactly_at_floor_is_gated():
         {"EQ": 2384, "GS": 60},
         {"EQ": [2384, 2380, 2390], "GS": [50, 50, 50]},
         abs_range=(2000, 10000),
-    )  # no raise -- +20% is within the loose 60% band for a mean-50 series
+    )  # no raise -- +20% is within the loose 50% band for a mean-50 series
     # But the gate still applies (not exempt): a swing beyond the loose
     # band at this same boundary mean still fails.
     with pytest.raises(UnexpectedFailure):
@@ -205,21 +205,23 @@ def test_series_mean_exactly_at_floor_is_gated():
 # of EQ's 2384 rows is ~7 sigma; 15% of a 51-row surveillance segment is
 # business-as-usual). Fix: size-tiered tolerance, decoupled from the
 # absence floor -- mean >= SERIES_LARGE_MEAN (1000) keeps the tight 15%
-# band (only EQ qualifies); 50 <= mean < 1000 gets a loose 60% band.
+# band (only EQ qualifies); 50 <= mean < 1000 gets a loose 50% band
+# (tightened from 60% per reviewer follow-up, see config.py).
 
 
 def test_midsize_series_natural_churn_is_tolerated():
-    # Real observed G3 backfill values, all 50 <= mean < 1000 (loose 60%
+    # Real observed G3 backfill values, all 50 <= mean < 1000 (loose 50%
     # band) -- natural surveillance/trade-to-trade/govt segment churn, none
     # of this is a truncation and none should raise.
     check_rowcount_by_series(
-        2384 + 164 + 36 + 119,
-        {"EQ": 2384, "BE": 164, "GS": 36, "ST": 119},
+        2384 + 164 + 36 + 119 + 42,
+        {"EQ": 2384, "BE": 164, "GS": 36, "ST": 119, "GB": 42},
         {
             "EQ": [2384, 2380, 2390],  # large anchor, stable
-            "BE": [266, 266, 266],  # -38%, natural churn
-            "GS": [51, 51, 51],  # -29%, natural churn
-            "ST": [143, 143, 143],  # -17%, natural churn
+            "BE": [266, 266, 266],  # -38.3%, natural churn
+            "GS": [51, 51, 51],  # -29.4%, natural churn
+            "ST": [143, 143, 143],  # -16.8%, natural churn
+            "GB": [51, 51, 51],  # -17.6%, natural churn
         },
         abs_range=(2000, 10000),
     )  # no raise
@@ -245,13 +247,43 @@ def test_large_anchor_series_keeps_tight_band():
 
 
 def test_midsize_egregious_collapse_still_fails():
-    # BE mean ~266, today 80 (-70%) exceeds even the loose 60% band -- a
+    # BE mean 266, today 100 (-62.4%) exceeds even the loose 50% band -- a
     # real collapse in a mid-size series must still be caught.
     with pytest.raises(UnexpectedFailure):
         check_rowcount_by_series(
-            80,
-            {"BE": 80},
+            100,
+            {"BE": 100},
             {"BE": [266, 266, 266]},
+            abs_range=(0, 10000),
+        )
+
+
+def test_midsize_tightened_band_now_catches_55_percent_drop():
+    # The whole point of tightening 60% -> 50% (reviewer follow-up): a
+    # ~55% drop in a mid-size series -- BE mean 266, today 120 (-54.9%) --
+    # used to PASS under the old 60% band, silently storing a real
+    # isolated truncation. Under the tightened 50% band it must now FAIL.
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            120,
+            {"BE": 120},
+            {"BE": [266, 266, 266]},
+            abs_range=(0, 10000),
+        )
+
+
+def test_midsize_loose_band_still_guards_a_stable_series():
+    # SM is a stable, larger mid-tier series (mean ~302, still < the 1000
+    # SERIES_LARGE_MEAN cutoff, so it gets the loose 50% band). A real
+    # >50% collapse -- SM mean 302, today 140 (-53.6%) -- must still be
+    # caught: the loose band tolerates natural churn, not a genuine
+    # truncation, even for a series well above the SERIES_MIN_FOR_GATE
+    # floor.
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            140,
+            {"SM": 140},
+            {"SM": [302, 302, 302]},
             abs_range=(0, 10000),
         )
 
@@ -281,7 +313,7 @@ def test_midsize_vanished_entirely_still_fails():
 
 def test_series_size_tier_boundary_at_1000():
     # Boundary: mean == SERIES_LARGE_MEAN (1000) -> tight 15% band applies
-    # (>= is tight). mean == 999 -> loose 60% band applies (< is loose).
+    # (>= is tight). mean == 999 -> loose 50% band applies (< is loose).
     # A 999-mean series at +30% passes (loose); a 1000-mean series at +30%
     # fails (tight).
     check_rowcount_by_series(

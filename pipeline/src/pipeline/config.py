@@ -67,8 +67,19 @@ SERIES_LARGE_MEAN: int = 1000
 # 50 <= trailing mean < SERIES_LARGE_MEAN. Calibrated to tolerate the
 # observed <=38% natural churn of surveillance/trade-to-trade/govt
 # segments (BE/ST/GS/GB, see SERIES_LARGE_MEAN comment above) while still
-# catching a >60% collapse as a real anomaly.
-ROWCOUNT_DEVIATION_SMALL: float = 0.60
+# catching a >50% collapse as a real anomaly.
+#
+# Tightened from 0.60 -> 0.50 (Task 7 reviewer follow-up): 0.60 left a
+# [38%, 60%) window where a real isolated mid-size truncation (e.g. a lone
+# BE 266->130, -51%) would slip through silently -- neither the abs-total
+# gate (thousands-scale total, unmoved by a ~266-row change) nor the
+# completeness check (aggregate across all series, not per-series) would
+# backstop it. 0.50 still clears the observed 38.3% max natural churn
+# (BE) with ~12-point margin, while halving the undetected-truncation
+# window this gate governs ALL future daily ingests, so a tighter band
+# that occasionally requires manual review beats a looser one that can
+# silently store bad data.
+ROWCOUNT_DEVIATION_SMALL: float = 0.50
 
 # Coarse full-market sanity bound for the indices dataset -- calibrated live
 # in Task 9 against a real ind_close_all CSV (precedent: the equities

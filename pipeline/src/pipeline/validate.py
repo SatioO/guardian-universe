@@ -37,12 +37,14 @@ def check_rowcount_by_series(
         * config.ROWCOUNT_DEVIATION (0.15, tight) when mean >=
           config.SERIES_LARGE_MEAN -- the large stable anchor series (e.g.
           EQ ~2384), where even a 15% drop is a real truncation signal
-        * config.ROWCOUNT_DEVIATION_SMALL (0.60, loose) when
+        * config.ROWCOUNT_DEVIATION_SMALL (0.50, loose) when
           config.SERIES_MIN_FOR_GATE <= mean < config.SERIES_LARGE_MEAN --
           mid-size series (e.g. BE, ST, GS, GB) subject to natural
           policy-driven membership churn in NSE's
           surveillance/trade-to-trade/govt segments, observed up to -38%,
-          that is not a truncation
+          that is not a truncation (tightened from 0.60 per reviewer
+          follow-up: clears the observed max churn with ~12-point margin
+          while halving the undetected-truncation window)
       exceeding the applicable tier's tolerance -> fail
     - a series new today (no trailing data) -> pass (accumulates history)
     """
