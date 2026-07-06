@@ -42,6 +42,34 @@ ROWCOUNT_DEVIATION: float = 0.15
 # the G3 backfill.
 SERIES_MIN_FOR_GATE: int = 50
 
+# G3 300-day backfill live finding (Task 7): the real 300-day backfill
+# failed the per-series DEVIATION gate on 68/300 days (23%) -- all on
+# MID-SIZE series (50 <= trailing mean < 1000), a deeper layer than the
+# SERIES_MIN_FOR_GATE sub-50 exemption above. These are real, observed
+# values of natural policy-driven membership churn in NSE's
+# surveillance/trade-to-trade/govt segments, NOT truncations:
+#   BE ~266 -> 164..187 (up to -38%)
+#   ST ~67-143 -> 78..120 (+-17-30%)
+#   GS ~51 -> 36 (-29%)
+#   GB ~51 -> 42 (-18%)
+# Meanwhile the large, stable anchor series never wobbled beyond the tight
+# band: EQ ~2384, SM ~302 -- zero failures at 15%. A single flat 15% band
+# is statistically wrong across this size range: 15% of EQ's 2384 rows is
+# a ~7-sigma event (a real truncation signal), while 15% of a 51-row
+# surveillance segment is business-as-usual churn. Fix: size-tiered
+# deviation tolerance. SERIES_LARGE_MEAN is the tight-band cutoff -- at or
+# above this trailing mean, ROWCOUNT_DEVIATION (0.15) applies; today only
+# EQ (~2384) qualifies, the dominant stable anchor where a 15% drop IS a
+# real truncation signal.
+SERIES_LARGE_MEAN: int = 1000
+
+# G3 300-day backfill live finding (Task 7, continued): the loose band for
+# 50 <= trailing mean < SERIES_LARGE_MEAN. Calibrated to tolerate the
+# observed <=38% natural churn of surveillance/trade-to-trade/govt
+# segments (BE/ST/GS/GB, see SERIES_LARGE_MEAN comment above) while still
+# catching a >60% collapse as a real anomaly.
+ROWCOUNT_DEVIATION_SMALL: float = 0.60
+
 # Coarse full-market sanity bound for the indices dataset -- calibrated live
 # in Task 9 against a real ind_close_all CSV (precedent: the equities
 # (1800, 3000) live fix).

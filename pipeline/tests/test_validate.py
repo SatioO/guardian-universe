@@ -167,12 +167,134 @@ def test_absence_floor_uses_named_constant():
 
 def test_series_mean_exactly_at_floor_is_gated():
     # Boundary: mean == SERIES_MIN_FOR_GATE (50) is >= floor, so the
-    # deviation gate still APPLIES (only mean < floor is exempt). A >15%
-    # swing at exactly the floor must still fail.
+    # deviation gate still APPLIES (only mean < floor is exempt) -- it is
+    # NOT treated as tiny/exempt. Since 50 < SERIES_LARGE_MEAN (1000), the
+    # LOOSE 60% band applies at this boundary (superseded by the G3
+    # 300-day backfill size-tiering fix below: a +20% swing here, e.g. GS's
+    # real observed churn, is business-as-usual and must NOT raise; only a
+    # swing beyond the loose band still fails).
+    check_rowcount_by_series(
+        2384 + 60,
+        {"EQ": 2384, "GS": 60},
+        {"EQ": [2384, 2380, 2390], "GS": [50, 50, 50]},
+        abs_range=(2000, 10000),
+    )  # no raise -- +20% is within the loose 60% band for a mean-50 series
+    # But the gate still applies (not exempt): a swing beyond the loose
+    # band at this same boundary mean still fails.
     with pytest.raises(UnexpectedFailure):
         check_rowcount_by_series(
-            2384 + 60,
-            {"EQ": 2384, "GS": 60},
+            2384 + 200,
+            {"EQ": 2384, "GS": 200},
             {"EQ": [2384, 2380, 2390], "GS": [50, 50, 50]},
             abs_range=(2000, 10000),
         )
+
+
+# --- G3 300-day backfill live finding: size-tiered deviation tolerance -----
+# The real 300-day backfill (68/300 days, 23%) failed the per-series
+# deviation gate on MID-SIZE series -- a deeper layer than the earlier
+# sub-50 fix above. Real observed values are natural policy-driven
+# membership churn in NSE's surveillance/trade-to-trade/govt segments, NOT
+# truncations:
+#   BE ~266 -> 164..187 (up to -38%)
+#   ST ~67-143 -> 78..120 (+-17-30%)
+#   GS ~51 -> 36 (-29%)
+#   GB ~51 -> 42 (-18%)
+# Stable anchors, no failures at the tight 15% band: EQ ~2384, SM ~302.
+# A flat 15% band is statistically wrong for churny mid-size segments (15%
+# of EQ's 2384 rows is ~7 sigma; 15% of a 51-row surveillance segment is
+# business-as-usual). Fix: size-tiered tolerance, decoupled from the
+# absence floor -- mean >= SERIES_LARGE_MEAN (1000) keeps the tight 15%
+# band (only EQ qualifies); 50 <= mean < 1000 gets a loose 60% band.
+
+
+def test_midsize_series_natural_churn_is_tolerated():
+    # Real observed G3 backfill values, all 50 <= mean < 1000 (loose 60%
+    # band) -- natural surveillance/trade-to-trade/govt segment churn, none
+    # of this is a truncation and none should raise.
+    check_rowcount_by_series(
+        2384 + 164 + 36 + 119,
+        {"EQ": 2384, "BE": 164, "GS": 36, "ST": 119},
+        {
+            "EQ": [2384, 2380, 2390],  # large anchor, stable
+            "BE": [266, 266, 266],  # -38%, natural churn
+            "GS": [51, 51, 51],  # -29%, natural churn
+            "ST": [143, 143, 143],  # -17%, natural churn
+        },
+        abs_range=(2000, 10000),
+    )  # no raise
+
+
+def test_large_anchor_series_keeps_tight_band():
+    # EQ trailing mean ~2385 (>= SERIES_LARGE_MEAN) keeps the tight 15%
+    # band: a real truncation must still be caught.
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            1200,
+            {"EQ": 1200},  # -50%, truncation
+            {"EQ": [2384, 2380, 2390]},
+            abs_range=(1000, 10000),
+        )
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            2000,
+            {"EQ": 2000},  # ~-16%, exceeds the tight 15% band
+            {"EQ": [2384, 2380, 2390]},
+            abs_range=(2000, 10000),
+        )
+
+
+def test_midsize_egregious_collapse_still_fails():
+    # BE mean ~266, today 80 (-70%) exceeds even the loose 60% band -- a
+    # real collapse in a mid-size series must still be caught.
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            80,
+            {"BE": 80},
+            {"BE": [266, 266, 266]},
+            abs_range=(0, 10000),
+        )
+
+
+def test_tiny_series_still_exempt():
+    # Unchanged sub-50 exemption: series "" mean ~4, today 6 -- no raise.
+    check_rowcount_by_series(
+        6,
+        {"": 6},
+        {"": [4, 4, 4]},
+        abs_range=(0, 10000),
+    )  # no raise
+
+
+def test_midsize_vanished_entirely_still_fails():
+    # BE mean ~266 (>= SERIES_MIN_FOR_GATE) absent from today's
+    # series_counts -- the absence check is decoupled from the loose
+    # deviation band and must still fail.
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            2384,
+            {"EQ": 2384},
+            {"EQ": [2384, 2380, 2390], "BE": [266, 266, 266]},
+            abs_range=(2000, 10000),
+        )
+
+
+def test_series_size_tier_boundary_at_1000():
+    # Boundary: mean == SERIES_LARGE_MEAN (1000) -> tight 15% band applies
+    # (>= is tight). mean == 999 -> loose 60% band applies (< is loose).
+    # A 999-mean series at +30% passes (loose); a 1000-mean series at +30%
+    # fails (tight).
+    check_rowcount_by_series(
+        1299,
+        {"X": 1299},  # 999 * 1.30 == 1298.7 -> +30%
+        {"X": [999, 999, 999]},
+        abs_range=(0, 10000),
+    )  # no raise -- loose band tolerates +30%
+
+    with pytest.raises(UnexpectedFailure):
+        check_rowcount_by_series(
+            1300,
+            {"X": 1300},  # 1000 * 1.30 == 1300 -> +30%
+            {"X": [1000, 1000, 1000]},
+            abs_range=(0, 10000),
+        )  # tight band trips at +30%
