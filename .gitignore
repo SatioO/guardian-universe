@@ -7,8 +7,8 @@ pipeline/.venv/
 .ruff_cache/
 .coverage
 # generated data artifacts (published to CDN, not committed)
-pipeline/data/ohlc/*.parquet
-pipeline/data/reference/*.parquet
+# dataset-agnostic: every dataset dir + its deltas/ subdir, incl. future ones
+pipeline/data/**/*.parquet
 pipeline/data/meta/manifest.json
 pipeline/data/meta/last_run_status.json
 pipeline/data/meta/last_run_status_*.json
