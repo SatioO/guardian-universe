@@ -84,7 +84,7 @@ def create_snapshot(
     if dest.exists():
         raise UnexpectedFailure(f"snapshot tag {tag} already exists -- refusing to recreate")
 
-    dest.create()
+    dest.create(latest=False)  # a snapshot must never steal data-latest's "Latest" badge
     for path in downloaded:
         dest.upload(path)
     return tag

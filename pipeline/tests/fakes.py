@@ -21,6 +21,7 @@ class FakeReleaseClient:
         self._exists = exists
         self.fail_after: int | None = None
         self.ops = 0
+        self.created_latest: bool | None = None
 
     def _tick(self) -> None:
         self.ops += 1
@@ -31,9 +32,10 @@ class FakeReleaseClient:
         self._tick()
         return self._exists
 
-    def create(self) -> None:
+    def create(self, *, latest: bool = True) -> None:
         self._tick()
         self._exists = True
+        self.created_latest = latest
 
     def list_assets(self) -> list[AssetInfo]:
         self._tick()

@@ -41,7 +41,7 @@ class AssetInfo:
 
 class ReleaseClient(Protocol):
     def exists(self) -> bool: ...
-    def create(self) -> None: ...
+    def create(self, *, latest: bool = True) -> None: ...
     def list_assets(self) -> list[AssetInfo]: ...
     def download(self, names: list[str], dest: Path) -> None: ...
     def upload(self, path: Path, *, clobber: bool = False) -> None: ...
@@ -74,10 +74,16 @@ class GhReleaseClient:
             return False
         raise ReleaseError(f"cannot determine release state: {err.strip()}")
 
-    def create(self) -> None:
+    def create(self, *, latest: bool = True) -> None:
+        # `data-latest` is the canonical pointer clients read by tag and MUST
+        # hold GitHub's "Latest" badge; snapshot releases (data-snapshot-YYYYMM)
+        # must NOT steal it. gh auto-marks the newest release as latest, so we
+        # pass the flag explicitly rather than relying on creation order --
+        # otherwise every monthly snapshot would silently reclaim the badge.
         rc, _, err = self._run([
             "gh", "release", "create", self._tag, "--repo", self._repo,
             "--title", self._tag, "--notes", "automated data release",
+            "--latest" if latest else "--latest=false",
         ])
         if rc != 0:
             raise ReleaseError(f"release create failed: {err.strip()}")

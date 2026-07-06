@@ -38,6 +38,8 @@ def test_create_snapshot_copies_manifest_and_assets(tmp_path: Path):
     dest = repo.client_for(tag)
     assert_release_consistent(dest)
     assert json.loads(dest.assets["manifest.json"]) == json.loads(source.assets["manifest.json"])
+    # a snapshot must NEVER steal data-latest's "Latest" badge (created non-latest)
+    assert dest.created_latest is False
 
 
 def test_create_snapshot_refuses_to_recreate_same_month(tmp_path: Path):

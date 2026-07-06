@@ -64,6 +64,27 @@ def test_download_raises_when_file_absent_after_rc0(tmp_path: Path):
         GhReleaseClient(repo="o/r", tag="t", runner=r).download(["missing.parquet"], tmp_path)
 
 
+def test_create_marks_latest_by_default():
+    r = RecordingRunner([(0, "", "")])
+    GhReleaseClient(repo="o/r", tag="data-latest", runner=r).create()
+    assert r.calls[0][:3] == ["gh", "release", "create"]
+    assert "--latest" in r.calls[0]
+    assert "--latest=false" not in r.calls[0]
+
+
+def test_create_can_opt_out_of_latest():
+    r = RecordingRunner([(0, "", "")])
+    GhReleaseClient(repo="o/r", tag="data-snapshot-202607", runner=r).create(latest=False)
+    assert "--latest=false" in r.calls[0]
+    assert "--latest" not in r.calls[0]  # the bare flag is a distinct string
+
+
+def test_create_raises_on_nonzero_rc():
+    r = RecordingRunner([(1, "", "boom")])
+    with pytest.raises(ReleaseError, match="release create failed"):
+        GhReleaseClient(repo="o/r", tag="t", runner=r).create()
+
+
 def test_upload_appends_clobber_only_when_asked(tmp_path: Path):
     f = tmp_path / "m.json"
     f.write_text("{}")
