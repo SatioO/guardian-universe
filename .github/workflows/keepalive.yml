@@ -16,7 +16,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Re-enable any auto-disabled cron workflows
-        run: gh workflow enable data-daily.yml data-monitor.yml data-crosscheck.yml || true
+        run: gh workflow enable data-daily.yml data-monitor.yml data-crosscheck.yml data-snapshot.yml || true
       - name: Report any workflow still not active
         run: |
           gh api repos/${{ github.repository }}/actions/workflows \
