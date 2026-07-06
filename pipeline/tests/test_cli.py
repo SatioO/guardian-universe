@@ -1816,3 +1816,96 @@ def test_main_snapshot_prints_created_and_pruned(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "data-snapshot-202607" in out
     assert "data-snapshot-202601" in out
+
+
+# --- G3 Task 5: restore-from-snapshot CLI subcommand -------------------------
+
+def test_parser_has_restore_from_snapshot():
+    args = cli.build_parser().parse_args(["restore-from-snapshot", "--tag", "data-snapshot-202607"])
+    assert args.cmd == "restore-from-snapshot"
+    assert args.tag == "data-snapshot-202607"
+    assert args.target is None  # unset -> resolved to the scratch default at dispatch time
+
+
+def test_parser_restore_from_snapshot_accepts_explicit_target():
+    args = cli.build_parser().parse_args([
+        "restore-from-snapshot", "--tag", "data-snapshot-202607", "--target", "/explicit/path",
+    ])
+    assert args.target == "/explicit/path"
+
+
+def test_main_restore_from_snapshot_no_target_defaults_to_scratch_drill_dir(
+    monkeypatch, tmp_path,
+):
+    """No --target -> resolves under config.DATA_DIR / "_restore_drill" / tag --
+    NEVER the live data/ tree -- this is the safety rail that makes a drill
+    safe to run against a real snapshot tag by default."""
+    monkeypatch.setattr(cli.config, "DATA_DIR", tmp_path)
+    seen: dict[str, Path] = {}
+
+    def fake_restore_from_tag(_client, *, target_root, work_dir):  # noqa: ARG001
+        seen["target_root"] = target_root
+        return {"datasets": []}
+
+    monkeypatch.setattr(cli, "restore_from_tag", fake_restore_from_tag)
+    rc = cli.main(["restore-from-snapshot", "--tag", "data-snapshot-202607"])
+    assert rc == 0
+    assert seen["target_root"] == tmp_path / "_restore_drill" / "data-snapshot-202607"
+
+
+def test_main_restore_from_snapshot_explicit_target_used_verbatim(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli.config, "DATA_DIR", tmp_path)
+    seen: dict[str, Path] = {}
+
+    def fake_restore_from_tag(_client, *, target_root, work_dir):  # noqa: ARG001
+        seen["target_root"] = target_root
+        return {"datasets": []}
+
+    monkeypatch.setattr(cli, "restore_from_tag", fake_restore_from_tag)
+    explicit = tmp_path / "explicit" / "path"
+    rc = cli.main([
+        "restore-from-snapshot", "--tag", "data-snapshot-202607", "--target", str(explicit),
+    ])
+    assert rc == 0
+    assert seen["target_root"] == explicit
+
+
+def test_main_restore_from_snapshot_returns_1_on_unexpected_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli.config, "DATA_DIR", tmp_path)
+
+    def _boom(_client, *, target_root, work_dir):  # noqa: ARG001
+        raise UnexpectedFailure("restore checksum mismatch for x: got a, manifest says b")
+
+    monkeypatch.setattr(cli, "restore_from_tag", _boom)
+    assert cli.main(["restore-from-snapshot", "--tag", "data-snapshot-202607"]) == 1
+
+
+def test_main_restore_from_snapshot_returns_1_on_release_error(monkeypatch, tmp_path):
+    from pipeline.errors import ReleaseError
+
+    monkeypatch.setattr(cli.config, "DATA_DIR", tmp_path)
+
+    def _boom(_client, *, target_root, work_dir):  # noqa: ARG001
+        raise ReleaseError("network down")
+
+    monkeypatch.setattr(cli, "restore_from_tag", _boom)
+    assert cli.main(["restore-from-snapshot", "--tag", "data-snapshot-202607"]) == 1
+
+
+def test_main_restore_from_snapshot_prints_dataset_summary(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(cli.config, "DATA_DIR", tmp_path)
+
+    def fake_restore_from_tag(_client, *, target_root, work_dir):  # noqa: ARG001
+        return {
+            "datasets": [
+                {"name": "ohlc", "latest_date": "2026-07-03",
+                 "baseline": [{"name": "ohlc_2026.parquet", "bytes": 8, "rows": 1}]},
+            ],
+        }
+
+    monkeypatch.setattr(cli, "restore_from_tag", fake_restore_from_tag)
+    rc = cli.main(["restore-from-snapshot", "--tag", "data-snapshot-202607"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ohlc" in out
+    assert "2026-07-03" in out

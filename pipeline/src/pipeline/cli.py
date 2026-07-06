@@ -42,6 +42,7 @@ from pipeline.fetch import _BROWSER_UA, FetchResult, NseUdiffFetcher, _fetch_wit
 from pipeline.normalize import normalize_equity_bhavcopy
 from pipeline.publish import publish_dataset
 from pipeline.release import GhReleaseClient, ReleaseClient
+from pipeline.restore import restore_from_tag
 from pipeline.snapshot import create_snapshot, prune_snapshots
 from pipeline.sources.nse_secfull import build_secfull_url, secfull_to_udiff_shape
 from pipeline.sync import sync_store
@@ -89,6 +90,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("sync")
     sub.add_parser("check-freshness")
     sub.add_parser("snapshot")
+    rs = sub.add_parser("restore-from-snapshot")
+    rs.add_argument("--tag", required=True)
+    # --target defaults to None here, meaning "resolve to
+    # config.DATA_DIR / '_restore_drill' / tag" at dispatch time (below) --
+    # NEVER the live data/ tree unless the operator explicitly passes
+    # --target. This scratch-by-default resolution is the safety rail that
+    # makes a drill safe to run against any real tag without risking a
+    # production clobber.
+    rs.add_argument("--target", default=None)
     r = sub.add_parser("rebuild-day")
     r.add_argument("--date", required=True)
     # choices derived from the registry (populated by this module's broker
@@ -723,6 +733,31 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"snapshot: created {created}")
         print(f"snapshot: pruned {pruned}")
+        return 0
+    if args.cmd == "restore-from-snapshot":
+        # --target unset -> scratch-drill default: config.DATA_DIR /
+        # "_restore_drill" / tag. NEVER the live data/ tree unless the
+        # operator explicitly passed --target -- this is the safety rail
+        # that makes a rehearsal drill safe to run against any real
+        # release/snapshot tag without risk of clobbering production data.
+        target_root = (
+            Path(args.target) if args.target is not None
+            else config.DATA_DIR / "_restore_drill" / args.tag
+        )
+        client = GhReleaseClient(repo=config.GITHUB_REPO, tag=args.tag)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                restored_manifest = restore_from_tag(
+                    client, target_root=target_root, work_dir=Path(tmp)
+                )
+        except (ReleaseError, UnexpectedFailure) as e:
+            print(f"restore-from-snapshot failed: {e}", file=sys.stderr)
+            return 1
+        print(f"restore-from-snapshot: target {target_root}")
+        for ds in restored_manifest.get("datasets", []):
+            total_bytes = sum(f.get("bytes", 0) for f in ds.get("baseline", []))
+            print(f"  {ds.get('name')}: latest_date={ds.get('latest_date')} "
+                  f"bytes={total_bytes}")
         return 0
     if args.cmd == "check-freshness":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")

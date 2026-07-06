@@ -1075,3 +1075,105 @@ drill" section (added by Task 5) for the exact restore command, what a
 successful drill looks like, and the separate, explicitly-flagged real-
 recovery procedure. This task (4) only produces and retains the snapshots
 themselves.
+
+## G3 Task 5: Disaster recovery drill
+
+### What `restore-from-snapshot` does
+`pipeline/src/pipeline/restore.py`'s `restore_from_tag` downloads and
+sha256-verifies a release/snapshot tag's `manifest.json`, then two-phase
+restores that manifest's **baseline** files (only — deltas are never
+downloaded or restored, same posture as `sync.py`: a restore rebuilds from
+baselines, deltas are a live-client catch-up mechanism, not a DR concern)
+into `target_root / dataset_name / logical_name`. It is deliberately
+independent of `sync.py`'s dataset-registry routing (see `restore.py`'s
+module docstring) — a restore target is an arbitrary directory tree, a
+scratch dir for a drill or the real `data/` tree for an actual recovery, not
+necessarily today's live `DATASETS` registry.
+
+**Two-phase, verify-all-before-materialize-any:** every baseline asset across
+every dataset is downloaded and sha256-checked into a scratch work directory
+*before* anything is written to `target_root`. If even one asset fails its
+checksum, `restore_from_tag` raises `UnexpectedFailure` and `target_root` is
+never created/touched at all — a torn restore (some datasets materialized,
+others silently missing) would itself be a disaster-recovery disaster, so
+this guarantees either every verified file lands or none do.
+
+### The scratch-safe-by-default rail
+`pipeline restore-from-snapshot --tag <tag>` run with **no `--target`**
+resolves the restore destination to a fresh scratch subdirectory —
+`config.DATA_DIR / "_restore_drill" / <tag>` — **never** the live `data/`
+tree. This is what makes a "drill" (rehearsal) safe to run against
+`data-latest` or any `data-snapshot-YYYYMM` tag at any time, by anyone, with
+zero risk of clobbering production data: the default always lands somewhere
+disposable. Pointing `--target` at the real `data/` directory is an explicit,
+deliberate opt-in — see "Real recovery procedure" below — never something
+that happens by omission.
+
+### Running a drill
+```
+cd pipeline && uv run python -m pipeline restore-from-snapshot --tag data-snapshot-202607
+```
+
+A successful drill prints the resolved scratch target followed by one line
+per restored dataset, e.g.:
+```
+restore-from-snapshot: target /path/to/guardian-universe/pipeline/data/_restore_drill/data-snapshot-202607
+  ohlc: latest_date=2026-07-03 bytes=48213112
+  indices: latest_date=2026-07-03 bytes=1882044
+  reference: latest_date=2026-07-03 bytes=934211
+  ca_flags: latest_date=2026-07-03 bytes=51022
+```
+Exit code 0. To confirm the drill actually restored trustworthy bytes (not
+just "some files landed"), spot-check that the restored parquet files' own
+shas match the snapshot's manifest — `restore_from_tag`'s own checksum gate
+already guarantees this for every file that landed (any mismatch would have
+raised `UnexpectedFailure` before any file was written), so a clean exit 0 is
+itself sufficient evidence of a passing drill; the manual spot-check is a
+belt-and-suspenders confirmation, not a requirement for the drill to "count".
+The roadmap's G3 exit criterion — "restore-from-snapshot rehearsed once" — is
+satisfied the first time this command completes cleanly against a real tag.
+
+A failed drill (a corrupted asset, a network/`gh` failure, an unreachable
+tag) exits 1 with `restore-from-snapshot failed: ...` on stderr, and —
+because of the two-phase guarantee above — leaves **no** `_restore_drill/
+<tag>/` directory behind at all. Re-running the same command is always safe:
+each drill run targets a tag-scoped subdirectory, so nothing needs cleaning
+up between attempts, and a from-scratch retry after fixing the underlying
+issue (network, `gh` auth, ...) starts from a clean slate automatically.
+
+### Real recovery procedure (separate — human-only, explicitly flagged)
+**This is a distinct, higher-stakes procedure from the drill above — it is
+NEVER automated, never run from cron/CI, and only ever performed by a human
+after confirming the live release is genuinely unusable** (e.g. `data-latest`
+itself is corrupted, deleted, or has been overwritten with bad data, and
+`pipeline sync`/normal client consumption is actively broken as a result).
+Do not reach for this because a drill "seemed like a good time to actually
+restore" — the scratch-by-default drill above exists specifically so real
+recovery is never needed just to rehearse.
+
+1. **Confirm the live release is actually unusable** before doing anything
+   else — check `gh release view data-latest --repo SatioO/guardian-universe`
+   and/or `pipeline check-freshness`/`pipeline sync` output. If `data-latest`
+   is merely stale (a missed cron cycle) rather than corrupted, the fix is a
+   normal `daily`/backfill catch-up run, NOT a restore.
+2. Pick the most recent trustworthy tag — normally the newest
+   `data-snapshot-YYYYMM` (see "Listing current snapshots" above), or
+   `data-latest` itself if IT is intact but the *local* `data/` tree is what's
+   damaged.
+3. **Explicitly pass `--target` at the real data directory** — this is the
+   ONLY thing that distinguishes this from a drill:
+   ```
+   cd pipeline && uv run python -m pipeline restore-from-snapshot \
+     --tag data-snapshot-202607 --target /absolute/path/to/guardian-universe/pipeline/data
+   ```
+   Double-check the printed `--target` path before confirming — there is no
+   additional interactive confirmation prompt in the tool itself; the
+   explicit `--target` flag IS the deliberate, hard-to-do-by-accident opt-in.
+4. After it exits 0, verify: re-run `pipeline check-freshness`, and confirm
+   the restored `latest_date`s printed in the summary match what's expected
+   for the tag chosen. Remember deltas were NOT restored — the restored store
+   only reaches the snapshot's baseline `latest_date`; run a normal `daily`/
+   backfill catch-up afterward to bring it current again.
+5. Record the incident (what broke, which tag was restored, who performed
+   it, when) — a real recovery is a significant operational event, not a
+   routine action.
