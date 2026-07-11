@@ -1,0 +1,68 @@
+name: p5-source-probe
+
+# Throwaway Phase-0 probe (SOURCE-CONTRACT.md §8/§9): re-executes the spike's
+# key requests from a GitHub-hosted (datacenter-IP) runner to prove the BSE
+# discovery + raw-XBRL chain is CI-reachable. Manual dispatch only; ~10 polite
+# requests; no secrets. Delete once Phase 1 ships with its own canary.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      UA: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+      REF: "https://www.bseindia.com/"
+    steps:
+      - name: "1. BSE bulk discovery — Corp_FinanceResult_ng (FlagDur=1, empty scrip)"
+        run: |
+          code=$(curl -s --http1.1 -A "$UA" -H "Referer: $REF" -o /tmp/p1.json -w "%{http_code}" \
+            "https://api.bseindia.com/BseIndiaAPI/api/Corp_FinanceResult_ng/w?SCRIP_CD=&FlagDur=1&HFQ=&ISUBGROUP_CODE=")
+          size=$(wc -c </tmp/p1.json)
+          echo "status=$code size=${size}B"; head -c 300 /tmp/p1.json; echo
+          [ "$code" = "200" ] || { echo "::error::discovery blocked from datacenter IP"; exit 1; }
+      - name: "2. Bulk beyond Today — FlagDur=2 empty scrip (§8 untested case)"
+        run: |
+          sleep 2
+          code=$(curl -s --http1.1 -A "$UA" -H "Referer: $REF" -o /tmp/p2.json -w "%{http_code}" \
+            "https://api.bseindia.com/BseIndiaAPI/api/Corp_FinanceResult_ng/w?SCRIP_CD=&FlagDur=2&HFQ=&ISUBGROUP_CODE=")
+          echo "status=$code size=$(wc -c </tmp/p2.json)B rows-ish: $(grep -o 'Scrip_cd' /tmp/p2.json | wc -l)"
+          [ "$code" = "200" ] || echo "::warning::FlagDur=2 bulk not available — daily rung must use FlagDur=1"
+      - name: "3. BSE scrip master — ListofScripData (universe seed + mcap anchor)"
+        run: |
+          sleep 2
+          code=$(curl -s --http1.1 -A "$UA" -H "Referer: $REF" -o /tmp/p3.json -w "%{http_code}" \
+            "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group=&Scripcode=&industry=&segment=Equity&status=Active")
+          size=$(wc -c </tmp/p3.json)
+          echo "status=$code size=${size}B"
+          [ "$code" = "200" ] && [ "$size" -gt 500000 ] || { echo "::error::scrip master unreachable/short"; exit 1; }
+      - name: "4. Raw XBRL twin — XBRLFILES .html→.xml (the §9 key finding)"
+        run: |
+          sleep 2
+          code=$(curl -s --http1.1 -A "$UA" -H "Referer: $REF" -o /tmp/p4.xml -w "%{http_code}" \
+            "https://www.bseindia.com/XBRLFILES/IFIndasDuplicateUploadDocument/Integrated_Finance_Ind_As_517506_1172026211629_IFIndAs.xml")
+          echo "status=$code size=$(wc -c </tmp/p4.xml)B"
+          grep -q 'xmlns:in-capmkt' /tmp/p4.xml || { echo "::error::raw XBRL not served / not in-capmkt"; exit 1; }
+          echo "in-capmkt taxonomy confirmed from datacenter IP"
+      - name: "5. nsearchives fallback instance (already CI-proven host; one GET)"
+        run: |
+          sleep 2
+          code=$(curl -s --http1.1 -A "$UA" -o /tmp/p5.xml -w "%{http_code}" \
+            "https://nsearchives.nseindia.com/corporate/xbrl/INTEGRATED_FILING_1383099_13022025112058_WEB.xml")
+          echo "status=$code size=$(wc -c </tmp/p5.xml)B"
+          [ "$code" = "200" ] || echo "::warning::nsearchives fallback instance fetch failed"
+      - name: "6. Header minimization — drop Referer, then UA (§8 matrix)"
+        run: |
+          sleep 2
+          noref=$(curl -s --http1.1 -A "$UA" -o /dev/null -w "%{http_code}" \
+            "https://api.bseindia.com/BseIndiaAPI/api/Corp_FinanceResult_ng/w?SCRIP_CD=&FlagDur=1&HFQ=&ISUBGROUP_CODE=")
+          sleep 2
+          noua=$(curl -s --http1.1 -H "Referer: $REF" -o /dev/null -w "%{http_code}" \
+            "https://api.bseindia.com/BseIndiaAPI/api/Corp_FinanceResult_ng/w?SCRIP_CD=&FlagDur=1&HFQ=&ISUBGROUP_CODE=")
+          echo "without Referer: $noref · without browser UA: $noua (informational)"
+      - name: Verdict
+        run: echo "All critical legs green — BSE discovery + raw XBRL are CI-reachable; Phase 1 unblocked."
