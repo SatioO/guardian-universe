@@ -49,6 +49,7 @@ def test_reference_spec_fields():
     assert datasets.DATASETS["reference"] is s
     assert datasets.DATASET_ORDER == [
         "equities", "indices", "reference", "ca_flags", "sector_industry",
+        "fundamentals",
     ]
     with pytest.raises(RuntimeError, match="derived dataset has no fetcher"):
         s.make_fetcher()

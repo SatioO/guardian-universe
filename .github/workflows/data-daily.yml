@@ -24,7 +24,11 @@ permissions:
   issues: write     # failure alerting
 
 concurrency:
-  group: data-daily
+  # Shared publish lock across every workflow that publishes to data-latest
+  # (data-daily + fundamentals-daily): sync→publish must never interleave
+  # across workflows — the CAS guard in publish.py is a backstop, not the
+  # strategy.
+  group: data-pipeline-publish
   cancel-in-progress: false   # never interrupt a publish mid-upload
 
 jobs:

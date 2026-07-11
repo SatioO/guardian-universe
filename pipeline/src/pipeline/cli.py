@@ -673,6 +673,13 @@ def main(argv: list[str] | None = None) -> int:
                 spec = datasets.DATASETS[key]
                 if not spec.derived:
                     continue
+                if spec.external:
+                    # Produced outside this pipeline (e.g. the Rust
+                    # fundamentals producer via fundamentals-daily.yml) — no
+                    # BUILDERS entry exists, and running _run_builder would
+                    # emit a spurious `failed` status that data-daily's
+                    # secondary-dataset check turns into a red job.
+                    continue
                 st = _run_builder(spec, target)
                 statuses[key] = st
                 print(manifest.status_to_dict(st))

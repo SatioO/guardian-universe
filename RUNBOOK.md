@@ -1197,3 +1197,34 @@ recovery is never needed just to rehearse.
 5. Record the incident (what broke, which tag was restored, who performed
    it, when) — a real recovery is a significant operational event, not a
    routine action.
+
+## P5 Phase 2: fundamentals-daily (Rust producer → shared publish)
+
+`fundamentals-daily.yml` runs the Rust producer (`fundamentals/`) nightly at
+20:30 IST Mon–Fri and publishes `fundamentals_all.parquet` into the SAME
+`data-latest` manifest as everything else (spec `fundamentals`, registered in
+`pipeline/src/pipeline/datasets.py`). It shares the `data-pipeline-publish`
+concurrency group with data-daily, so two publishes can never interleave.
+
+- **First full run (once, manual):** `gh workflow run fundamentals-daily.yml
+  -f window=3m` — fetches the current quarter's filings for the full covered
+  universe (~700–1200 symbols, ≥1.5 s throttle, expect 40–70 min). The nightly
+  cron then runs `window=week` incrementally.
+- **Coverage:** mcap floor ≥₹800 cr (scrip-master `Mktcap`), hysteresis exit
+  at ₹720 cr. Below-floor / no-mcap (NSE-only) counts are disclosed in the run
+  summary, never silently dropped.
+- **State:** `fundamentals_state.json` on the release (mutable, clobbered,
+  GC-protected via `publish.PROTECTED_ASSETS`) holds locator-level dedup keys.
+  Uploaded strictly AFTER a successful publish. Safe to delete: the producer's
+  merge is byte-idempotent, so a stateless run re-fetches its window politely
+  and changes nothing.
+- **Quiet day:** producer exits 0 with `parquet_written=false` → publish step
+  is skipped → zero release churn.
+- **Red run:** canary failures (truncated scrip master / empty filing-season
+  discovery), ALL-selected-filings-failed, or a publish error — all alert via
+  the shared `pipeline-failure` issue. One bad symbol never fails the run
+  (logged + skipped, retried next run if the failure was a fetch).
+- **Smoke test locally:** `cargo run --release -- --limit 100 --window week
+  --out /tmp/fnd` from `fundamentals/` (never point `--out` at
+  `pipeline/data/fundamentals` locally unless you intend to merge into the
+  synced store).

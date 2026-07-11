@@ -19,6 +19,7 @@ def test_equities_spec_fields():
     assert datasets.DATASETS["equities"] is s
     assert datasets.DATASET_ORDER == [
         "equities", "indices", "reference", "ca_flags", "sector_industry",
+        "fundamentals",
     ]
 
 
@@ -58,7 +59,7 @@ def test_manifest_names_are_unique():
 def test_all_specs_follows_dataset_order():
     assert datasets.all_specs() == [
         datasets.EQUITIES, datasets.INDICES, datasets.REFERENCE, datasets.CA_FLAGS,
-        datasets.SECTOR_INDUSTRY,
+        datasets.SECTOR_INDUSTRY, datasets.FUNDAMENTALS,
     ]
 
 
@@ -82,9 +83,40 @@ def test_sector_industry_registered_in_builders():
     assert cli.builders.BUILDERS["sector_industry"] is cli.builders.build_sector_industry
 
 
+def test_fundamentals_spec_fields():
+    s = datasets.FUNDAMENTALS
+    assert s.key == "fundamentals"
+    # file_prefix must glob-match the Rust producer's fundamentals_all.parquet
+    # (the instruments_all/sector_industry_all convention).
+    assert s.file_prefix == "fundamentals"
+    assert s.base_dir == config.FUNDAMENTALS_DIR
+    assert s.source_label == "bse-xbrl"
+    assert s.manifest_name == "fundamentals"
+    assert s.schema_version == 1
+    assert s.derived is True   # never fetched; out of the continuity check
+    assert s.external is True  # produced by the Rust producer, not a builder
+    assert datasets.DATASETS["fundamentals"] is s
+    with pytest.raises(RuntimeError, match="derived dataset has no fetcher"):
+        s.make_fetcher()
+
+
+def test_fundamentals_has_no_builder_and_is_external():
+    # The daily Phase-2 loop must SKIP external specs: a derived spec without
+    # a BUILDERS entry would otherwise surface as a failed secondary-dataset
+    # status and red the data-daily job every night.
+    from pipeline import cli
+    assert "fundamentals" not in cli.builders.BUILDERS
+    assert datasets.FUNDAMENTALS.external is True
+
+
 def test_derived_defaults_false_for_existing_specs():
     assert datasets.EQUITIES.derived is False
     assert datasets.INDICES.derived is False
+
+
+def test_external_defaults_false_for_existing_specs():
+    for key in ("equities", "indices", "reference", "ca_flags", "sector_industry"):
+        assert datasets.DATASETS[key].external is False, key
 
 
 def test_dataset_spec_accepts_derived_true(tmp_path):

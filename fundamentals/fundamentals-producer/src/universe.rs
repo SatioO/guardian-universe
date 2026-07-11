@@ -1,10 +1,15 @@
-//! Universe seed: BSE `ListofScripData` ∪ NSE `EQUITY_L.csv`, keyed by ISIN
-//! (SOURCE-CONTRACT.md §2/§5/§10). BSE gives the `SCRIP_CD ↔ ISIN ↔ symbol`
-//! map plus a free full-universe `Mktcap` anchor (₹ crore); NSE catches
-//! NSE-only edge cases. NSE-only entries have no mcap and are counted +
-//! disclosed, never silently dropped.
+//! Universe seed: BSE `ListofScripData` ∪ NSE `EQUITY_L.csv` (EQ series),
+//! keyed by ISIN (SOURCE-CONTRACT.md §2/§5/§10). BSE gives the
+//! `SCRIP_CD ↔ ISIN ↔ symbol` map plus a free full-universe `Mktcap` anchor
+//! (₹ crore); NSE catches NSE-only edge cases. NSE-only entries have no mcap
+//! and are counted + disclosed, never silently dropped.
+//!
+//! Phase 2: coverage is floor-based (`partition_by_floor`), not top-N — every
+//! entry at/above the entry floor is covered, with hysteresis (a previously
+//! covered symbol stays covered down to the exit floor, so mcap wobble around
+//! the boundary never churns the universe).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::http::PoliteClient;
 
@@ -33,20 +38,54 @@ pub struct Universe {
     pub nse_only_count: usize,
 }
 
+/// Floor-based coverage partition (Phase 2). `covered` is sorted by mcap
+/// descending (deterministic; also what `--limit` truncates for smoke runs).
+pub struct UniversePartition<'a> {
+    pub covered: Vec<&'a UniverseEntry>,
+    /// Entries with a known mcap below the (hysteresis-adjusted) floor.
+    pub below_floor: usize,
+    /// Entries with no mcap at all (NSE-only — unrankable, disclosed).
+    pub unrankable: usize,
+    /// Covered only thanks to hysteresis (exit floor ≤ mcap < entry floor).
+    pub hysteresis_retained: usize,
+}
+
 impl Universe {
-    /// Top-N by the scrip master's `Mktcap`, descending. Entries without a
-    /// market cap cannot be ranked and are excluded from top-N by definition.
-    pub fn top_by_mktcap(&self, n: usize) -> Vec<&UniverseEntry> {
-        let mut ranked: Vec<&UniverseEntry> =
-            self.entries.iter().filter(|e| e.mktcap_cr.is_some()).collect();
-        ranked.sort_by(|a, b| {
+    /// Partition the universe by market-cap floor with hysteresis:
+    /// - enter coverage at `enter_cr` (design: ₹800 cr),
+    /// - a symbol in `previously_covered` stays covered down to `exit_cr`
+    ///   (design: ₹720 cr) so boundary wobble never churns the universe.
+    ///
+    /// Entries without a mcap (NSE-only) cannot be ranked against a floor and
+    /// are counted as `unrankable`, never silently dropped.
+    pub fn partition_by_floor(
+        &self,
+        enter_cr: f64,
+        exit_cr: f64,
+        previously_covered: &HashSet<String>,
+    ) -> UniversePartition<'_> {
+        let mut covered: Vec<&UniverseEntry> = Vec::new();
+        let mut below_floor = 0usize;
+        let mut unrankable = 0usize;
+        let mut hysteresis_retained = 0usize;
+        for e in &self.entries {
+            match e.mktcap_cr {
+                None => unrankable += 1,
+                Some(m) if m >= enter_cr => covered.push(e),
+                Some(m) if m >= exit_cr && previously_covered.contains(&e.instrument_key) => {
+                    hysteresis_retained += 1;
+                    covered.push(e);
+                }
+                Some(_) => below_floor += 1,
+            }
+        }
+        covered.sort_by(|a, b| {
             b.mktcap_cr
                 .partial_cmp(&a.mktcap_cr)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.instrument_key.cmp(&b.instrument_key))
         });
-        ranked.truncate(n);
-        ranked
+        UniversePartition { covered, below_floor, unrankable, hysteresis_retained }
     }
 
     /// BSE scrip code → ISIN (injected into `BseFilingSource` so scrip-code
@@ -124,12 +163,20 @@ pub fn build_universe(bse_json: &str, nse_csv: &str) -> Result<Universe, String>
     let sym_i = idx("SYMBOL")?;
     let isin_i = idx("ISIN NUMBER")?;
     let name_i = idx("NAME OF COMPANY").unwrap_or(sym_i);
+    let series_i = idx("SERIES").ok();
 
     let mut nse_count = 0usize;
     for line in lines {
         let fields: Vec<&str> = line.split(',').map(|f| f.trim()).collect();
         if fields.len() <= isin_i.max(sym_i) {
             continue;
+        }
+        // Equity universe = EQ series only (ETFs / fund units / debt series
+        // like GB/GS/BE never enter the fundamentals universe from NSE).
+        if let Some(si) = series_i {
+            if fields.get(si).copied().unwrap_or_default() != "EQ" {
+                continue;
+            }
         }
         let isin = fields[isin_i].to_string();
         if !isin.starts_with("INE") {
@@ -172,7 +219,7 @@ mod tests {
        "Issuer_Name":"Gone Ltd","Mktcap":"5.00"}
     ]"#;
 
-    const NSE: &str = "SYMBOL,NAME OF COMPANY, SERIES, DATE OF LISTING, PAID UP VALUE, MARKET LOT, ISIN NUMBER, FACE VALUE\nABB,ABB India Limited,EQ,06-OCT-2008,2,1,INE117A01022,2\nNSEONLY,NSE Only Co,EQ,01-JAN-2020,10,1,INE555Y01019,10\n";
+    const NSE: &str = "SYMBOL,NAME OF COMPANY, SERIES, DATE OF LISTING, PAID UP VALUE, MARKET LOT, ISIN NUMBER, FACE VALUE\nABB,ABB India Limited,EQ,06-OCT-2008,2,1,INE117A01022,2\nNSEONLY,NSE Only Co,EQ,01-JAN-2020,10,1,INE555Y01019,10\nBONDISH,Bond Series Co,GB,01-JAN-2020,10,1,INE777B01011,10\n";
 
     #[test]
     fn union_is_keyed_by_isin() {
@@ -196,14 +243,52 @@ mod tests {
     }
 
     #[test]
-    fn top_by_mktcap_ranks_descending_and_skips_unranked() {
+    fn nse_non_eq_series_is_excluded() {
         let u = build_universe(BSE, NSE).unwrap();
-        let top = u.top_by_mktcap(2);
-        assert_eq!(top.len(), 2);
-        assert_eq!(top[0].instrument_key, "INE117A01022"); // 144808.65
-        assert_eq!(top[1].instrument_key, "INE690A01028"); // 12000.00
-        // NSE-only entry (no mcap) can never be in top-N.
-        assert!(!top.iter().any(|e| e.instrument_key == "INE555Y01019"));
+        assert!(
+            !u.entries.iter().any(|e| e.instrument_key == "INE777B01011"),
+            "GB-series row must never enter the fundamentals universe"
+        );
+        assert_eq!(u.nse_count, 2, "only the EQ rows count as NSE entries");
+    }
+
+    #[test]
+    fn floor_partition_covers_at_entry_floor_and_discloses_the_rest() {
+        let u = build_universe(BSE, NSE).unwrap();
+        let none = HashSet::new();
+        // Entry floor 800: ABB (144808) and TTK (12000) covered; NSE-only
+        // (no mcap) disclosed as unrankable, never silently dropped.
+        let p = u.partition_by_floor(800.0, 720.0, &none);
+        assert_eq!(p.covered.len(), 2);
+        assert_eq!(p.covered[0].instrument_key, "INE117A01022"); // mcap desc
+        assert_eq!(p.below_floor, 0);
+        assert_eq!(p.unrankable, 1);
+        assert_eq!(p.hysteresis_retained, 0);
+
+        // Entry floor above TTK: TTK drops to below_floor.
+        let p = u.partition_by_floor(20_000.0, 18_000.0, &none);
+        assert_eq!(p.covered.len(), 1);
+        assert_eq!(p.below_floor, 1);
+    }
+
+    #[test]
+    fn hysteresis_retains_previously_covered_between_floors() {
+        let u = build_universe(BSE, NSE).unwrap();
+        // TTK mcap 12000 sits between exit (10000) and entry (13000) floors.
+        let mut prev = HashSet::new();
+        prev.insert("INE690A01028".to_string());
+        let p = u.partition_by_floor(13_000.0, 10_000.0, &prev);
+        assert!(p.covered.iter().any(|e| e.instrument_key == "INE690A01028"));
+        assert_eq!(p.hysteresis_retained, 1);
+
+        // Same floors, no prior coverage → TTK is out (enter only at ≥13000).
+        let p = u.partition_by_floor(13_000.0, 10_000.0, &HashSet::new());
+        assert!(!p.covered.iter().any(|e| e.instrument_key == "INE690A01028"));
+        assert_eq!(p.below_floor, 1);
+
+        // Below even the exit floor → hysteresis cannot retain it.
+        let p = u.partition_by_floor(13_000.0, 12_500.0, &prev);
+        assert!(!p.covered.iter().any(|e| e.instrument_key == "INE690A01028"));
     }
 
     #[test]

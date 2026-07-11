@@ -10,6 +10,7 @@ from pipeline import config, datasets, store
 from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.manifest import dataset_files, write_json
 from pipeline.publish import (
+    carry_forward_deltas,
     check_cas,
     check_no_shrink,
     latest_trading_date,
@@ -370,3 +371,125 @@ def test_publish_with_registered_but_empty_second_dataset(tmp_path: Path):
     assert_release_consistent(fake)
     live2 = json.loads(fake.assets["manifest.json"])
     assert {d["name"] for d in live2["datasets"]} == {"ohlc", "indices"}
+
+
+# ── P5 Phase 2: fundamentals via all_specs + multi-runner publish hygiene ──
+
+
+def test_fundamentals_state_asset_is_protected_from_gc(tmp_path: Path):
+    # The Rust producer's incremental state lives on the release as a
+    # mutable, clobbered asset -- data-daily's GC must never collect it even
+    # once it ages past the grace window (a stray parquet of the same age IS
+    # collected, proving the protection is the name, not the age).
+    ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
+    fake.seed("fundamentals_state.json", b"{}", created_at="2026-06-01T00:00:00Z")
+    fake.seed("stray.parquet", b"stray", created_at="2026-06-01T00:00:00Z")
+    _synced(meta, "gen-1")
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-2", now=NOW)
+    assert "fundamentals_state.json" in fake.assets  # protected, any age
+    assert "stray.parquet" not in fake.assets        # same age, unprotected -> GC'd
+
+
+def _fundamentals_frame() -> pd.DataFrame:
+    # Minimal shape the manifest machinery needs: a `date` column (the Rust
+    # producer mirrors as_of into it) + arbitrary payload columns.
+    return pd.DataFrame({
+        "date": pd.to_datetime(["2026-07-03", "2026-07-03"]),
+        "instrument_key": ["INE002A01018", "INE040A01034"],
+        "period_end": ["2026-03-31", "2026-03-31"],
+        "net_profit": [100.0, 200.0],
+    })
+
+
+def test_fundamentals_publishes_via_all_specs_pattern(tmp_path: Path):
+    # The sector_industry precedent: an externally-produced
+    # fundamentals_all.parquet in the spec's base_dir is picked up by
+    # build_manifest through the ordinary specs list -- no special-casing.
+    eq = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
+    fnd = dataclasses.replace(datasets.FUNDAMENTALS, base_dir=tmp_path / "fundamentals")
+    meta, stage = tmp_path / "meta", tmp_path / "stage"
+    meta.mkdir()
+    _write_store(eq.base_dir, ["2026-07-03"])
+    fnd.base_dir.mkdir()
+    _fundamentals_frame().to_parquet(
+        fnd.base_dir / "fundamentals_all.parquet", compression="zstd", index=False)
+
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False)
+    publish_dataset(specs=[eq, fnd], meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="g1", now=NOW)
+
+    assert_release_consistent(fake)
+    live = json.loads(fake.assets["manifest.json"])
+    fnd_ds = next(d for d in live["datasets"] if d["name"] == "fundamentals")
+    entry = dataset_files(fnd_ds)[0]
+    assert entry["name"] == "fundamentals_all.parquet"
+    assert entry["rows"] == 2
+    assert entry["asset"] in fake.assets
+
+
+def test_carry_forward_deltas_pure_rules():
+    live = {"datasets": [
+        {"name": "ohlc", "deltas": [
+            {"name": "ohlc_2026-07-03.parquet", "asset": "delta_ohlc_2026-07-03.abc.parquet"},
+            {"name": "ohlc_2026-07-02.parquet", "asset": "delta_ohlc_2026-07-02.gone.parquet"},
+        ]},
+    ]}
+    existing = {"delta_ohlc_2026-07-03.abc.parquet"}
+
+    # Local empty -> live deltas carried, minus assets no longer on the release.
+    new = {"datasets": [{"name": "ohlc", "deltas": []}]}
+    carry_forward_deltas(new, live, existing=existing)
+    assert [d["asset"] for d in new["datasets"][0]["deltas"]] == [
+        "delta_ohlc_2026-07-03.abc.parquet"
+    ]
+
+    # Local non-empty -> untouched (the data-daily runner's own list wins).
+    own = [{"name": "ohlc_2026-07-04.parquet", "asset": "delta_ohlc_2026-07-04.new.parquet"}]
+    new = {"datasets": [{"name": "ohlc", "deltas": list(own)}]}
+    carry_forward_deltas(new, live, existing=existing)
+    assert new["datasets"][0]["deltas"] == own
+
+    # No live manifest / dataset absent from live -> no-op.
+    new = {"datasets": [{"name": "ohlc", "deltas": []}]}
+    carry_forward_deltas(new, None, existing=existing)
+    assert new["datasets"][0]["deltas"] == []
+    carry_forward_deltas(new, {"datasets": []}, existing=existing)
+    assert new["datasets"][0]["deltas"] == []
+
+
+def test_second_runner_publish_carries_live_deltas_forward(tmp_path: Path):
+    # Runner A (data-daily) publishes a delta; runner B (fundamentals-daily,
+    # a different ephemeral machine) syncs baselines only -- its publish must
+    # NOT erase the live delta window.
+    import shutil
+
+    ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
+    _synced(meta, None)
+    rows = {c: ["x"] for c in config.CANON_COLUMNS}
+    delta_df = pd.DataFrame(rows)
+    delta_df["date"] = pd.to_datetime(["2026-07-03"])
+    delta_df["instrument_key"] = ["INE0"]
+    store.write_delta(delta_df, ohlc, date(2026, 7, 3))
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
+    live1 = json.loads(fake.assets["manifest.json"])
+    delta_asset = next(d for d in live1["datasets"] if d["name"] == "ohlc")["deltas"][0]["asset"]
+
+    # Runner B: same baseline (sync materializes baselines only), no deltas dir.
+    shutil.rmtree(ohlc / "deltas")
+    _synced(meta, "gen-1")
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-2", now=NOW)
+
+    assert_release_consistent(fake)
+    live2 = json.loads(fake.assets["manifest.json"])
+    ohlc_ds = next(d for d in live2["datasets"] if d["name"] == "ohlc")
+    assert [d["asset"] for d in ohlc_ds["deltas"]] == [delta_asset]
+    assert delta_asset in fake.assets  # still referenced -> never GC'd

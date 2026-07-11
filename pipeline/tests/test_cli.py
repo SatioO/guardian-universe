@@ -296,6 +296,40 @@ def test_daily_fetch_loop_skips_derived_specs(monkeypatch, tmp_path):
     assert list(dict.fromkeys(seen)) == ["equities", "indices"]  # reference (derived) never fetched
 
 
+def test_daily_phase2_skips_external_specs(monkeypatch, tmp_path):
+    # An external spec (fundamentals: produced by the Rust producer, no
+    # BUILDERS entry) must never run through the Phase-2 builder loop -- a
+    # derived-but-external spec would otherwise get a spurious `failed`
+    # secondary status every night (data-daily reds on those).
+    import json
+    from datetime import date
+
+    from pipeline import config, datasets
+    from pipeline.daily_update import RunStatus
+
+    monkeypatch.setattr(config, "META_DIR", tmp_path)
+    (tmp_path / "holidays.json").write_text(json.dumps({}))
+
+    equities = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
+    external_spec = dataclasses.replace(
+        datasets.FUNDAMENTALS, base_dir=tmp_path / "fundamentals"
+    )
+    monkeypatch.setattr(
+        cli.datasets, "DATASETS", {"equities": equities, "fundamentals": external_spec}
+    )
+    monkeypatch.setattr(cli.datasets, "DATASET_ORDER", ["equities", "fundamentals"])
+
+    def fake_run_daily(spec, target, **kw):
+        return RunStatus("success", date(2026, 7, 3), source=spec.source_label)
+
+    monkeypatch.setattr(cli, "run_daily", fake_run_daily)
+    monkeypatch.setattr(cli.builders, "BUILDERS", {})  # no builder exists -- by design
+    assert cli.main(["daily", "--date", "2026-07-03"]) == 0
+    # No secondary status was written for the external spec: the loop skipped
+    # it entirely instead of recording a "no builder registered" failure.
+    assert not (tmp_path / "last_run_status_fundamentals.json").exists()
+
+
 def test_daily_writes_primary_and_secondary_status_files(monkeypatch, tmp_path):
     import json
     from datetime import date

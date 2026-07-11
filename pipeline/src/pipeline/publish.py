@@ -23,7 +23,13 @@ from pipeline.sync import SYNCED_STATE
 if TYPE_CHECKING:
     from pipeline.datasets import DatasetSpec
 
-PROTECTED_ASSETS = frozenset({"manifest.json", "last_run_status.json"})
+# Mutable singletons uploaded with clobber=True, never content-addressed and
+# never GC'd. `fundamentals_state.json` is the Rust producer's incremental
+# state (uploaded by fundamentals-daily.yml AFTER a successful publish so
+# state can never claim work the published parquet doesn't have).
+PROTECTED_ASSETS = frozenset(
+    {"manifest.json", "last_run_status.json", "fundamentals_state.json"}
+)
 GC_GRACE = timedelta(days=7)
 
 
@@ -75,6 +81,34 @@ def check_no_shrink(new: dict[str, Any], live: dict[str, Any] | None) -> None:
                 )
     if new["latest_trading_date"] < live["latest_trading_date"]:
         raise UnexpectedFailure("shrink-guard: latest_trading_date would regress")
+
+
+def carry_forward_deltas(
+    new: dict[str, Any], live: dict[str, Any] | None, *, existing: set[str]
+) -> None:
+    """Preserve a dataset's live delta window when THIS runner has none.
+
+    Publishes can come from more than one ephemeral runner now (data-daily
+    and fundamentals-daily share the release). A runner that never ran
+    `daily` has no local delta files, and rebuilding the manifest from local
+    state alone would silently erase the live manifest's delta entries for
+    every dataset — degrading clients to baseline re-downloads until the next
+    data-daily publish. Carry the live entries forward instead, but only
+    those whose assets still exist on the release (a GC'd/missing asset must
+    never be re-referenced). A runner WITH local deltas (data-daily) is left
+    untouched — its own freshly-built list wins, exactly as before."""
+    if live is None:
+        return
+    live_by_name = {ds["name"]: ds for ds in live.get("datasets", [])}
+    for ds in new["datasets"]:
+        if ds.get("deltas"):
+            continue
+        live_ds = live_by_name.get(ds["name"])
+        if live_ds is None:
+            continue
+        carried = [d for d in live_ds.get("deltas", []) if d.get("asset") in existing]
+        if carried:
+            ds["deltas"] = carried
 
 
 def _read_live_manifest(
@@ -198,6 +232,7 @@ def publish_dataset(
 
     check_cas(live, synced)
     check_no_shrink(new_manifest, live)
+    carry_forward_deltas(new_manifest, live, existing=existing)
 
     # Upload new content-addressed data assets (immutable: no clobber).
     # Reconstruct real per-spec source paths: baseline files live at
