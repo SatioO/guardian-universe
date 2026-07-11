@@ -242,3 +242,41 @@ Abort the run (red) if any fails; alert on 2 consecutive reds:
 6. Original-vs-Revision: is headline-text matching ("Revised…") reliable enough, or does another feed carry a structured flag?
 7. `AttachHis/` path for historical announcement PDFs (backfill leg) — untested.
 8. Legal/ToS sign-off (R6) before any public republish — owner action, gates publish not the spike.
+
+---
+
+## §9 RESOLUTION (2026-07-12) — the §6 missing link is CLOSED
+
+The follow-up probe (JS-bundle mining + live curl, no browser) resolved the raw-XBRL gap:
+
+### 9.1 `GetCorXbrlDetails_ng` — request shape captured from BSE's Angular bundle
+```
+GET https://api.bseindia.com/BseIndiaAPI/api/GetCorXbrlDetails_ng/w?Flag=<category>&scripcode=<scrip|empty>&fromdate=YYYYMMDD&todate=YYYYMMDD
+Headers: User-Agent (browser), Referer: https://www.bseindia.com/   ·   HTTP/1.1
+```
+- Category ids from `GetCorXbrlDropdown_ng/w` — **22 = Financial Results** (no separate "Integrated Filing (Finance)" category; 44 is Governance only).
+- Component enforces ≤1-week windows client-side; server accepted our 1-week probes.
+- **Per-scrip works** (TCS `532540` → rows); **bulk (empty scripcode) returned empty** in both probes — treat as per-scrip-only.
+- **Observed lag:** `xbrlurl` was empty for fresh (Jul-9) *and* April rows for TCS on this endpoint — do NOT depend on it for XBRL URL resolution.
+
+### 9.2 THE KEY FINDING — raw XBRL lives on BSE via an `.html → .xml` swap
+`Corp_FinanceResult_ng` rows carry `XMLName`/`Consol_XMLName` like
+`IFIndasDuplicateUploadDocument/Integrated_Finance_Ind_As_<scrip>_<ts>_IFIndAs.html`.
+Fetching `https://www.bseindia.com/XBRLFILES/<name>` with the extension swapped to **`.xml`** returns the **raw XBRL instance** (verified 200, `text/xml`, 183 KB):
+- Taxonomy: `xmlns:in-capmkt="http://www.sebi.gov.in/xbrl/2026-01-31/in-capmkt"` — the SEBI Integrated-Finance taxonomy (IFIndAs V2.1), **identical to what the consuming app's Rust parser already parses**.
+- Real facts verified: `RevenueFromOperations`, `ProfitBeforeTax`, `ProfitLossForPeriod`, `BasicEarningsLossPerShare…`, `NatureOfReportStandaloneConsolidated`, with `unitRef`/`decimals`.
+- **Context refs are the app parser's own selectors**: `OneD` (quarter 2026-01-01→2026-03-31), `FourD` (annual), plus instant contexts (balance-sheet inputs). 264 contexts in the sample.
+- The `.html` itself also embeds `schemaRef` + `xbrli:context` (iXBRL-ish) — usable as a fallback, but unnecessary given the `.xml` twin.
+
+### 9.3 Confirmed CI-viable end-to-end chain (no NSE API anywhere)
+```
+Corp_FinanceResult_ng (BULK discovery, FlagDur windows)      [api.bseindia.com]
+  → XMLName/.Consol_XMLName  (.html → .xml swap)             [www.bseindia.com/XBRLFILES]
+  → raw in-capmkt XBRL → existing Rust parser (unchanged)
+```
+nsearchives remains a per-symbol fallback for instance bytes; it is no longer on the critical path.
+
+### 9.4 Still open
+- **Datacenter reachability** of `api.bseindia.com` + `www.bseindia.com/XBRLFILES` from a GitHub-hosted runner (§8 throwaway workflow) — the only remaining Phase-0 gate.
+- XBRL-attachment lag vs the PDF (fresh filings may briefly have no XMLName): incremental state must keep a symbol pending until its XMLName appears, not mark it done off the PDF row.
+- `.xml`-twin existence should be verified across sectors (bank/NBFC/insurance variants of the IFIndAs path) during Phase 1's first 50-symbol run.
