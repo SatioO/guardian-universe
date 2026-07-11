@@ -149,11 +149,28 @@ CA_FLAGS = DatasetSpec(
     derived=True,
 )
 
+SECTOR_INDUSTRY = DatasetSpec(
+    key="sector_industry", file_prefix="sector_industry", base_dir=config.SECTOR_DIR,
+    source_label="nse-sector",
+    normalizer=lambda df: df,  # identity: builders.build_sector_industry shapes rows itself
+    make_fetcher=_no_fetcher,  # fetched inside the builder, not via the run_daily Fetcher path
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="sector_industry", schema_version=1,
+    # `derived` here means "not run through the Phase-1 fetch loop / run_daily":
+    # the CSV is fetched INSIDE the builder (build_sector_industry). This keeps
+    # it out of the OHLC-shaped fetched path and out of the daily continuity
+    # freshness check (it refreshes weekly, not per trading day), while still
+    # running each daily `all` cycle via the Phase-2 BUILDERS loop.
+    derived=True,
+)
+
 DATASETS: dict[str, DatasetSpec] = {
     "equities": EQUITIES, "indices": INDICES, "reference": REFERENCE,
-    "ca_flags": CA_FLAGS,
+    "ca_flags": CA_FLAGS, "sector_industry": SECTOR_INDUSTRY,
 }
-DATASET_ORDER: list[str] = ["equities", "indices", "reference", "ca_flags"]
+DATASET_ORDER: list[str] = [
+    "equities", "indices", "reference", "ca_flags", "sector_industry",
+]
 
 # publish.py resolves specs by manifest_name (by_manifest_name); manifest_name
 # must be unique across the registry or that resolution would be ambiguous.

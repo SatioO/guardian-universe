@@ -34,10 +34,13 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 from pipeline import config, store
 from pipeline.daily_update import RunStatus
 from pipeline.datasets import DatasetSpec
+from pipeline.fetch import _BROWSER_UA, _fetch_with_retry
+from pipeline.sources import nse_sector
 
 BUILDERS: dict[str, Callable[[DatasetSpec, date], RunStatus]] = {}
 
@@ -219,3 +222,133 @@ def _read_all_years_for_ca_flags(source_spec: DatasetSpec) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame(columns=_CA_FLAGS_JOIN_COLUMNS)
     return pd.concat(frames, ignore_index=True)
+
+
+# ---------------------------------------------------------------------------
+# sector_industry: a FETCHED reference (the NSE Total-Market constituents CSV),
+# modelled as a derived-style builder (full-rewrite, atomic, no per-day store
+# read) because the fetched-dataset path (run_daily + Fetcher) is OHLC-shaped
+# and does not fit a slow-moving, weekly-refreshed snapshot. Weekly TTL,
+# fail-closed on empty/short/failed fetch, and shrink-safe against the publish
+# guard -- see build_sector_industry.
+# ---------------------------------------------------------------------------
+
+def _fetch_sector_frame(target: date) -> pd.DataFrame:
+    """Fetch + parse the NSE Total-Market CSV into the normalized sector frame,
+    reusing the shared warm-session + retry contract (`fetch._fetch_with_retry`)
+    exactly as the equities/indices fetchers do -- `parse=parse_sector_csv` is a
+    `bytes -> DataFrame` parser of the same shape as `_unzip_to_df`/`_csv_to_df`.
+    A 404/exhaustion raises (caught by the builder's fail-closed guard)."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": _BROWSER_UA})
+    return _fetch_with_retry(
+        session, nse_sector.SECTOR_CSV_URL, target,
+        parse=nse_sector.parse_sector_csv,
+    )
+
+
+def _sector_prior_rows(out_path: Path) -> int | None:
+    """Row count of the currently-stored sector file, or None if absent/unreadable."""
+    if not out_path.exists():
+        return None
+    try:
+        return int(len(pd.read_parquet(out_path, columns=["date"])))
+    except Exception:  # noqa: BLE001 - a corrupt prior file is treated as absent
+        return None
+
+
+def _sector_is_fresh(out_path: Path, target: date, ttl_days: int) -> bool:
+    """True when the stored file's as-of `date` is within `ttl_days` of
+    `target` -- the weekly-TTL guard that keeps the daily cron from re-fetching
+    a slow-moving list every run."""
+    if not out_path.exists():
+        return False
+    try:
+        col = pd.to_datetime(pd.read_parquet(out_path, columns=["date"])["date"])
+    except Exception:  # noqa: BLE001 - unreadable -> not fresh, re-fetch
+        return False
+    if col.empty:
+        return False
+    as_of = col.max().date()
+    return (target - as_of).days < ttl_days
+
+
+def _sector_fail_closed(
+    target: date, out_path: Path, prior_rows: int | None, reason: str
+) -> RunStatus:
+    """Fail-closed outcome: keep any prior good file rather than overwrite it
+    with an empty/short/failed fetch. With a prior file present this is a clean
+    `skipped_idempotent` (an ok status -- never reds the daily job); with no
+    prior file at all it is a genuine `failed` (a real first-run alert)."""
+    if prior_rows is not None:
+        return RunStatus(
+            "skipped_idempotent", target, symbol_count=prior_rows,
+            source="nse-sector", message=f"{reason}; retained prior file",
+        )
+    return RunStatus(
+        "failed", target, source="nse-sector",
+        message=f"{reason}; no prior file to retain",
+    )
+
+
+def build_sector_industry(
+    spec: DatasetSpec,
+    target: date,
+    *,
+    fetch_frame: Callable[[date], pd.DataFrame] = _fetch_sector_frame,
+    ttl_days: int = config.SECTOR_REFRESH_TTL_DAYS,
+    min_rows: int = config.SECTOR_MIN_ROWS,
+) -> RunStatus:
+    """Fetch + normalize + full-rewrite the `sector_industry` reference.
+
+    Weekly TTL: if the stored file's as-of date is younger than `ttl_days`,
+    skip the fetch entirely (cheap idempotent no-op on the nightly cron).
+
+    Data-quality wall (fail-closed -- a wrong/missing sector file is worse than
+    a stale-but-correct one):
+      - fetch error            -> keep prior file (skipped) / failed if none
+      - parsed 0 rows          -> keep prior file / failed if none
+      - parsed < `min_rows`    -> suspected truncation: keep prior / failed
+      - parsed < prior rows    -> respect the publish shrink-guard (any per-file
+                                  row decrease blocks the shared publish): hold
+                                  the smaller list back; a manual refresh
+                                  (delete the file) accepts a genuine shrink.
+
+    On a healthy fetch the file is written atomically (tmp+rename, zstd) with an
+    appended `date` (as-of) column so the manifest machinery can read
+    latest_date/rows off it exactly like every other dataset."""
+    spec.base_dir.mkdir(parents=True, exist_ok=True)
+    out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
+    prior_rows = _sector_prior_rows(out_path)
+
+    if _sector_is_fresh(out_path, target, ttl_days):
+        return RunStatus(
+            "skipped_idempotent", target, symbol_count=prior_rows or 0,
+            source="nse-sector", message=f"within {ttl_days}-day TTL; not re-fetched",
+        )
+
+    try:
+        df = fetch_frame(target)
+    except Exception as e:  # noqa: BLE001 - any fetch/parse failure -> fail-closed
+        return _sector_fail_closed(target, out_path, prior_rows, f"fetch failed: {e}")
+
+    if df.empty:
+        return _sector_fail_closed(
+            target, out_path, prior_rows, "parsed 0 valid rows"
+        )
+    if len(df) < min_rows:
+        return _sector_fail_closed(
+            target, out_path, prior_rows,
+            f"parsed {len(df)} rows < floor {min_rows} (suspected truncation)",
+        )
+    if prior_rows is not None and len(df) < prior_rows:
+        return _sector_fail_closed(
+            target, out_path, prior_rows,
+            f"parsed {len(df)} rows < prior {prior_rows} (shrink-guard)",
+        )
+
+    out = df.copy()
+    out["date"] = pd.Timestamp(target)
+    out = out[[*nse_sector.SECTOR_COLUMNS, "date"]]
+    _write_atomic(out, out_path)
+    return RunStatus("success", target, symbol_count=len(out), source="nse-sector")
