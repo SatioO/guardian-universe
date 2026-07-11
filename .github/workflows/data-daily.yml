@@ -2,8 +2,16 @@ name: data-daily
 
 on:
   schedule:
-    - cron: "0 14 * * 1-5"   # 19:30 IST — shortly after NSE bhavcopy publishes
-    - cron: "0 16 * * 1-5"   # 21:30 IST — late catch if the file published late
+    # Retry ladder (PRD P0): fire early and keep re-trying until the day's NSE
+    # bhavcopy lands, so a trader sees today's data by ~16:30 IST. Each fire runs
+    # sync→daily→publish; the pipeline is idempotent + fail-closed, so an early
+    # rung that hits `not_yet` no-ops and a later rung publishes once data lands.
+    # Times are UTC (IST = UTC + 5:30).
+    - cron: "45 10 * * 1-5"   # 16:15 IST — first attempt, shortly after close
+    - cron: "15 11 * * 1-5"   # 16:45 IST
+    - cron: "0 12 * * 1-5"    # 17:30 IST
+    - cron: "30 13 * * 1-5"   # 19:00 IST
+    - cron: "30 15 * * 1-5"   # 21:00 IST — final rung; alerts if still not landed
   workflow_dispatch:
     inputs:
       date:
@@ -88,6 +96,26 @@ jobs:
             esac
           done
           exit $bad
+      - name: Alert if the bhavcopy never landed (final rung)
+        # A `not_yet` status exits 0 (a missing bhavcopy is not a pipeline
+        # failure), so an earlier rung that finds no data is a silent no-op — by
+        # design, the next rung retries. But on the LAST rung (21:00 IST) a
+        # still-`not_yet` target day means the bhavcopy won't publish today: the
+        # dataset stays stale and nothing else would surface it. Raise the alert
+        # here, reusing the shared `pipeline-failure` issue. Only fires on the
+        # final scheduled rung (never on manual dispatch or the earlier rungs);
+        # holidays / already-published days report a different status.
+        if: github.event.schedule == '30 15 * * 1-5' && steps.decide.outputs.status == 'not_yet'
+        working-directory: ${{ github.workspace }}
+        run: |
+          gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true
+          body="data-daily: today's NSE bhavcopy never landed by the final retry (21:00 IST) on $(date -u +%F) — the dataset was NOT refreshed today. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number' || true)
+          if [ -z "$n" ]; then
+            gh issue create --title "Data pipeline: bhavcopy not published by 21:00 IST" --label pipeline-failure --body "$body"
+          else
+            gh issue comment "$n" --body "$body"
+          fi
       - name: Alert on failure
         if: failure()
         working-directory: ${{ github.workspace }}
