@@ -1,0 +1,20 @@
+[package]
+name = "fundamentals-producer"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Bulk fundamentals producer: BSE-primary discovery -> raw in-capmkt XBRL -> fundamentals-core parser -> fundamentals.parquet"
+
+[dependencies]
+fundamentals-core = { path = "../fundamentals-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { version = "2.10", features = ["gzip"] }
+arrow-array = "53"
+arrow-schema = "53"
+parquet = { version = "53", features = ["arrow", "zstd"] }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
