@@ -1,0 +1,135 @@
+name: fundamentals-daily
+
+# P5 Phase 2: run the Rust fundamentals producer against the full covered
+# universe (mcap floor ≥800cr, hysteresis exit 720cr) and publish
+# fundamentals_all.parquet into the ONE data-latest manifest.
+#
+# Persistence across ephemeral runners:
+#   - `pipeline sync` materializes the accumulated fundamentals_all.parquet
+#     (the producer merges into it; existing rows are never dropped, so the
+#     publish shrink-guard holds structurally).
+#   - `fundamentals_state.json` (locator-level incremental state: processed
+#     dedup keys incl. non-general/gate-blocked outcomes that never become
+#     parquet rows) lives on the release as a mutable, GC-protected asset.
+#     It is uploaded strictly AFTER a successful publish so state can never
+#     claim work the published parquet doesn't contain; losing it is safe —
+#     the producer's merge is byte-idempotent, so a stateless re-run costs
+#     one polite re-fetch cycle, never output churn.
+#
+# Quiet days: the producer leaves the parquet byte-identical and reports
+# parquet_written=false in run_summary.json — publish is skipped entirely,
+# so a no-new-filings day never touches the release (no manifest churn).
+# Canary/watchdog live INSIDE the producer (SOURCE-CONTRACT §12): a truncated
+# scrip master or an empty bulk-discovery response during filing season is a
+# hard exit-1 — an outage is never a silent green.
+#
+# First full run (~40–70 min: current quarter's filings for ~700–1200
+# symbols): trigger via workflow_dispatch with window=3m (see RUNBOOK.md).
+
+on:
+  schedule:
+    # 20:30 IST (UTC+5:30), Mon–Fri — after the evening filing wave and after
+    # data-daily's final rung (21:00 IST rung shares the publish lock below).
+    - cron: "0 15 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      window:
+        description: "Discovery window: today|week|15d|month|3m|1y (first full run: 3m)"
+        required: false
+        default: "week"
+      limit:
+        description: "Optional covered-universe cap (smoke runs only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write   # gh needs release read+write
+  issues: write     # failure alerting
+
+# Shared publish lock with data-daily: two workflows now publish to the same
+# release, and the CAS guard in publish.py is a backstop, not a strategy —
+# the lock guarantees sync→publish is never interleaved across workflows.
+concurrency:
+  group: data-pipeline-publish
+  cancel-in-progress: false   # never interrupt a publish mid-upload
+
+jobs:
+  produce-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150   # first full run fetches a whole quarter politely
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install pipeline
+        working-directory: pipeline
+        run: pip install -r requirements.lock -e . --no-deps
+      - name: Sync baseline from the data-latest release (fail-closed)
+        working-directory: pipeline
+        run: python -m pipeline sync
+      - name: Download producer state (absent on first run — self-heals)
+        # Runs AFTER sync: an unreachable release already failed the job
+        # there, so a miss here really is "no asset yet", not an outage mask.
+        run: |
+          mkdir -p pipeline/data/fundamentals
+          gh release download data-latest --pattern fundamentals_state.json \
+            --dir pipeline/data/fundamentals --clobber \
+            || echo "no prior fundamentals_state.json (first run) — starting fresh"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fundamentals/target
+          key: cargo-fundamentals-${{ runner.os }}-${{ hashFiles('fundamentals/Cargo.lock') }}
+      - name: Build producer
+        working-directory: fundamentals
+        run: cargo build --locked --release
+      - name: Run producer (full covered universe)
+        working-directory: fundamentals
+        env:
+          WINDOW: ${{ github.event.inputs.window }}
+          LIMIT: ${{ github.event.inputs.limit }}
+        run: |
+          set -euo pipefail
+          args=(--out ../pipeline/data/fundamentals --window "${WINDOW:-week}")
+          if [ -n "${LIMIT}" ]; then args+=(--limit "${LIMIT}"); fi
+          ./target/release/fundamentals-producer "${args[@]}"
+      - name: Decide whether to publish
+        id: decide
+        run: |
+          written=$(jq -r '.parquet_written' pipeline/data/fundamentals/run_summary.json)
+          echo "parquet_written=$written" >> "$GITHUB_OUTPUT"
+          echo "Producer parquet_written: $written"
+      - name: Publish the updated dataset
+        if: steps.decide.outputs.parquet_written == 'true'
+        working-directory: pipeline
+        run: python -m pipeline publish
+      - name: Upload producer state (strictly after a successful publish)
+        # Order matters: state uploaded before a failed publish would claim
+        # filings as processed while their rows never reached the release —
+        # a permanent silent hole. Publish first; state only on success. On
+        # a no-publish (quiet) day this still runs: state may have advanced
+        # (pending markers, gate-blocked/non-general processed keys) even
+        # when the parquet didn't.
+        run: |
+          f=pipeline/data/fundamentals/fundamentals_state.json
+          [ -f "$f" ] || { echo "no state file produced"; exit 0; }
+          gh release upload data-latest "$f" --clobber
+      - name: Alert on failure
+        if: failure()
+        run: |
+          gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true
+          body="fundamentals-daily FAILED on $(date -u +%F). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number' || true)
+          if [ -z "$n" ]; then
+            gh issue create --title "Data pipeline: fundamentals-daily failed" --label pipeline-failure --body "$body"
+          else
+            gh issue comment "$n" --body "$body"
+          fi

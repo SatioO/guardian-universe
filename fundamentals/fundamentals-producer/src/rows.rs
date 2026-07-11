@@ -59,6 +59,22 @@ impl FundRow {
             self.basis.clone(),
         )
     }
+
+    /// Data equality ignoring `as_of` (provenance date) and `ttm_eps`
+    /// (derived post-merge over the full row set; freshly built rows always
+    /// carry `None`). This is what makes state loss self-healing: re-fetching
+    /// a filing whose numbers are unchanged keeps the EXISTING row (original
+    /// `as_of` preserved) so the parquet stays byte-identical — no publish
+    /// churn from a mere re-process.
+    pub fn same_data(&self, other: &FundRow) -> bool {
+        let norm = |r: &FundRow| {
+            let mut c = r.clone();
+            c.as_of = String::new();
+            c.ttm_eps = None;
+            c
+        };
+        norm(self) == norm(other)
+    }
 }
 
 /// Share of the 10 core income fields resolved (drives the Gate-1
@@ -299,6 +315,21 @@ mod tests {
         let mut rows = vec![quarter_row("2026-06-30", "Q1", Some(5.0))];
         derive_ttm_eps(&mut rows);
         assert_eq!(rows[0].ttm_eps, None);
+    }
+
+    #[test]
+    fn same_data_ignores_as_of_and_ttm_eps_only() {
+        let a = quarter_row("2026-06-30", "Q1", Some(5.0));
+        let mut b = a.clone();
+        b.as_of = "2026-09-01".into();
+        b.ttm_eps = Some(14.0);
+        assert!(a.same_data(&b), "as_of/ttm_eps differences are not data changes");
+        let mut c = a.clone();
+        c.net_profit = Some(999.0);
+        assert!(!a.same_data(&c), "a real value change IS a data change");
+        let mut d = a.clone();
+        d.dq_flags = "negative_tax".into();
+        assert!(!a.same_data(&d), "a dq_flags change IS a data change");
     }
 
     #[test]

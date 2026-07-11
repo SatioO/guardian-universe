@@ -50,6 +50,13 @@ class DatasetSpec:
     # normalizer/make_fetcher are never invoked by the CLI for these specs —
     # additive field, default False preserves all existing constructions.
     derived: bool = False
+    # External datasets are produced OUTSIDE this Python pipeline (e.g. the
+    # Rust fundamentals producer writing into base_dir before `publish` runs).
+    # Always paired with derived=True (kept out of the fetch loop and the
+    # continuity check), and additionally skipped by the daily Phase-2
+    # builders loop — there is no BUILDERS entry to run. sync/publish handle
+    # them exactly like any other dataset.
+    external: bool = False
 
 
 def _load_isin_map() -> dict[str, str]:
@@ -164,12 +171,33 @@ SECTOR_INDUSTRY = DatasetSpec(
     derived=True,
 )
 
+FUNDAMENTALS = DatasetSpec(
+    key="fundamentals", file_prefix="fundamentals", base_dir=config.FUNDAMENTALS_DIR,
+    source_label="bse-xbrl",
+    normalizer=lambda df: df,  # identity: the Rust producer shapes rows itself
+    make_fetcher=_no_fetcher,
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="fundamentals", schema_version=1,
+    # P5 Phase 2: `fundamentals_all.parquet` is written by the Rust producer
+    # (fundamentals/fundamentals-producer, run by fundamentals-daily.yml) into
+    # base_dir; registering the spec here is what makes `sync` materialize it
+    # and `publish` pick it up via all_specs() — the sector_industry pattern,
+    # minus the builder. derived=True keeps it out of the fetch loop and the
+    # daily continuity check (it refreshes on filing cadence, not per trading
+    # day); external=True keeps the daily Phase-2 BUILDERS loop from failing
+    # over a builder that intentionally does not exist.
+    derived=True,
+    external=True,
+)
+
 DATASETS: dict[str, DatasetSpec] = {
     "equities": EQUITIES, "indices": INDICES, "reference": REFERENCE,
     "ca_flags": CA_FLAGS, "sector_industry": SECTOR_INDUSTRY,
+    "fundamentals": FUNDAMENTALS,
 }
 DATASET_ORDER: list[str] = [
     "equities", "indices", "reference", "ca_flags", "sector_industry",
+    "fundamentals",
 ]
 
 # publish.py resolves specs by manifest_name (by_manifest_name); manifest_name

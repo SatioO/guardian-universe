@@ -9,6 +9,10 @@ pipeline/.venv/
 # generated data artifacts (published to CDN, not committed)
 # dataset-agnostic: every dataset dir + its deltas/ subdir, incl. future ones
 pipeline/data/**/*.parquet
+# P5 fundamentals producer artifacts (state lives on the release; the run
+# summary is a runner-local CI signal)
+pipeline/data/fundamentals/fundamentals_state.json
+pipeline/data/fundamentals/run_summary.json
 pipeline/data/meta/manifest.json
 pipeline/data/meta/last_run_status.json
 pipeline/data/meta/last_run_status_*.json

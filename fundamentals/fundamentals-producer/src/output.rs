@@ -22,6 +22,11 @@ pub fn schema() -> Schema {
     let utf8 = |n: &str| Field::new(n, DataType::Utf8, false);
     let f64_null = |n: &str| Field::new(n, DataType::Float64, true);
     Schema::new(vec![
+        // `date` mirrors `as_of` (ISO): the pipeline's manifest machinery
+        // reads latest_date/row counts off a `date` column for every dataset
+        // (the same reason sector_industry appends one). Not part of FundRow —
+        // written from `as_of`, ignored on read.
+        utf8("date"),
         utf8("instrument_key"),
         utf8("symbol"),
         utf8("period_end"),
@@ -71,6 +76,7 @@ pub fn sort_rows(rows: &mut [FundRow]) {
 }
 
 fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
+    let mut s_date = StringBuilder::new();
     let mut s_instrument = StringBuilder::new();
     let mut s_symbol = StringBuilder::new();
     let mut s_period_end = StringBuilder::new();
@@ -87,6 +93,7 @@ fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
     let mut b_audited = BooleanBuilder::new();
 
     for r in rows {
+        s_date.append_value(&r.as_of);
         s_instrument.append_value(&r.instrument_key);
         s_symbol.append_value(&r.symbol);
         s_period_end.append_value(&r.period_end);
@@ -130,6 +137,7 @@ fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
     let mut next_f = || -> ArrayRef { Arc::new(fi.next().expect("builder count").finish()) };
 
     let columns: Vec<ArrayRef> = vec![
+        Arc::new(s_date.finish()),
         Arc::new(s_instrument.finish()),
         Arc::new(s_symbol.finish()),
         Arc::new(s_period_end.finish()),
@@ -400,5 +408,22 @@ mod tests {
     fn missing_file_reads_empty() {
         let dir = tempfile::tempdir().unwrap();
         assert!(read_parquet(&dir.path().join("none.parquet")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn date_column_mirrors_as_of_for_the_manifest_machinery() {
+        use arrow_array::cast::AsArray;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fundamentals_all.parquet");
+        let mut rows = sample_rows();
+        sort_rows(&mut rows);
+        write_parquet(&path, &rows).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file).unwrap().build().unwrap();
+        let batch = reader.into_iter().next().unwrap().unwrap();
+        let dates = batch.column_by_name("date").expect("date column").as_string::<i32>();
+        for (i, r) in rows.iter().enumerate() {
+            assert_eq!(dates.value(i), r.as_of);
+        }
     }
 }

@@ -112,6 +112,10 @@ INDICES_DIR: Path = DATA_DIR / "indices"
 REFERENCE_DIR: Path = DATA_DIR / "reference"
 CA_FLAGS_DIR: Path = DATA_DIR / "ca_flags"
 SECTOR_DIR: Path = DATA_DIR / "sector"
+# P5 fundamentals: produced by the EXTERNAL Rust producer
+# (fundamentals/fundamentals-producer) into this directory; the pipeline
+# syncs/publishes it like any other dataset but never builds it itself.
+FUNDAMENTALS_DIR: Path = DATA_DIR / "fundamentals"
 META_DIR: Path = DATA_DIR / "meta"
 
 # Sector/industry reference (P4). Slow-moving NSE index-constituent list, so
