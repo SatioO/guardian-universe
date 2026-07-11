@@ -70,6 +70,10 @@ builders.BUILDERS["reference"] = functools.partial(
 builders.BUILDERS["ca_flags"] = functools.partial(
     builders.build_ca_flags, source_spec=datasets.DATASETS[datasets.DATASET_ORDER[0]]
 )
+# sector_industry fetches its own external CSV (no store `source_spec` to bind);
+# registered directly. Its keyword-only fetch/TTL/floor args carry defaults, so
+# it still satisfies BUILDERS' `Callable[[DatasetSpec, date], RunStatus]`.
+builders.BUILDERS["sector_industry"] = builders.build_sector_industry
 
 
 def _plain_runner(cmd: list[str]) -> int:

@@ -48,7 +48,9 @@ def test_ca_flags_spec_fields():
     assert s.schema_version == 1
     assert s.derived is True
     assert datasets.DATASETS["ca_flags"] is s
-    assert datasets.DATASET_ORDER == ["equities", "indices", "reference", "ca_flags"]
+    assert datasets.DATASET_ORDER == [
+        "equities", "indices", "reference", "ca_flags", "sector_industry",
+    ]
     with pytest.raises(RuntimeError, match="derived dataset has no fetcher"):
         s.make_fetcher()
     assert s.normalizer(pd.DataFrame({"a": [1]})).equals(pd.DataFrame({"a": [1]}))

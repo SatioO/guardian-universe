@@ -17,7 +17,9 @@ def test_equities_spec_fields():
     # NSE: sentinel keys introduced -- a client-visible ohlc dataset change.
     assert s.manifest_name == "ohlc" and s.schema_version == 2
     assert datasets.DATASETS["equities"] is s
-    assert datasets.DATASET_ORDER == ["equities", "indices", "reference", "ca_flags"]
+    assert datasets.DATASET_ORDER == [
+        "equities", "indices", "reference", "ca_flags", "sector_industry",
+    ]
 
 
 def test_equities_normalizer_source_bound_via_partial():
@@ -56,7 +58,28 @@ def test_manifest_names_are_unique():
 def test_all_specs_follows_dataset_order():
     assert datasets.all_specs() == [
         datasets.EQUITIES, datasets.INDICES, datasets.REFERENCE, datasets.CA_FLAGS,
+        datasets.SECTOR_INDUSTRY,
     ]
+
+
+def test_sector_industry_spec_fields():
+    s = datasets.SECTOR_INDUSTRY
+    assert s.key == "sector_industry"
+    assert s.file_prefix == "sector_industry"
+    assert s.base_dir == config.SECTOR_DIR
+    assert s.source_label == "nse-sector"
+    assert s.manifest_name == "sector_industry"
+    assert s.schema_version == 1
+    assert s.derived is True  # kept out of the OHLC fetch loop + continuity check
+    assert datasets.DATASETS["sector_industry"] is s
+    # fetched inside the builder, never via the run_daily Fetcher path
+    with pytest.raises(RuntimeError, match="derived dataset has no fetcher"):
+        s.make_fetcher()
+
+
+def test_sector_industry_registered_in_builders():
+    from pipeline import cli
+    assert cli.builders.BUILDERS["sector_industry"] is cli.builders.build_sector_industry
 
 
 def test_derived_defaults_false_for_existing_specs():
