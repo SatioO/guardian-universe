@@ -33,7 +33,7 @@ use std::time::Instant;
 
 use fundamentals_core::instance::extract_instance_info;
 use fundamentals_core::xbrl_integrated::{meta_from_iso_period_end, parse_integrated_xbrl};
-use fundamentals_core::{SectorKind, StatementBasis};
+use fundamentals_core::StatementBasis;
 
 use crate::bse::BseFilingSource;
 use crate::gate::gate1;
@@ -41,7 +41,7 @@ use crate::http::PoliteClient;
 use crate::output::{read_parquet, sort_rows, write_parquet};
 use crate::rows::{build_row, derive_ttm_eps, FundRow};
 use crate::source::{DiscoveryWindow, FilingRef, SourceRegistry};
-use crate::state::ProducerState;
+use crate::state::{Outcome, ProducerState};
 use crate::universe::{seed_universe, Universe};
 
 /// Output filenames. `fundamentals_all.parquet` matches the Python pipeline's
@@ -80,8 +80,17 @@ pub struct RunSummary {
     pub fetched: usize,
     pub fetch_errors: Vec<String>,
     pub parse_errors: Vec<String>,
-    pub skipped_non_general: Vec<String>,
+    /// Phase 3: bank/NBFC/insurance are parsed; the only sector skip left is
+    /// "no recognisable sector fingerprint" — still never guessed (D6).
+    pub skipped_unclassified: Vec<String>,
+    /// Rows published under the universe key despite an instance-ISIN
+    /// mismatch (scrip-anchored; both ISINs recorded in the row's dq_flags).
+    pub identity_flagged: Vec<String>,
     pub gate_blocked: Vec<String>,
+    /// New rows per sector_kind this run (coverage disclosure).
+    pub rows_by_sector: BTreeMap<String, usize>,
+    /// Processed entries invalidated by a state-schema migration this run.
+    pub state_migration_invalidated: usize,
     pub rows_flagged: usize,
     pub rows_new_or_updated: usize,
     pub rows_total: usize,
@@ -97,6 +106,62 @@ pub fn in_filing_season(iso_date: &str) -> bool {
     let month = iso_date.get(5..7).and_then(|m| m.parse::<u32>().ok());
     let day = iso_date.get(8..10).and_then(|d| d.parse::<u32>().ok());
     matches!((month, day), (Some(m), Some(d)) if matches!(m, 1 | 4 | 7 | 10) && (5..=31).contains(&d))
+}
+
+/// Normalize an ISIN for comparison: uppercase + letter-O → digit-0. The
+/// instance's ISIN fact is hand-typed in practice; O↔0 is the observed
+/// confusion class (first full run: `INEOFHS…` vs `INE0FHS…`, `INEONT9…` vs
+/// `INE0NT9…`). Both sides get the same mapping, so two ISINs compare equal
+/// after normalization only when they differ exactly by O↔0 — the case we
+/// want to accept. (Two distinct real securities differing only by O↔0 in
+/// the same position do not occur; the check digit would differ too.)
+fn normalize_isin(isin: &str) -> String {
+    isin.trim().to_ascii_uppercase().replace('O', "0")
+}
+
+/// Decide what to do when the instance's own ISIN disagrees with the
+/// universe key. Identity is ANCHORED by the BSE scrip code at discovery —
+/// the instance ISIN is a cross-check, not the primary key.
+///
+/// Returns:
+/// - `Ok(None)` — identities agree (raw or after O↔0 normalization): clean.
+/// - `Ok(Some(flag))` — residual mismatch, but the instance's own ScripCode
+///   fact matches the discovery scrip AND both ISINs share the 9-char issuer
+///   prefix (the observed corporate-action pattern: same issuer, new
+///   security serial + check digit — e.g. `INE745G01035` → `INE745G01043`).
+///   Publish under the universe key, carrying both ISINs in `dq_flags`.
+/// - `Err(reason)` — unanchorable (scrip mismatch/absent, or different
+///   issuer): skip, never publish a row we cannot anchor (D6 honesty).
+fn resolve_identity(
+    instance_isin: Option<&str>,
+    universe_key: &str,
+    instance_scrip: Option<&str>,
+    native_id: &str,
+) -> Result<Option<String>, String> {
+    let Some(instance_isin) = instance_isin else {
+        return Ok(None); // no ISIN fact → nothing to cross-check (as before)
+    };
+    if instance_isin == universe_key {
+        return Ok(None);
+    }
+    let norm_instance = normalize_isin(instance_isin);
+    let norm_universe = normalize_isin(universe_key);
+    if norm_instance == norm_universe {
+        return Ok(None); // obvious O↔0 typo in the filing's ISIN fact
+    }
+    let scrip_anchored = instance_scrip.map(|s| s.trim() == native_id.trim()).unwrap_or(false);
+    let same_issuer = norm_instance.len() >= 9
+        && norm_universe.len() >= 9
+        && norm_instance[..9] == norm_universe[..9];
+    if scrip_anchored && same_issuer {
+        return Ok(Some(format!(
+            "identity_isin_mismatch(instance={instance_isin},universe={universe_key})"
+        )));
+    }
+    Err(format!(
+        "instance ISIN {instance_isin} != universe key {universe_key} \
+         (scrip_anchored={scrip_anchored}, same_issuer={same_issuer}) — skipped"
+    ))
 }
 
 /// Build the default source registry. This is the ONE place concrete source
@@ -137,6 +202,19 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
     let existing = read_parquet(&parquet_path)?;
     let previously_covered: HashSet<String> =
         existing.iter().map(|r| r.instrument_key.clone()).collect();
+
+    // Phase-3 state migration (v1 → v2): invalidate exactly the processed
+    // entries of symbols with NO published rows — the D6 non-general skips
+    // plus the identity/parse skips — so this run re-ingests that backlog
+    // without re-fetching a single already-published general filing.
+    summary.state_migration_invalidated = state.migrate(&previously_covered);
+    if summary.state_migration_invalidated > 0 {
+        eprintln!(
+            "      state migrated to v{}: {} processed entries invalidated for re-ingest",
+            crate::state::STATE_VERSION,
+            summary.state_migration_invalidated
+        );
+    }
 
     // ── 1. Universe seed (2 bulk requests) + canary ───────────────────────────
     eprintln!("[1/5] seeding universe (BSE scrip master ∪ NSE EQUITY_L)…");
@@ -333,42 +411,52 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
             Ok(info) => info,
             Err(e) => {
                 summary.parse_errors.push(format!("{}: {e}", r.company_name));
-                state.symbol_mut(&key).processed.insert(r.dedup_key());
+                state.symbol_mut(&key).record(&r.dedup_key(), Outcome::ParseError);
                 continue;
             }
         };
 
         // Cross-check the instance's own ISIN against the universe key.
-        if let Some(instance_isin) = info.isin.as_deref() {
-            if instance_isin != key {
-                summary.parse_errors.push(format!(
-                    "{}: instance ISIN {} != universe key {} — skipped",
-                    r.company_name, instance_isin, key
-                ));
-                state.symbol_mut(&key).processed.insert(r.dedup_key());
+        // Identity is anchored by the BSE scrip code at discovery; the ISIN
+        // fact inside the instance is issuer-typed free text in practice
+        // (first-run findings: O↔0 typos, stale pre-corporate-action ISINs).
+        let identity_flag = match resolve_identity(
+            info.isin.as_deref(),
+            &key,
+            info.scrip_code.as_deref(),
+            &r.native_id,
+        ) {
+            Ok(flag) => flag,
+            Err(reason) => {
+                summary.parse_errors.push(format!("{}: {reason}", r.company_name));
+                state.symbol_mut(&key).record(&r.dedup_key(), Outcome::IdentityMismatch);
                 continue;
             }
+        };
+        if let Some(flag) = &identity_flag {
+            summary
+                .identity_flagged
+                .push(format!("{} {}", r.company_name, flag));
         }
 
-        // Phase-1 scope: general sector only (design D6). Bank / NBFC /
-        // insurance instances are flagged + skipped, never mis-parsed.
-        let sector = info.sector_kind;
-        if sector != Some(SectorKind::General) {
-            summary.skipped_non_general.push(format!(
-                "{} [{}]",
-                r.company_name,
-                sector.map(|s| s.as_str()).unwrap_or("unclassified")
-            ));
-            state.symbol_mut(&key).processed.insert(r.dedup_key());
+        // Phase 3: bank / NBFC / insurance route through the app's vendored
+        // per-sector builders. The ONLY remaining sector skip is "no
+        // recognisable fingerprint" — never guessed (design D6).
+        let Some(sector) = info.sector_kind else {
+            summary
+                .skipped_unclassified
+                .push(r.company_name.clone());
+            state
+                .symbol_mut(&key)
+                .record(&r.dedup_key(), Outcome::SkippedUnclassified);
             continue;
-        }
-        let sector = SectorKind::General;
+        };
 
         let Some(period_end) = info.quarter_end.clone().or_else(|| info.fy_end.clone()) else {
             summary
                 .parse_errors
                 .push(format!("{}: no OneD/FourD context dates", r.company_name));
-            state.symbol_mut(&key).processed.insert(r.dedup_key());
+            state.symbol_mut(&key).record(&r.dedup_key(), Outcome::ParseError);
             continue;
         };
         let basis = info.basis.or(r.basis_hint).unwrap_or_default();
@@ -378,7 +466,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
             Ok(v) => v,
             Err(e) => {
                 summary.parse_errors.push(format!("{}: {e}", r.company_name));
-                state.symbol_mut(&key).processed.insert(r.dedup_key());
+                state.symbol_mut(&key).record(&r.dedup_key(), Outcome::ParseError);
                 continue;
             }
         };
@@ -409,11 +497,20 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
             }
         }
 
+        let mut published_any = false;
         for (mut row, duration) in candidate_rows {
             let outcome = gate1(&row, duration, mcap);
             if outcome.blocks.is_empty() {
-                if !outcome.flags.is_empty() {
-                    row.dq_flags = outcome.flags.join(";");
+                // Row-level flags = Gate-1/Gate-3 flags + the identity flag
+                // (both ISINs recorded in-band so every consumer sees them).
+                let mut flags = outcome.flags;
+                if let Some(f) = &identity_flag {
+                    flags.push(f.clone());
+                    flags.sort();
+                    flags.dedup();
+                }
+                if !flags.is_empty() {
+                    row.dq_flags = flags.join(";");
                     summary.rows_flagged += 1;
                     eprintln!(
                         "      flagged (published): {} {} {}: {}",
@@ -425,6 +522,8 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
                     sym_state.last_period_end = Some(row.period_end.clone());
                     sym_state.last_basis = Some(row.basis.clone());
                 }
+                *summary.rows_by_sector.entry(row.sector_kind.clone()).or_default() += 1;
+                published_any = true;
                 new_rows.push(row);
             } else {
                 let reasons: Vec<String> = outcome.blocks.iter().map(|b| b.reason()).collect();
@@ -438,7 +537,10 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
             }
         }
 
-        state.symbol_mut(&key).processed.insert(r.dedup_key());
+        state.symbol_mut(&key).record(
+            &r.dedup_key(),
+            if published_any { Outcome::Published } else { Outcome::GateBlocked },
+        );
     }
 
     // ALL-failed tripwire: per-symbol isolation must never hide a systemic
@@ -579,7 +681,69 @@ mod tests {
             fields_resolved_pct: 1.0,
             dq_flags: String::new(),
             is_audited: true,
+            ..Default::default()
         }
+    }
+
+    // ── ISIN identity resolution (Phase 3, first-run findings) ──────────────
+
+    #[test]
+    fn identity_exact_match_is_clean() {
+        assert_eq!(
+            resolve_identity(Some("INE690A01028"), "INE690A01028", Some("517506"), "517506"),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn identity_no_instance_isin_is_clean() {
+        assert_eq!(resolve_identity(None, "INE690A01028", None, "517506"), Ok(None));
+    }
+
+    #[test]
+    fn identity_o_zero_typo_normalizes_clean() {
+        // Real first-run cases: Deep Industries, Netweb Technologies.
+        assert_eq!(
+            resolve_identity(Some("INEOFHS01024"), "INE0FHS01024", Some("570005"), "570005"),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_identity(Some("INEONT901020"), "INE0NT901020", Some("543945"), "543945"),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn identity_scrip_anchored_same_issuer_publishes_flagged() {
+        // Real first-run case: MCX — same issuer prefix INE745G01, new
+        // security serial (corporate action), scrip anchor matches.
+        let out = resolve_identity(Some("INE745G01035"), "INE745G01043", Some("534091"), "534091");
+        let flag = out.expect("must publish").expect("must carry a flag");
+        assert!(flag.starts_with("identity_isin_mismatch("), "flag = {flag}");
+        assert!(flag.contains("INE745G01035") && flag.contains("INE745G01043"));
+        assert!(!flag.contains(';'), "flag must stay a single ';'-joined token");
+    }
+
+    #[test]
+    fn identity_mismatch_without_scrip_anchor_skips() {
+        // Same issuer but the instance's own ScripCode disagrees (or is
+        // absent) → cannot anchor → skip.
+        assert!(resolve_identity(Some("INE745G01035"), "INE745G01043", Some("999999"), "534091")
+            .is_err());
+        assert!(resolve_identity(Some("INE745G01035"), "INE745G01043", None, "534091").is_err());
+    }
+
+    #[test]
+    fn identity_different_issuer_skips_even_with_scrip_anchor() {
+        // A misfiled document (another company's instance under this scrip
+        // row) must never publish under this key.
+        assert!(resolve_identity(Some("INE117A01022"), "INE745G01043", Some("534091"), "534091")
+            .is_err());
+    }
+
+    #[test]
+    fn normalize_isin_maps_o_to_zero_and_uppercases() {
+        assert_eq!(normalize_isin(" ineOfhs01024 "), "INE0FHS01024");
     }
 
     #[test]

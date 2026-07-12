@@ -1198,7 +1198,7 @@ recovery is never needed just to rehearse.
    it, when) — a real recovery is a significant operational event, not a
    routine action.
 
-## P5 Phase 2: fundamentals-daily (Rust producer → shared publish)
+## P5 Phases 2+3: fundamentals-daily (Rust producer → shared publish)
 
 `fundamentals-daily.yml` runs the Rust producer (`fundamentals/`) nightly at
 20:30 IST Mon–Fri and publishes `fundamentals_all.parquet` into the SAME
@@ -1228,3 +1228,22 @@ concurrency group with data-daily, so two publishes can never interleave.
   --out /tmp/fnd` from `fundamentals/` (never point `--out` at
   `pipeline/data/fundamentals` locally unless you intend to merge into the
   synced store).
+- **Phase 3 (sector parsers):** bank / NBFC / insurance instances route
+  through the app's vendored per-sector builders and publish rows with the
+  nullable sector-union columns (`interest_earned`, `net_interest_income`,
+  `gross_npa_pct`, premium lines, …). The only remaining sector skip is an
+  unclassifiable fingerprint (`skipped_unclassified` — still design D6:
+  never guess). The state file is **v2** (`version: 2`): every processed
+  dedup key records its outcome (`published` / `skipped_unclassified` /
+  `identity_mismatch` / `parse_error` / `gate_blocked`) so future bumps can
+  invalidate one class only. On the first Phase-3 run over a v1 state the
+  producer migrates automatically — invalidating exactly the entries of
+  symbols with no published rows (the Phase-2 non-general backlog) and
+  re-fetching only those; already-published general filings are not
+  re-fetched. Instance-ISIN mismatches: O↔0 typos normalize silently; a
+  scrip-anchored same-issuer mismatch (corporate-action ISIN change)
+  publishes under the universe key with `identity_isin_mismatch(...)` in
+  `dq_flags`; anything unanchorable is skipped. No workflow change: same
+  parquet file, same state asset, nullable-column schema evolution (the
+  producer reads pre-Phase-3 parquets leniently; clients read by name and
+  fail closed on NULL).

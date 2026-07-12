@@ -45,6 +45,29 @@ pub fn schema() -> Schema {
         f64_null("tax"),
         f64_null("net_profit"),
         f64_null("eps"),
+        // ── Phase-3 sector union (nullable; NULL for non-applicable sectors,
+        // NULL on every general row). Appending nullable columns is the
+        // non-breaking parquet evolution path: the client reads by name and
+        // fails closed (missing value → excluded), never crashes.
+        f64_null("total_income"),
+        f64_null("interest_earned"),
+        f64_null("net_interest_income"),
+        f64_null("nim_pct"),
+        f64_null("interest_expended"),
+        f64_null("operating_expenses"),
+        f64_null("pre_provision_operating_profit"),
+        f64_null("provisions_and_contingencies"),
+        f64_null("gross_npa_pct"),
+        f64_null("net_npa_pct"),
+        f64_null("impairment_on_financial_instruments"),
+        f64_null("gross_stage3_pct"),
+        f64_null("gross_premium_income"),
+        f64_null("net_premium_income"),
+        f64_null("investment_income"),
+        f64_null("net_commission"),
+        f64_null("benefits_paid"),
+        f64_null("combined_ratio_pct"),
+        f64_null("solvency_ratio"),
         f64_null("equity"),
         f64_null("total_debt"),
         f64_null("cash"),
@@ -84,7 +107,7 @@ fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
     let mut s_basis = StringBuilder::new();
     let mut b_restated = BooleanBuilder::new();
     let mut s_sector = StringBuilder::new();
-    let mut f: Vec<Float64Builder> = (0..19).map(|_| Float64Builder::new()).collect();
+    let mut f: Vec<Float64Builder> = (0..38).map(|_| Float64Builder::new()).collect();
     let mut s_margin = StringBuilder::new();
     let mut s_as_of = StringBuilder::new();
     let mut s_channel = StringBuilder::new();
@@ -112,6 +135,25 @@ fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
             r.tax,
             r.net_profit,
             r.eps,
+            r.total_income,
+            r.interest_earned,
+            r.net_interest_income,
+            r.nim_pct,
+            r.interest_expended,
+            r.operating_expenses,
+            r.pre_provision_operating_profit,
+            r.provisions_and_contingencies,
+            r.gross_npa_pct,
+            r.net_npa_pct,
+            r.impairment_on_financial_instruments,
+            r.gross_stage3_pct,
+            r.gross_premium_income,
+            r.net_premium_income,
+            r.investment_income,
+            r.net_commission,
+            r.benefits_paid,
+            r.combined_ratio_pct,
+            r.solvency_ratio,
             r.equity,
             r.total_debt,
             r.cash,
@@ -156,6 +198,25 @@ fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
         next_f(), // tax
         next_f(), // net_profit
         next_f(), // eps
+        next_f(), // total_income
+        next_f(), // interest_earned
+        next_f(), // net_interest_income
+        next_f(), // nim_pct
+        next_f(), // interest_expended
+        next_f(), // operating_expenses
+        next_f(), // pre_provision_operating_profit
+        next_f(), // provisions_and_contingencies
+        next_f(), // gross_npa_pct
+        next_f(), // net_npa_pct
+        next_f(), // impairment_on_financial_instruments
+        next_f(), // gross_stage3_pct
+        next_f(), // gross_premium_income
+        next_f(), // net_premium_income
+        next_f(), // investment_income
+        next_f(), // net_commission
+        next_f(), // benefits_paid
+        next_f(), // combined_ratio_pct
+        next_f(), // solvency_ratio
         next_f(), // equity
         next_f(), // total_debt
         next_f(), // cash
@@ -234,6 +295,15 @@ fn batch_to_rows(batch: &RecordBatch) -> Result<Vec<FundRow>, String> {
             .ok_or_else(|| format!("missing column {name}"))?
             .as_primitive::<Float64Type>())
     };
+    // Nullable column that may be ABSENT in accumulated parquets written by
+    // an older producer (schema evolution: the Phase-2 file predates the
+    // sector-union columns). Absent column → every row reads None; the next
+    // write emits the full current schema.
+    let fcol_opt = |name: &str| -> Option<&arrow_array::PrimitiveArray<Float64Type>> {
+        batch
+            .column_by_name(name)
+            .map(|c| c.as_primitive::<Float64Type>())
+    };
     let b = |name: &str| -> Result<&arrow_array::BooleanArray, String> {
         Ok(batch
             .column_by_name(name)
@@ -264,10 +334,22 @@ fn batch_to_rows(batch: &RecordBatch) -> Result<Vec<FundRow>, String> {
     for n in numeric_names {
         numeric.push(fcol(n)?);
     }
+    // Phase-3 sector union: read leniently (may be absent in older files).
+    let sector_names = [
+        "total_income", "interest_earned", "net_interest_income", "nim_pct",
+        "interest_expended", "operating_expenses", "pre_provision_operating_profit",
+        "provisions_and_contingencies", "gross_npa_pct", "net_npa_pct",
+        "impairment_on_financial_instruments", "gross_stage3_pct",
+        "gross_premium_income", "net_premium_income", "investment_income",
+        "net_commission", "benefits_paid", "combined_ratio_pct", "solvency_ratio",
+    ];
+    let sector_cols: Vec<Option<&arrow_array::PrimitiveArray<Float64Type>>> =
+        sector_names.iter().map(|n| fcol_opt(n)).collect();
 
     let mut rows = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
         let n = |j: usize| opt(numeric[j], i);
+        let sn = |j: usize| sector_cols[j].and_then(|arr| opt(arr, i));
         rows.push(FundRow {
             instrument_key: instrument_key.value(i).to_string(),
             symbol: symbol.value(i).to_string(),
@@ -287,6 +369,25 @@ fn batch_to_rows(batch: &RecordBatch) -> Result<Vec<FundRow>, String> {
             tax: n(7),
             net_profit: n(8),
             eps: n(9),
+            total_income: sn(0),
+            interest_earned: sn(1),
+            net_interest_income: sn(2),
+            nim_pct: sn(3),
+            interest_expended: sn(4),
+            operating_expenses: sn(5),
+            pre_provision_operating_profit: sn(6),
+            provisions_and_contingencies: sn(7),
+            gross_npa_pct: sn(8),
+            net_npa_pct: sn(9),
+            impairment_on_financial_instruments: sn(10),
+            gross_stage3_pct: sn(11),
+            gross_premium_income: sn(12),
+            net_premium_income: sn(13),
+            investment_income: sn(14),
+            net_commission: sn(15),
+            benefits_paid: sn(16),
+            combined_ratio_pct: sn(17),
+            solvency_ratio: sn(18),
             equity: n(10),
             total_debt: n(11),
             cash: n(12),
@@ -344,6 +445,7 @@ mod tests {
             fields_resolved_pct: 1.0,
             dq_flags: String::new(),
             is_audited: true,
+            ..Default::default()
         };
         let mut r2 = r1.clone();
         r2.fiscal_quarter = "FY".into();
@@ -402,6 +504,83 @@ mod tests {
         // FY sorts before Q4 at the same period_end (lexical, stable).
         assert_eq!(rows[1].fiscal_quarter, "FY");
         assert_eq!(rows[2].fiscal_quarter, "Q4");
+    }
+
+    #[test]
+    fn sector_union_columns_round_trip() {
+        // A bank row's union fields must survive write→read exactly; the
+        // general rows in the same file keep them all None.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fundamentals_all.parquet");
+        let mut rows = sample_rows();
+        rows[0].sector_kind = "bank".into();
+        rows[0].total_income = Some(120000.0);
+        rows[0].interest_earned = Some(87182.5);
+        rows[0].interest_expended = Some(45220.44);
+        rows[0].net_interest_income = Some(41962.06);
+        rows[0].gross_npa_pct = Some(1.33);
+        rows[0].net_npa_pct = Some(0.43);
+        rows[1].sector_kind = "insurance".into();
+        rows[1].gross_premium_income = Some(27938.86);
+        rows[1].net_premium_income = Some(27683.79);
+        rows[1].benefits_paid = Some(16254.62);
+        sort_rows(&mut rows);
+        write_parquet(&path, &rows).unwrap();
+        let back = read_parquet(&path).unwrap();
+        assert_eq!(rows, back);
+        let general: Vec<_> = back.iter().filter(|r| r.sector_kind == "general").collect();
+        assert!(!general.is_empty());
+        for g in general {
+            assert!(g.interest_earned.is_none() && g.gross_premium_income.is_none());
+        }
+    }
+
+    #[test]
+    fn reading_pre_phase3_parquet_yields_null_sector_columns() {
+        // Simulate the accumulated Phase-2 file (written before the sector
+        // union existed) by projecting those columns away, then read it with
+        // the current reader: absent column → None, never an error.
+        use parquet::arrow::ArrowWriter;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fundamentals_all.parquet");
+        let mut rows = sample_rows();
+        rows[0].gross_npa_pct = Some(9.9); // would be dropped by projection
+        sort_rows(&mut rows);
+        let batch = to_batch(&rows).unwrap();
+        let sector_cols: std::collections::HashSet<&str> = [
+            "total_income", "interest_earned", "net_interest_income", "nim_pct",
+            "interest_expended", "operating_expenses", "pre_provision_operating_profit",
+            "provisions_and_contingencies", "gross_npa_pct", "net_npa_pct",
+            "impairment_on_financial_instruments", "gross_stage3_pct",
+            "gross_premium_income", "net_premium_income", "investment_income",
+            "net_commission", "benefits_paid", "combined_ratio_pct", "solvency_ratio",
+        ]
+        .into_iter()
+        .collect();
+        let keep: Vec<usize> = batch
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !sector_cols.contains(f.name().as_str()))
+            .map(|(i, _)| i)
+            .collect();
+        let old_batch = batch.project(&keep).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, old_batch.schema(), None).unwrap();
+        w.write(&old_batch).unwrap();
+        w.close().unwrap();
+
+        let back = read_parquet(&path).unwrap();
+        assert_eq!(back.len(), rows.len());
+        for r in &back {
+            assert!(r.gross_npa_pct.is_none(), "absent column must read as None");
+            assert!(r.total_income.is_none());
+            assert!(r.solvency_ratio.is_none());
+        }
+        // Everything that WAS in the old schema still round-trips.
+        assert_eq!(back[0].instrument_key, rows[0].instrument_key);
+        assert_eq!(back[0].revenue, rows[0].revenue);
     }
 
     #[test]

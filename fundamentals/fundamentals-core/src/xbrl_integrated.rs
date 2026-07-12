@@ -673,8 +673,33 @@ where
     let pre_provision_operating_profit = cr("OperatingProfitBeforeProvisionAndContingencies", ctx);
     let provisions_and_contingencies   = cr("ProvisionsOtherThanTaxAndContingencies", ctx);
 
-    // PercentageOfGrossNpa is a raw percentage — NOT scaled by 1e7.
-    let gross_npa_pct = fact("PercentageOfGrossNpa", ctx);
+    // NPA ratios. Phase-3 divergences from the vendored-verbatim app builder
+    // (guardian-universe owns this copy now; each verified on live 2026
+    // IFBanking instances — SBI/ICICI/Canara/Federal/Kotak/Indian Bank):
+    // - The in-capmkt percentage items are XBRL percentItemType FRACTIONS,
+    //   not raw percents: SBI files PercentageOfGrossNpa 0.0149 (= 1.49%),
+    //   and the cross-check element PercentageOfShareHeldByGovernmentOfIndia
+    //   carries 0.5503/0.6293/0.7384 for SBI/Canara/Indian Bank — exactly
+    //   their known ~55%/63%/74% stakes. The app's raw-percent reading was
+    //   never exercised (its fixture holds only 0-placeholders). Scale x100.
+    // - A literal `0` is an UNFILLED placeholder, not a real ratio:
+    //   consolidated bank filings (e.g. the HDFCBANK fixture) stuff 0 into
+    //   both NPA elements while the real ratios live in the standalone
+    //   filing. No operating lender has a true 0.00% gross NPA — publishing
+    //   the placeholder would be confidently wrong, so 0 → None.
+    // - Fail-closed plausibility window: after scaling, accept only
+    //   (0, 50]% — a non-compliant raw-percent filer (e.g. "1.41") would
+    //   otherwise surface as 141%. Out-of-window → None, never a guess.
+    // - `PercentageOfNpa` (the IFBanking taxonomy's net-NPA element) feeds
+    //   `net_npa_pct`.
+    let npa = |name: &str| {
+        fact(name, ctx)
+            .filter(|v| *v > 0.0)
+            .map(|v| v * 100.0)
+            .filter(|pct| *pct <= 50.0)
+    };
+    let gross_npa_pct = npa("PercentageOfGrossNpa");
+    let net_npa_pct = npa("PercentageOfNpa");
 
     let sector = SectorLineItems::Bank(BankLines {
         total_income,
@@ -687,7 +712,7 @@ where
         pre_provision_operating_profit,
         provisions_and_contingencies,
         gross_npa_pct,
-        net_npa_pct: None, // not in XBRL
+        net_npa_pct,
     });
 
     let core = NormalizedCore {
@@ -842,10 +867,42 @@ where
     };
 
     // ── Profit ────────────────────────────────────────────────────────────────
+    // Sector line item: the app's original mapping (life: surplus transferred
+    // to the shareholders' account; general: operating profit) — retained as
+    // the sector-specific line.
     let shareholders_net_profit = if is_life {
         cr("TransferredToShareholdersAccount", ctx)
     } else {
         cr("OperatingProfitOrLoss", ctx)
+    };
+
+    // Core P&L. Phase-3 divergence from the vendored-verbatim app builder,
+    // verified on the SBILIFE/ICICIGI fixtures + a live 2026 LIC instance:
+    // - Life instances DO carry a true shareholder PAT
+    //   (`ProfitLossAfterTaxAndExtraordinaryItems`): LIC Q4 FY26 = 23,467.18
+    //   cr — exactly the published PAT — while the app's
+    //   `TransferredToShareholdersAccount` (22,192.77 cr) is the surplus
+    //   transfer, which for life insurers concentrates in Q4 (SBILIFE fixture:
+    //   transfer 2,363.62 vs true Q4 PAT 804.64; the filed EPS 8.02 * ~100 cr
+    //   shares corroborates the PAT reading, not the transfer).
+    // - General insurance carries `ProfitLossAfterTax` (546.56 vs operating
+    //   profit 545.85) plus an EXACT pbt − tax = pat identity:
+    //   ProfitOrLossBeforeTax 718.20 − ProvisionForTax 171.64 = 546.56.
+    // - Life `ProvisionForTax` belongs to the policyholders' revenue account
+    //   (SBILIFE: 51.21 vs implied shareholder tax ~11; LIC: −9,068 vs ~−10),
+    //   so life tax stays None rather than publishing the wrong account's tax.
+    let pbt = if is_life {
+        cr("ProfitLossBeforeTax", ctx)
+    } else {
+        cr("ProfitOrLossBeforeTax", ctx)
+    };
+    let tax = if is_life { None } else { cr("ProvisionForTax", ctx) };
+    let net_profit = if is_life {
+        cr("ProfitLossAfterTaxAndExtraordinaryItems", ctx)
+            .or_else(|| cr("ProfitLossAfterTaxBeforeExtraordinaryItems", ctx))
+            .or_else(|| cr("TransferredToShareholdersAccount", ctx))
+    } else {
+        cr("ProfitLossAfterTax", ctx).or_else(|| cr("OperatingProfitOrLoss", ctx))
     };
 
     // ── Combined ratio (general only): (IncurredClaims + OperatingExpenses) / NetPremiumWritten * 100
@@ -876,9 +933,9 @@ where
         other_income:           investment_income,
         interest:               None,
         depreciation:           None,
-        pbt:                    None,
-        tax:                    None,
-        net_profit:             shareholders_net_profit,
+        pbt,
+        tax,
+        net_profit,
         eps,
     };
 
@@ -909,10 +966,10 @@ where
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 //
-// Vendored from the app verbatim, with two changes:
-// - fixture paths are `../fixtures/…` (fixtures live at the crate root);
-// - SBILIFE / ICICIGI insurance-fixture tests omitted (fixtures not copied —
-//   ~1.1 MB; insurance rows are out of scope for the Phase-1 producer).
+// Vendored from the app verbatim, with one change: fixture paths are
+// `../fixtures/…` (fixtures live at the crate root). The SBILIFE / ICICIGI
+// insurance fixtures + tests, omitted in Phase 1, are restored for Phase 3
+// (D6: element names confirmed per sector before rows ship unflagged).
 
 #[cfg(test)]
 mod tests {
@@ -1129,6 +1186,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hdfc_consolidated_zero_npa_placeholders_are_none() {
+        // The consolidated HDFCBANK fixture stuffs literal 0 into both NPA
+        // elements (the real ratios live in the standalone filing). A 0 is a
+        // placeholder, never a real lender ratio → must map to None, not 0.0.
+        let (q, fy, _) = parse_integrated_xbrl(HDFC, &hdfc_meta()).unwrap();
+        for p in [q.unwrap(), fy.unwrap()] {
+            match &p.sector {
+                SectorLineItems::Bank(b) => {
+                    assert!(b.gross_npa_pct.is_none(), "0 placeholder must be None");
+                    assert!(b.net_npa_pct.is_none(), "0 placeholder must be None");
+                }
+                _ => panic!("expected Bank variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn bank_nonzero_npa_fractions_scale_to_percent() {
+        // Real-world shape (SBI standalone Q4 FY26): XBRL percentItemType
+        // FRACTIONS — 0.0149 means 1.49%. Verified against six live 2026
+        // IFBanking instances (see build_bank comment).
+        let xml = r#"<xbrl>
+          <InterestEarned contextRef="OneD">100000000</InterestEarned>
+          <InterestExpended contextRef="OneD">40000000</InterestExpended>
+          <PercentageOfGrossNpa contextRef="OneD">0.0149</PercentageOfGrossNpa>
+          <PercentageOfNpa contextRef="OneD">0.0039</PercentageOfNpa>
+        </xbrl>"#;
+        let (q, _, _) = parse_integrated_xbrl(xml, &hdfc_meta()).unwrap();
+        match &q.unwrap().sector {
+            SectorLineItems::Bank(b) => {
+                assert!((b.gross_npa_pct.unwrap() - 1.49).abs() < 1e-9);
+                assert!((b.net_npa_pct.unwrap() - 0.39).abs() < 1e-9);
+            }
+            _ => panic!("expected Bank variant"),
+        }
+    }
+
+    #[test]
+    fn bank_implausible_npa_is_dropped_not_guessed() {
+        // A non-compliant raw-percent filer ("1.41" meaning 1.41%) would
+        // scale to 141% — fail closed to None rather than publish either
+        // interpretation.
+        let xml = r#"<xbrl>
+          <InterestEarned contextRef="OneD">100000000</InterestEarned>
+          <PercentageOfGrossNpa contextRef="OneD">1.41</PercentageOfGrossNpa>
+        </xbrl>"#;
+        let (q, _, _) = parse_integrated_xbrl(xml, &hdfc_meta()).unwrap();
+        match &q.unwrap().sector {
+            SectorLineItems::Bank(b) => assert!(b.gross_npa_pct.is_none()),
+            _ => panic!("expected Bank variant"),
+        }
+    }
+
     // ── BAJFINANCE (NBFC) ─────────────────────────────────────────────────────
 
     #[test]
@@ -1219,6 +1330,280 @@ mod tests {
         assert!(q.core.margin_equiv_pct.is_none());
         assert!(fy.core.operating_profit_equiv.is_none());
         assert!(fy.core.margin_equiv_pct.is_none());
+    }
+
+    // ── SBILIFE (Life Insurance) ──────────────────────────────────────────────
+
+    const SBILIFE: &str  = include_str!("../fixtures/nse-integrated-sbilife.xml");
+    const ICICIGI: &str  = include_str!("../fixtures/nse-integrated-icicigi.xml");
+
+    fn sbilife_meta() -> IntegratedMeta {
+        IntegratedMeta {
+            period_end:    "2026-03-31".into(),
+            fy_label:      "FY26".into(),
+            quarter_label: "Q4".into(),
+            is_audited:    true,
+            sector_kind:   SectorKind::Insurance,
+            basis:         StatementBasis::Standalone,
+        }
+    }
+
+    fn icicigi_meta() -> IntegratedMeta {
+        IntegratedMeta {
+            period_end:    "2026-03-31".into(),
+            fy_label:      "FY26".into(),
+            quarter_label: "Q4".into(),
+            is_audited:    true,
+            sector_kind:   SectorKind::Insurance,
+            basis:         StatementBasis::Standalone,
+        }
+    }
+
+    #[test]
+    fn sbilife_sector_is_insurance() {
+        let (q, fy, _) = parse_integrated_xbrl(SBILIFE, &sbilife_meta()).unwrap();
+        assert!(matches!(q.unwrap().sector, SectorLineItems::Insurance(_)));
+        assert!(matches!(fy.unwrap().sector, SectorLineItems::Insurance(_)));
+    }
+
+    #[test]
+    fn sbilife_margin_kind_is_uw_margin() {
+        let (q, _, _) = parse_integrated_xbrl(SBILIFE, &sbilife_meta()).unwrap();
+        assert_eq!(q.unwrap().core.margin_kind, MarginKind::UwMargin);
+    }
+
+    #[test]
+    fn sbilife_quarter_net_premium_income() {
+        let (q, _, _) = parse_integrated_xbrl(SBILIFE, &sbilife_meta()).unwrap();
+        let q = q.unwrap();
+        match &q.sector {
+            SectorLineItems::Insurance(ins) => {
+                assert!(
+                    (ins.net_premium_income.unwrap() - 27683.79).abs() < 1.0,
+                    "net_premium_income = {:?}", ins.net_premium_income
+                );
+            }
+            _ => panic!("expected Insurance variant"),
+        }
+    }
+
+    #[test]
+    fn sbilife_quarter_gross_premium_income() {
+        let (q, _, _) = parse_integrated_xbrl(SBILIFE, &sbilife_meta()).unwrap();
+        let q = q.unwrap();
+        match &q.sector {
+            SectorLineItems::Insurance(ins) => {
+                assert!(
+                    (ins.gross_premium_income.unwrap() - 27938.86).abs() < 1.0,
+                    "gross_premium_income = {:?}", ins.gross_premium_income
+                );
+            }
+            _ => panic!("expected Insurance variant"),
+        }
+    }
+
+    #[test]
+    fn sbilife_quarter_benefits_paid() {
+        let (q, _, _) = parse_integrated_xbrl(SBILIFE, &sbilife_meta()).unwrap();
+        let q = q.unwrap();
+        match &q.sector {
+            SectorLineItems::Insurance(ins) => {
+                assert!(
+                    (ins.benefits_paid.unwrap() - 16254.62).abs() < 1.0,
+                    "benefits_paid = {:?}", ins.benefits_paid
+                );
+            }
+            _ => panic!("expected Insurance variant"),
+        }
+    }
+
+    #[test]
+    fn sbilife_quarter_shareholders_net_profit() {
+        let (q, _, _) = parse_integrated_xbrl(SBILIFE, &sbilife_meta()).unwrap();
+        let q = q.unwrap();
+        match &q.sector {
+            SectorLineItems::Insurance(ins) => {
+                assert!(
+                    (ins.shareholders_net_profit.unwrap() - 2363.62).abs() < 1.0,
+                    "shareholders_net_profit = {:?}", ins.shareholders_net_profit
+                );
+            }
+            _ => panic!("expected Insurance variant"),
+        }
+    }
+
+    #[test]
+    fn sbilife_quarter_core_net_profit_is_true_pat() {
+        // Phase-3 divergence from the app: core net_profit is the true
+        // shareholder PAT (ProfitLossAfterTaxAndExtraordinaryItems 804.64),
+        // NOT the surplus transferred to shareholders (2363.62 — an annual
+        // transfer concentrated in Q4). The filed EPS of 8.02 on ~100 cr
+        // shares corroborates the PAT reading.
+        let (q, _, _) = parse_integrated_xbrl(SBILIFE, &sbilife_meta()).unwrap();
+        let q = q.unwrap();
+        assert!(
+            (q.core.net_profit.unwrap() - 804.64).abs() < 1.0,
+            "core.net_profit = {:?}", q.core.net_profit
+        );
+    }
+
+    #[test]
+    fn sbilife_quarter_core_pbt_and_no_tax() {
+        let (q, _, _) = parse_integrated_xbrl(SBILIFE, &sbilife_meta()).unwrap();
+        let q = q.unwrap();
+        assert!(
+            (q.core.pbt.unwrap() - 815.78).abs() < 1.0,
+            "core.pbt = {:?}", q.core.pbt
+        );
+        // Life ProvisionForTax is the policyholders' revenue-account tax —
+        // never published as the shareholder tax.
+        assert!(q.core.tax.is_none(), "life shareholder tax must stay None");
+    }
+
+    #[test]
+    fn sbilife_quarter_eps() {
+        // EPS: 8.02 (unscaled, from BasicAndDiluted… element)
+        let (q, _, _) = parse_integrated_xbrl(SBILIFE, &sbilife_meta()).unwrap();
+        let q = q.unwrap();
+        assert!(
+            (q.core.eps.unwrap() - 8.02).abs() < 0.01,
+            "eps = {:?}", q.core.eps
+        );
+    }
+
+    #[test]
+    fn sbilife_combined_ratio_is_none() {
+        // Life insurance has no combined ratio
+        let (q, _, _) = parse_integrated_xbrl(SBILIFE, &sbilife_meta()).unwrap();
+        let q = q.unwrap();
+        match &q.sector {
+            SectorLineItems::Insurance(ins) => {
+                assert!(ins.combined_ratio_pct.is_none(), "life combined_ratio_pct should be None");
+            }
+            _ => panic!("expected Insurance variant"),
+        }
+    }
+
+    #[test]
+    fn sbilife_basis_is_standalone() {
+        let (q, fy, _) = parse_integrated_xbrl(SBILIFE, &sbilife_meta()).unwrap();
+        assert_eq!(q.unwrap().basis, StatementBasis::Standalone);
+        assert_eq!(fy.unwrap().basis, StatementBasis::Standalone);
+    }
+
+    // ── ICICIGI (General Insurance) ───────────────────────────────────────────
+
+    #[test]
+    fn icicigi_sector_is_insurance() {
+        let (q, fy, _) = parse_integrated_xbrl(ICICIGI, &icicigi_meta()).unwrap();
+        assert!(matches!(q.unwrap().sector, SectorLineItems::Insurance(_)));
+        assert!(matches!(fy.unwrap().sector, SectorLineItems::Insurance(_)));
+    }
+
+    #[test]
+    fn icicigi_quarter_net_premium_income() {
+        let (q, _, _) = parse_integrated_xbrl(ICICIGI, &icicigi_meta()).unwrap();
+        let q = q.unwrap();
+        match &q.sector {
+            SectorLineItems::Insurance(ins) => {
+                assert!(
+                    (ins.net_premium_income.unwrap() - 6487.44).abs() < 1.0,
+                    "net_premium_income = {:?}", ins.net_premium_income
+                );
+            }
+            _ => panic!("expected Insurance variant"),
+        }
+    }
+
+    #[test]
+    fn icicigi_quarter_gross_premium_income() {
+        let (q, _, _) = parse_integrated_xbrl(ICICIGI, &icicigi_meta()).unwrap();
+        let q = q.unwrap();
+        match &q.sector {
+            SectorLineItems::Insurance(ins) => {
+                assert!(
+                    (ins.gross_premium_income.unwrap() - 8073.7).abs() < 1.0,
+                    "gross_premium_income = {:?}", ins.gross_premium_income
+                );
+            }
+            _ => panic!("expected Insurance variant"),
+        }
+    }
+
+    #[test]
+    fn icicigi_quarter_benefits_paid_incurred_claims() {
+        let (q, _, _) = parse_integrated_xbrl(ICICIGI, &icicigi_meta()).unwrap();
+        let q = q.unwrap();
+        match &q.sector {
+            SectorLineItems::Insurance(ins) => {
+                assert!(
+                    (ins.benefits_paid.unwrap() - 4099.8).abs() < 1.0,
+                    "benefits_paid (IncurredClaims) = {:?}", ins.benefits_paid
+                );
+            }
+            _ => panic!("expected Insurance variant"),
+        }
+    }
+
+    #[test]
+    fn icicigi_quarter_shareholders_net_profit() {
+        let (q, _, _) = parse_integrated_xbrl(ICICIGI, &icicigi_meta()).unwrap();
+        let q = q.unwrap();
+        match &q.sector {
+            SectorLineItems::Insurance(ins) => {
+                assert!(
+                    (ins.shareholders_net_profit.unwrap() - 545.85).abs() < 1.0,
+                    "shareholders_net_profit = {:?}", ins.shareholders_net_profit
+                );
+            }
+            _ => panic!("expected Insurance variant"),
+        }
+    }
+
+    #[test]
+    fn icicigi_quarter_core_pat_pbt_tax_identity() {
+        // General insurance carries a full shareholder P&L with an EXACT
+        // pbt − tax = pat identity: 718.20 − 171.64 = 546.56.
+        let (q, _, _) = parse_integrated_xbrl(ICICIGI, &icicigi_meta()).unwrap();
+        let q = q.unwrap();
+        let (pbt, tax, np) = (
+            q.core.pbt.expect("pbt"),
+            q.core.tax.expect("tax"),
+            q.core.net_profit.expect("net_profit"),
+        );
+        assert!((pbt - 718.2).abs() < 1.0, "pbt = {pbt}");
+        assert!((tax - 171.64).abs() < 1.0, "tax = {tax}");
+        assert!((np - 546.56).abs() < 1.0, "net_profit = {np}");
+        assert!(((pbt - tax) - np).abs() < 0.5, "identity must hold exactly");
+    }
+
+    #[test]
+    fn icicigi_quarter_eps() {
+        // EPS: 10.97 (unscaled)
+        let (q, _, _) = parse_integrated_xbrl(ICICIGI, &icicigi_meta()).unwrap();
+        let q = q.unwrap();
+        assert!(
+            (q.core.eps.unwrap() - 10.97).abs() < 0.01,
+            "eps = {:?}", q.core.eps
+        );
+    }
+
+    #[test]
+    fn icicigi_combined_ratio_is_some() {
+        // (IncurredClaims + OperatingExpenses) / NetPremiumWritten * 100
+        // = (40998000000 + 60729100000) / 64874400000 * 100 ≈ 156.8
+        let (q, _, _) = parse_integrated_xbrl(ICICIGI, &icicigi_meta()).unwrap();
+        let q = q.unwrap();
+        match &q.sector {
+            SectorLineItems::Insurance(ins) => {
+                let cr = ins.combined_ratio_pct.expect("combined_ratio_pct should be Some");
+                assert!(
+                    (cr - 156.8).abs() < 1.0,
+                    "combined_ratio_pct = {cr}"
+                );
+            }
+            _ => panic!("expected Insurance variant"),
+        }
     }
 
     // ── Malformed XML ─────────────────────────────────────────────────────────
