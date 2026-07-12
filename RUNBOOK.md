@@ -1247,3 +1247,94 @@ concurrency group with data-daily, so two publishes can never interleave.
   parquet file, same state asset, nullable-column schema evolution (the
   producer reads pre-Phase-3 parquets leniently; clients read by name and
   fail closed on NULL).
+
+## P5 Phase 4: fundamentals-backfill (historical quarters + growth columns)
+
+`fundamentals-backfill.yml` (`workflow_dispatch` only) walks the full filing
+history of one hash-mod shard of the covered universe — per-symbol
+`Corp_FinanceResult_ng` `SCRIP_CD=<scrip>&FlagDur=7` discovery (one ~40–80 KB
+request per symbol returns its COMPLETE broadcast history, SOURCE-CONTRACT
+§14) — and fetches every era filing missing from the accumulated parquet.
+Merge semantics are identical to the daily run (existing rows never dropped;
+restatements replace in place), and it publishes into the same manifest under
+the same `data-pipeline-publish` lock.
+
+**Era depth (probed 2026-07-12, §14):** the integrated-filing (in-capmkt) era
+starts with the March-2025 quarter; before that, filings are
+`FourOneUploadDocument/Main_*.xml` instances in BSE's own `in-bse-fin`
+2020-03-31 taxonomy — which the SAME parser handles (identical OneD/FourD
+contexts + local element names; proven on a real RELIANCE Q3-FY25 instance
+with values matching the published results). The default era floor
+`from=2023-04-01` therefore yields **~12–14 quarters + 2–3 FY rows** per
+symbol. Filings broadcast before `from` are skipped WITHOUT fetching and
+recorded per symbol (`BackfillMark.pre_era_skipped`) — never null-published.
+Going deeper than FY24 is an explicit `-f from=…` choice; taxonomy
+generations before 2020 are UNVERIFIED (expect more `parse_errors` /
+`skipped_unclassified`, all outcome-recorded, never guessed).
+
+### Running a backfill campaign
+
+Shards run **sequentially** (they'd serialize on the publish lock anyway, and
+politeness is per-run). Prefer dispatching outside the 20:30-IST daily window
+so the nightly run isn't queued behind a shard.
+
+```bash
+# 1. Smoke first (one tiny slice, ~10 min):
+gh workflow run fundamentals-backfill.yml -f shard_index=0 -f total_shards=4 -f limit=15
+
+# 2. The campaign — one shard at a time, waiting for each to finish:
+for i in 0 1 2 3; do
+  gh workflow run fundamentals-backfill.yml -f shard_index=$i -f total_shards=4
+  sleep 10
+  gh run watch "$(gh run list -w fundamentals-backfill.yml -L1 --json databaseId -q '.[0].databaseId')"
+done
+```
+
+- **Keep `total_shards` constant across the campaign** — sharding is FNV-1a
+  hash-mod over `instrument_key`, so a changed total remaps symbols (safe —
+  `BackfillMark`s are per symbol, not per shard — but it muddies "shard 2 is
+  done" bookkeeping).
+- **Resume:** the producer stops itself cleanly at `--max-runtime-mins 300`
+  (< the 360-min job timeout) and publishes what it got. If the run summary
+  shows `backfill_complete: false` (the workflow emits a warning), re-dispatch
+  the SAME `shard_index` — completed symbols are skipped at zero requests via
+  their `BackfillMark` in `fundamentals_state.json`; only unfinished symbols
+  are re-scanned.
+- **Re-running a completed shard** is a cheap no-op (every symbol
+  short-circuits on its mark; parquet byte-identical → publish skipped).
+- **Deeper era later:** dispatch with an older `-f from=…`; symbols re-scan
+  because their recorded mark's `from` is newer than the requested one, and
+  already-processed filings are still skipped per dedup key — only newly
+  in-era documents are fetched.
+- **Failure modes:** a transient fetch error leaves the symbol unmarked (fully
+  retried on re-dispatch); an HTTP 404 on a historical locator is recorded as
+  `instance_unavailable` (permanent — never re-requested); pre-2020-taxonomy
+  or exotic instances land in `parse_errors` / `skipped_unclassified` with
+  their outcome recorded. All are disclosed in `run_summary.json`.
+
+### Verifying a shard
+
+```bash
+python3 - <<'EOF'
+import duckdb
+con = duckdb.connect()
+print(con.sql("""
+  SELECT symbol,
+         count(*) FILTER (fiscal_quarter != 'FY') AS quarters,
+         min(period_end) AS oldest, max(period_end) AS newest,
+         count(revenue_growth_yoy_pct) AS yoy_populated
+  FROM read_parquet('pipeline/data/fundamentals/fundamentals_all.parquet')
+  GROUP BY symbol ORDER BY quarters DESC LIMIT 20
+"""))
+EOF
+```
+
+Expect covered symbols to gain up to ~12–14 quarter rows;
+`revenue_growth_yoy_pct` populates wherever the year-ago quarter exists
+(first-era quarters stay NULL — correct, not a bug). `ttm_eps_method` says
+how each TTM was derived (`sum4q` = true 4-quarter sum; `fy_eps` = FY-row
+fallback). Growth columns and TTM are derived, recomputed from the full
+history on EVERY producer run (the daily run too) — they carry no state and
+can never go stale. Guard semantics: growth is NULL when the base period is
+missing or ≤ 0 (loss→profit is NULL, never +∞); profit→loss publishes as a
+decline below -100%.

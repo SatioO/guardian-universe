@@ -76,7 +76,17 @@ pub fn schema() -> Schema {
         f64_null("ebitda_annual"),
         f64_null("capital_employed"),
         f64_null("ttm_eps"),
+        // Phase 4: how ttm_eps was derived ("sum4q" | "fy_eps" | "").
+        utf8("ttm_eps_method"),
         f64_null("book_value_per_share"),
+        // ── Phase-4 derived growth (nullable; recomputed every run from the
+        // full history; NULL = inputs missing or base ≤ 0 — client is
+        // fail-closed, so appending them is the non-breaking evolution path).
+        f64_null("revenue_growth_yoy_pct"),
+        f64_null("revenue_growth_qoq_pct"),
+        f64_null("net_profit_growth_yoy_pct"),
+        f64_null("net_profit_growth_qoq_pct"),
+        f64_null("eps_growth_yoy_pct"),
         utf8("as_of"),
         utf8("source_channel"),
         Field::new("fields_resolved_pct", DataType::Float64, false),
@@ -107,8 +117,9 @@ fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
     let mut s_basis = StringBuilder::new();
     let mut b_restated = BooleanBuilder::new();
     let mut s_sector = StringBuilder::new();
-    let mut f: Vec<Float64Builder> = (0..38).map(|_| Float64Builder::new()).collect();
+    let mut f: Vec<Float64Builder> = (0..43).map(|_| Float64Builder::new()).collect();
     let mut s_margin = StringBuilder::new();
+    let mut s_ttm_method = StringBuilder::new();
     let mut s_as_of = StringBuilder::new();
     let mut s_channel = StringBuilder::new();
     let mut f_resolved = Float64Builder::new();
@@ -163,11 +174,17 @@ fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
             r.capital_employed,
             r.ttm_eps,
             r.book_value_per_share,
+            r.revenue_growth_yoy_pct,
+            r.revenue_growth_qoq_pct,
+            r.net_profit_growth_yoy_pct,
+            r.net_profit_growth_qoq_pct,
+            r.eps_growth_yoy_pct,
         ];
         for (i, v) in numeric.iter().enumerate() {
             f[i].append_option(*v);
         }
         s_margin.append_value(&r.margin_kind);
+        s_ttm_method.append_value(&r.ttm_eps_method);
         s_as_of.append_value(&r.as_of);
         s_channel.append_value(&r.source_channel);
         f_resolved.append_value(r.fields_resolved_pct);
@@ -225,7 +242,13 @@ fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
         next_f(), // ebitda_annual
         next_f(), // capital_employed
         next_f(), // ttm_eps
+        Arc::new(s_ttm_method.finish()),
         next_f(), // book_value_per_share
+        next_f(), // revenue_growth_yoy_pct
+        next_f(), // revenue_growth_qoq_pct
+        next_f(), // net_profit_growth_yoy_pct
+        next_f(), // net_profit_growth_qoq_pct
+        next_f(), // eps_growth_yoy_pct
         Arc::new(s_as_of.finish()),
         Arc::new(s_channel.finish()),
         Arc::new(f_resolved.finish()),
@@ -297,12 +320,18 @@ fn batch_to_rows(batch: &RecordBatch) -> Result<Vec<FundRow>, String> {
     };
     // Nullable column that may be ABSENT in accumulated parquets written by
     // an older producer (schema evolution: the Phase-2 file predates the
-    // sector-union columns). Absent column → every row reads None; the next
-    // write emits the full current schema.
+    // sector-union columns; the Phase-3 file predates the growth columns).
+    // Absent column → every row reads None; the next write emits the full
+    // current schema.
     let fcol_opt = |name: &str| -> Option<&arrow_array::PrimitiveArray<Float64Type>> {
         batch
             .column_by_name(name)
             .map(|c| c.as_primitive::<Float64Type>())
+    };
+    // String column that may be absent in older files (Phase-4
+    // `ttm_eps_method`): absent → "" on every row.
+    let scol_opt = |name: &str| -> Option<&arrow_array::StringArray> {
+        batch.column_by_name(name).map(|c| c.as_string::<i32>())
     };
     let b = |name: &str| -> Result<&arrow_array::BooleanArray, String> {
         Ok(batch
@@ -345,11 +374,21 @@ fn batch_to_rows(batch: &RecordBatch) -> Result<Vec<FundRow>, String> {
     ];
     let sector_cols: Vec<Option<&arrow_array::PrimitiveArray<Float64Type>>> =
         sector_names.iter().map(|n| fcol_opt(n)).collect();
+    // Phase-4 growth columns: read leniently (absent in pre-Phase-4 files).
+    let growth_names = [
+        "revenue_growth_yoy_pct", "revenue_growth_qoq_pct",
+        "net_profit_growth_yoy_pct", "net_profit_growth_qoq_pct",
+        "eps_growth_yoy_pct",
+    ];
+    let growth_cols: Vec<Option<&arrow_array::PrimitiveArray<Float64Type>>> =
+        growth_names.iter().map(|n| fcol_opt(n)).collect();
+    let ttm_eps_method = scol_opt("ttm_eps_method");
 
     let mut rows = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
         let n = |j: usize| opt(numeric[j], i);
         let sn = |j: usize| sector_cols[j].and_then(|arr| opt(arr, i));
+        let gn = |j: usize| growth_cols[j].and_then(|arr| opt(arr, i));
         rows.push(FundRow {
             instrument_key: instrument_key.value(i).to_string(),
             symbol: symbol.value(i).to_string(),
@@ -396,7 +435,13 @@ fn batch_to_rows(batch: &RecordBatch) -> Result<Vec<FundRow>, String> {
             ebitda_annual: n(15),
             capital_employed: n(16),
             ttm_eps: n(17),
+            ttm_eps_method: ttm_eps_method.map(|a| a.value(i).to_string()).unwrap_or_default(),
             book_value_per_share: n(18),
+            revenue_growth_yoy_pct: gn(0),
+            revenue_growth_qoq_pct: gn(1),
+            net_profit_growth_yoy_pct: gn(2),
+            net_profit_growth_qoq_pct: gn(3),
+            eps_growth_yoy_pct: gn(4),
             as_of: as_of.value(i).to_string(),
             source_channel: source_channel.value(i).to_string(),
             fields_resolved_pct: fields_resolved_pct.value(i),
@@ -581,6 +626,66 @@ mod tests {
         // Everything that WAS in the old schema still round-trips.
         assert_eq!(back[0].instrument_key, rows[0].instrument_key);
         assert_eq!(back[0].revenue, rows[0].revenue);
+    }
+
+    #[test]
+    fn growth_columns_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fundamentals_all.parquet");
+        let mut rows = sample_rows();
+        rows[0].revenue_growth_yoy_pct = Some(25.0);
+        rows[0].revenue_growth_qoq_pct = Some(-3.85);
+        rows[0].net_profit_growth_yoy_pct = Some(-120.0);
+        rows[0].eps_growth_yoy_pct = Some(11.1);
+        rows[0].ttm_eps_method = "sum4q".into();
+        rows[1].ttm_eps_method = "fy_eps".into();
+        sort_rows(&mut rows);
+        write_parquet(&path, &rows).unwrap();
+        let back = read_parquet(&path).unwrap();
+        assert_eq!(rows, back);
+    }
+
+    #[test]
+    fn reading_pre_phase4_parquet_yields_null_growth_columns() {
+        // Simulate the accumulated Phase-3 file (no growth / ttm_eps_method
+        // columns) by projecting them away; the reader must default them.
+        use parquet::arrow::ArrowWriter;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fundamentals_all.parquet");
+        let mut rows = sample_rows();
+        rows[0].revenue_growth_yoy_pct = Some(9.9); // dropped by projection
+        rows[0].ttm_eps_method = "sum4q".into();    // dropped by projection
+        sort_rows(&mut rows);
+        let batch = to_batch(&rows).unwrap();
+        let new_cols: std::collections::HashSet<&str> = [
+            "revenue_growth_yoy_pct", "revenue_growth_qoq_pct",
+            "net_profit_growth_yoy_pct", "net_profit_growth_qoq_pct",
+            "eps_growth_yoy_pct", "ttm_eps_method",
+        ]
+        .into_iter()
+        .collect();
+        let keep: Vec<usize> = batch
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !new_cols.contains(f.name().as_str()))
+            .map(|(i, _)| i)
+            .collect();
+        let old_batch = batch.project(&keep).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, old_batch.schema(), None).unwrap();
+        w.write(&old_batch).unwrap();
+        w.close().unwrap();
+
+        let back = read_parquet(&path).unwrap();
+        assert_eq!(back.len(), rows.len());
+        for r in &back {
+            assert!(r.revenue_growth_yoy_pct.is_none(), "absent column reads None");
+            assert!(r.eps_growth_yoy_pct.is_none());
+            assert_eq!(r.ttm_eps_method, "", "absent string column reads empty");
+        }
+        assert_eq!(back[0].revenue, rows[0].revenue, "old columns still round-trip");
     }
 
     #[test]

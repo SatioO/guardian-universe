@@ -1,0 +1,149 @@
+name: fundamentals-backfill
+
+# P5 Phase 4: historical backfill — per-symbol full-history discovery
+# (Corp_FinanceResult_ng SCRIP_CD=<scrip>&FlagDur=7, SOURCE-CONTRACT §14)
+# over ONE hash-mod shard of the covered universe, fetching every era filing
+# missing from the accumulated parquet. Growth columns + TTM are derived from
+# the merged history on every run (pure recompute — also in the daily run).
+#
+# Dispatch-only, one shard per run, shards run SEQUENTIALLY (they share the
+# publish lock below anyway; see RUNBOOK "P5 Phase 4"). Resumable:
+#   - per-symbol BackfillMark in fundamentals_state.json (uploaded after a
+#     successful publish, exactly like fundamentals-daily) means a
+#     re-dispatched shard skips completed symbols at zero requests;
+#   - the producer's soft --max-runtime-mins budget stops it cleanly BEFORE
+#     the job timeout, so partial progress is always published + state'd
+#     rather than lost to a kill. `backfill_complete=false` in
+#     run_summary.json = re-dispatch the same shard to continue.
+#
+# Pre-era filings (broadcast before `from`) are skipped without fetching and
+# recorded per symbol — never null-published, never guessed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      shard_index:
+        description: "Shard index (0-based, < total_shards)"
+        required: true
+        default: "0"
+      total_shards:
+        description: "Total shards (keep constant across a backfill campaign)"
+        required: true
+        default: "4"
+      from:
+        description: "Era floor (broadcast ISO date). Default = start of parser-compatible history (SOURCE-CONTRACT §14)"
+        required: false
+        default: "2023-04-01"
+      limit:
+        description: "Optional covered-universe cap (smoke runs only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write   # gh needs release read+write
+  issues: write     # failure alerting
+
+# Same publish lock as data-daily / fundamentals-daily: a backfill shard
+# holds it for its whole run, so daily publishes queue behind it — prefer
+# dispatching shards outside the 20:30-IST daily window (see RUNBOOK).
+concurrency:
+  group: data-pipeline-publish
+  cancel-in-progress: false   # never interrupt a publish mid-upload
+
+jobs:
+  backfill-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install pipeline
+        working-directory: pipeline
+        run: pip install -r requirements.lock -e . --no-deps
+      - name: Sync baseline from the data-latest release (fail-closed)
+        working-directory: pipeline
+        run: python -m pipeline sync
+      - name: Download producer state (absent on first run — self-heals)
+        # Runs AFTER sync: an unreachable release already failed the job
+        # there, so a miss here really is "no asset yet", not an outage mask.
+        run: |
+          mkdir -p pipeline/data/fundamentals
+          gh release download data-latest --pattern fundamentals_state.json \
+            --dir pipeline/data/fundamentals --clobber \
+            || echo "no prior fundamentals_state.json (first run) — starting fresh"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fundamentals/target
+          key: cargo-fundamentals-${{ runner.os }}-${{ hashFiles('fundamentals/Cargo.lock') }}
+      - name: Build producer
+        working-directory: fundamentals
+        run: cargo build --locked --release
+      - name: Run producer (backfill, one shard)
+        working-directory: fundamentals
+        env:
+          SHARD_INDEX: ${{ github.event.inputs.shard_index }}
+          TOTAL_SHARDS: ${{ github.event.inputs.total_shards }}
+          FROM: ${{ github.event.inputs.from }}
+          LIMIT: ${{ github.event.inputs.limit }}
+        run: |
+          set -euo pipefail
+          # Soft budget 300 min < job timeout 360: the producer always exits
+          # cleanly with merged output + state instead of being killed.
+          args=(--backfill
+                --shard-index "${SHARD_INDEX}"
+                --total-shards "${TOTAL_SHARDS}"
+                --backfill-from "${FROM:-2023-04-01}"
+                --max-runtime-mins 300
+                --out ../pipeline/data/fundamentals)
+          if [ -n "${LIMIT}" ]; then args+=(--limit "${LIMIT}"); fi
+          ./target/release/fundamentals-producer "${args[@]}"
+      - name: Report shard progress
+        run: |
+          jq '{backfill_shard, backfill_symbols_in_shard, backfill_symbols_already_done,
+              backfill_symbols_scanned, backfill_symbols_unresolved, backfill_pre_era_skipped,
+              backfill_budget_stopped, backfill_complete, rows_new_or_updated, rows_total,
+              parquet_written}' pipeline/data/fundamentals/run_summary.json
+          if [ "$(jq -r '.backfill_complete' pipeline/data/fundamentals/run_summary.json)" != "true" ]; then
+            echo "::warning::Shard NOT complete — re-dispatch the same shard_index to resume."
+          fi
+      - name: Decide whether to publish
+        id: decide
+        run: |
+          written=$(jq -r '.parquet_written' pipeline/data/fundamentals/run_summary.json)
+          echo "parquet_written=$written" >> "$GITHUB_OUTPUT"
+          echo "Producer parquet_written: $written"
+      - name: Publish the updated dataset
+        if: steps.decide.outputs.parquet_written == 'true'
+        working-directory: pipeline
+        run: python -m pipeline publish
+      - name: Upload producer state (strictly after a successful publish)
+        # Same invariant as fundamentals-daily: state uploaded before a
+        # failed publish would claim filings as processed (and symbols as
+        # backfilled) while their rows never reached the release. Publish
+        # first; state only on success. On a no-change resume run this still
+        # runs: BackfillMarks may have advanced even when the parquet didn't.
+        run: |
+          f=pipeline/data/fundamentals/fundamentals_state.json
+          [ -f "$f" ] || { echo "no state file produced"; exit 0; }
+          gh release upload data-latest "$f" --clobber
+      - name: Alert on failure
+        if: failure()
+        run: |
+          gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true
+          body="fundamentals-backfill (shard ${{ github.event.inputs.shard_index }}/${{ github.event.inputs.total_shards }}) FAILED on $(date -u +%F). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number' || true)
+          if [ -z "$n" ]; then
+            gh issue create --title "Data pipeline: fundamentals-backfill failed" --label pipeline-failure --body "$body"
+          else
+            gh issue comment "$n" --body "$body"
+          fi
