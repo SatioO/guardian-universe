@@ -51,6 +51,11 @@ pub enum Outcome {
     ParseError,
     /// Every candidate row was hard-blocked by Gate-1.
     GateBlocked,
+    /// Backfill (Phase 4): the instance document is permanently absent at the
+    /// source (HTTP 404 on a historical locator that has had months to
+    /// appear). Recorded so the shard does not re-request it forever;
+    /// distinguishable from transient fetch errors, which are NEVER recorded.
+    InstanceUnavailable,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -74,6 +79,28 @@ pub struct SymbolState {
     /// PDF row (SOURCE-CONTRACT §9.4).
     #[serde(default)]
     pub pending_xml: BTreeSet<String>,
+    /// Phase 4 backfill bookkeeping. `Some(iso-date + from-date)` = this
+    /// symbol's full history was discovered and every era filing processed
+    /// (outcome recorded) with NO transient errors, under the recorded
+    /// `--backfill-from` era start. A later backfill run with the SAME or
+    /// NEWER `from` skips the symbol entirely (resume costs zero requests);
+    /// a DEEPER `from` re-scans it. Skipped when None so pre-Phase-4 state
+    /// files rewrite byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backfilled: Option<BackfillMark>,
+}
+
+/// Proof-of-completion marker for one symbol's backfill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BackfillMark {
+    /// ISO date the scan completed.
+    pub scanned_at: String,
+    /// The `--backfill-from` era floor the scan used (broadcast-date ISO).
+    pub from: String,
+    /// Filings older than `from` that were skipped WITHOUT fetching —
+    /// the pre-era outcome, recorded compactly (per-symbol count, not one
+    /// state key per decade-old filing) so state stays small.
+    pub pre_era_skipped: u32,
 }
 
 impl SymbolState {
@@ -223,6 +250,24 @@ mod tests {
         let st = ProducerState::load(&dir.path().join("nope.json")).unwrap();
         assert!(st.symbols.is_empty());
         assert_eq!(st.version, STATE_VERSION);
+    }
+
+    #[test]
+    fn backfill_mark_round_trips_and_absence_stays_absent() {
+        let mut st = ProducerState::new();
+        st.symbol_mut("INE002A01018").backfilled = Some(BackfillMark {
+            scanned_at: "2026-07-12".into(),
+            from: "2023-04-01".into(),
+            pre_era_skipped: 41,
+        });
+        st.symbol_mut("INE117A01022").record("k", Outcome::Published);
+        let json = serde_json::to_string_pretty(&st).unwrap();
+        // Symbols without a mark must not serialize the field at all — a
+        // pre-Phase-4 state file rewrites byte-identically.
+        assert_eq!(json.matches("backfilled").count(), 1);
+        let back: ProducerState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, st);
+        assert!(back.symbols["INE117A01022"].backfilled.is_none());
     }
 
     #[test]

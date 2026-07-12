@@ -12,6 +12,17 @@
 //! in-capmkt taxonomy does not carry them (`nim_pct`, `gross_stage3_pct`,
 //! `solvency_ratio`) — they exist so the client contract is stable when a
 //! richer source appears, never to be guessed.
+//!
+//! # Derived growth + TTM (Phase 4)
+//! `derive_ttm_eps` and `derive_growth` are PURE functions of the merged row
+//! set, recomputed on every run (daily and backfill): they reset their
+//! outputs first, so stale derived values can never survive, and they are
+//! excluded from `same_data` so a recompute never looks like a restatement.
+//! Growth guard semantics: NULL when the base period is missing or ≤ 0
+//! (loss→profit = NULL, never +∞); profit→loss publishes as a decline below
+//! -100% (base positive). YoY/QoQ row selection is day-span-based against
+//! the SAME (instrument, basis) — gapped histories yield NULL, not a wrong
+//! base.
 
 use fundamentals_core::xbrl_integrated::ValuationRaw;
 use fundamentals_core::{ResultPeriod, SectorKind, SectorLineItems};
@@ -75,7 +86,22 @@ pub struct FundRow {
     pub capital_employed: Option<f64>,
     // ── Derived ──────────────────────────────────────────────────────────────
     pub ttm_eps: Option<f64>,
+    /// How `ttm_eps` was derived: "sum4q" (true 4-consecutive-quarter sum) |
+    /// "fy_eps" (FY row's own EPS, or the matching FY row for a Q4/March row)
+    /// | "" (no TTM derivable). Derived alongside `ttm_eps` every run.
+    pub ttm_eps_method: String,
     pub book_value_per_share: Option<f64>,
+    // ── Derived growth (Phase 4; recomputed from the full merged history on
+    // every run — a pure function of the parquet, no extra state). NULL when
+    // any input is missing or the base is ≤ 0 (the client is fail-closed):
+    // a loss→profit swing is NULL, never +∞; a profit→loss swing IS a number
+    // (a decline below -100%) because its base is positive. YoY compares the
+    // same-basis row one year earlier; QoQ the immediately prior quarter.
+    pub revenue_growth_yoy_pct: Option<f64>,
+    pub revenue_growth_qoq_pct: Option<f64>,
+    pub net_profit_growth_yoy_pct: Option<f64>,
+    pub net_profit_growth_qoq_pct: Option<f64>,
+    pub eps_growth_yoy_pct: Option<f64>,
     // ── Provenance / quality ─────────────────────────────────────────────────
     pub as_of: String,          // ISO date the row was first produced
     pub source_channel: String, // FilingSource id that served the instance
@@ -95,17 +121,24 @@ impl FundRow {
         )
     }
 
-    /// Data equality ignoring `as_of` (provenance date) and `ttm_eps`
-    /// (derived post-merge over the full row set; freshly built rows always
-    /// carry `None`). This is what makes state loss self-healing: re-fetching
-    /// a filing whose numbers are unchanged keeps the EXISTING row (original
-    /// `as_of` preserved) so the parquet stays byte-identical — no publish
-    /// churn from a mere re-process.
+    /// Data equality ignoring `as_of` (provenance date) and every DERIVED
+    /// column (`ttm_eps`/`ttm_eps_method` + the growth columns — all derived
+    /// post-merge over the full row set; freshly built rows always carry
+    /// their defaults). This is what makes state loss self-healing:
+    /// re-fetching a filing whose numbers are unchanged keeps the EXISTING
+    /// row (original `as_of` preserved) so the parquet stays byte-identical —
+    /// no publish churn from a mere re-process.
     pub fn same_data(&self, other: &FundRow) -> bool {
         let norm = |r: &FundRow| {
             let mut c = r.clone();
             c.as_of = String::new();
             c.ttm_eps = None;
+            c.ttm_eps_method = String::new();
+            c.revenue_growth_yoy_pct = None;
+            c.revenue_growth_qoq_pct = None;
+            c.net_profit_growth_yoy_pct = None;
+            c.net_profit_growth_qoq_pct = None;
+            c.eps_growth_yoy_pct = None;
             c
         };
         norm(self) == norm(other)
@@ -278,7 +311,14 @@ pub fn build_row(
         ebitda_annual: if is_annual { val.ebitda_cr } else { None },
         capital_employed,
         ttm_eps: None, // filled by `derive_ttm_eps` over the full row set
+        ttm_eps_method: String::new(),
         book_value_per_share,
+        // Growth: filled by `derive_growth` over the full merged row set.
+        revenue_growth_yoy_pct: None,
+        revenue_growth_qoq_pct: None,
+        net_profit_growth_yoy_pct: None,
+        net_profit_growth_qoq_pct: None,
+        eps_growth_yoy_pct: None,
         as_of: as_of.to_string(),
         source_channel: source_channel.to_string(),
         fields_resolved_pct: fields_resolved_pct(period, sector_kind),
@@ -287,14 +327,24 @@ pub fn build_row(
     }
 }
 
-/// Derive `ttm_eps` across the merged row set, per (instrument_key, basis):
-/// - FY rows: TTM at fiscal-year end == the FY EPS itself.
-/// - Q4 rows: use the matching FY row's EPS when present (audited-adjusted).
-/// - other quarter rows: sum of this + previous 3 quarter EPS, but only if
-///   those 4 quarters actually span ~1 year (270–290 days between the first
-///   and last quarter-end) — no fabrication across gaps.
+/// Derive `ttm_eps` (+ `ttm_eps_method`) across the merged row set, per
+/// (instrument_key, basis). Pure function of the row set — every value is
+/// reset first, so stale derived values can never survive a recompute.
+///
+/// Precedence (Phase 4 — "true TTM first"):
+/// - FY rows: TTM at fiscal-year end == the FY EPS itself (`fy_eps`).
+/// - quarter rows: sum of this + previous 3 quarter EPS where those 4
+///   quarters are truly consecutive (~1 year first→last quarter-end;
+///   260–300 days) — `sum4q`. No fabrication across gaps.
+/// - Q4 / March rows without 4 consecutive quarters: fall back to the
+///   matching FY row's EPS when present (`fy_eps`, audited-adjusted).
 pub fn derive_ttm_eps(rows: &mut [FundRow]) {
     use std::collections::HashMap;
+
+    for r in rows.iter_mut() {
+        r.ttm_eps = None;
+        r.ttm_eps_method = String::new();
+    }
 
     // Index FY rows: (instrument, basis, period_end) → eps.
     let fy_eps: HashMap<(String, String, String), Option<f64>> = rows
@@ -324,34 +374,143 @@ pub fn derive_ttm_eps(rows: &mut [FundRow]) {
     for r in rows.iter_mut() {
         if r.fiscal_quarter == "FY" {
             r.ttm_eps = r.eps;
+            if r.ttm_eps.is_some() {
+                r.ttm_eps_method = "fy_eps".into();
+            }
             continue;
         }
-        // Prefer the FY row's EPS at the same period end (Q4 / March rows).
+        // True TTM first: sum of 4 consecutive quarters ending at this row.
+        let series = quarters
+            .get(&(r.instrument_key.clone(), r.basis.clone()))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let pos = series.iter().position(|(pe, _)| *pe == r.period_end);
+        if let Some(pos) = pos {
+            if pos >= 3 {
+                let window = &series[pos - 3..=pos];
+                let span = fundamentals_core::instance::duration_days_inclusive(
+                    &window[0].0,
+                    &window[3].0,
+                );
+                let spans_a_year = matches!(span, Some(d) if (260..=300).contains(&d));
+                if spans_a_year {
+                    let eps_values: Vec<f64> = window.iter().filter_map(|(_, e)| *e).collect();
+                    if eps_values.len() == 4 {
+                        r.ttm_eps = Some(eps_values.iter().sum());
+                        r.ttm_eps_method = "sum4q".into();
+                        continue;
+                    }
+                }
+            }
+        }
+        // Fallback: the FY row's EPS at the same period end (Q4/March rows).
         let fy_key = (r.instrument_key.clone(), r.basis.clone(), r.period_end.clone());
         if let Some(eps) = fy_eps.get(&fy_key).copied().flatten() {
             r.ttm_eps = Some(eps);
-            continue;
+            r.ttm_eps_method = "fy_eps".into();
         }
-        // Otherwise: sum of 4 consecutive quarters ending at this row.
-        let series = quarters
-            .get(&(r.instrument_key.clone(), r.basis.clone()))
-            .cloned()
-            .unwrap_or_default();
-        let Some(pos) = series.iter().position(|(pe, _)| *pe == r.period_end) else {
-            continue;
-        };
-        if pos < 3 {
-            continue; // fewer than 4 quarters available
-        }
-        let window = &series[pos - 3..=pos];
-        let span = fundamentals_core::instance::duration_days_inclusive(&window[0].0, &window[3].0);
-        let spans_a_year = matches!(span, Some(d) if (260..=300).contains(&d));
-        if !spans_a_year {
-            continue; // quarters have gaps — refuse to fabricate a TTM
-        }
-        let eps_values: Vec<f64> = window.iter().filter_map(|(_, e)| *e).collect();
-        if eps_values.len() == 4 {
-            r.ttm_eps = Some(eps_values.iter().sum());
+    }
+}
+
+/// Growth guard (Phase 4): percentage change vs a prior-period base.
+/// NULL when either side is missing or the base is ≤ 0 — a loss→profit
+/// swing must be NULL (a percentage against a non-positive base is
+/// meaningless), never +∞ or a sign-flipped number. A profit→loss swing
+/// (positive base, negative current) IS published: a decline below -100%.
+fn pct_growth(curr: Option<f64>, prev: Option<f64>) -> Option<f64> {
+    let c = curr?;
+    let p = prev?;
+    if p <= 0.0 {
+        return None;
+    }
+    Some((c - p) / p * 100.0)
+}
+
+/// One comparable point in a per-(instrument, basis) series.
+#[derive(Clone)]
+struct GrowthPoint {
+    period_end: String,
+    revenue: Option<f64>,
+    net_profit: Option<f64>,
+    eps: Option<f64>,
+}
+
+/// Find the series point whose period_end sits `lo..=hi` inclusive days
+/// before `period_end` (the year-ago row for 360..=372; the prior quarter
+/// for 85..=98). Series is sorted ascending; the LATEST match wins.
+fn point_before<'a>(
+    series: &'a [GrowthPoint],
+    period_end: &str,
+    lo: i64,
+    hi: i64,
+) -> Option<&'a GrowthPoint> {
+    series
+        .iter()
+        .rev()
+        .filter(|p| p.period_end.as_str() < period_end)
+        .find(|p| {
+            matches!(
+                fundamentals_core::instance::duration_days_inclusive(&p.period_end, period_end),
+                Some(d) if (lo..=hi).contains(&d)
+            )
+        })
+}
+
+/// Derive the Phase-4 growth columns across the merged row set. Pure
+/// function of the row set (all values reset first; recomputed
+/// deterministically on every run — no extra state).
+///
+/// Row selection, per (instrument_key, basis):
+/// - **Quarter rows** compare against quarter rows only: YoY = the quarter
+///   ending ~1 year earlier (360–372 inclusive days), QoQ = the immediately
+///   prior quarter (85–98 inclusive days). Day-span matching (not calendar
+///   arithmetic) means a gapped history yields NULL, never a wrong base.
+/// - **FY rows** compare against the prior FY row (360–372 days); QoQ stays
+///   NULL on FY rows by construction.
+/// - `eps_growth_yoy_pct` only (QoQ EPS is noise for screening).
+pub fn derive_growth(rows: &mut [FundRow]) {
+    use std::collections::HashMap;
+
+    for r in rows.iter_mut() {
+        r.revenue_growth_yoy_pct = None;
+        r.revenue_growth_qoq_pct = None;
+        r.net_profit_growth_yoy_pct = None;
+        r.net_profit_growth_qoq_pct = None;
+        r.eps_growth_yoy_pct = None;
+    }
+
+    // (instrument, basis, is_fy) → ascending series of comparable points.
+    let mut series: HashMap<(String, String, bool), Vec<GrowthPoint>> = HashMap::new();
+    for r in rows.iter() {
+        series
+            .entry((r.instrument_key.clone(), r.basis.clone(), r.fiscal_quarter == "FY"))
+            .or_default()
+            .push(GrowthPoint {
+                period_end: r.period_end.clone(),
+                revenue: r.revenue,
+                net_profit: r.net_profit,
+                eps: r.eps,
+            });
+    }
+    for s in series.values_mut() {
+        s.sort_by(|a, b| a.period_end.cmp(&b.period_end));
+        s.dedup_by(|a, b| a.period_end == b.period_end);
+    }
+
+    for r in rows.iter_mut() {
+        let is_fy = r.fiscal_quarter == "FY";
+        let key = (r.instrument_key.clone(), r.basis.clone(), is_fy);
+        let Some(s) = series.get(&key) else { continue };
+
+        let yoy = point_before(s, &r.period_end, 360, 372);
+        r.revenue_growth_yoy_pct = pct_growth(r.revenue, yoy.and_then(|p| p.revenue));
+        r.net_profit_growth_yoy_pct = pct_growth(r.net_profit, yoy.and_then(|p| p.net_profit));
+        r.eps_growth_yoy_pct = pct_growth(r.eps, yoy.and_then(|p| p.eps));
+
+        if !is_fy {
+            let qoq = point_before(s, &r.period_end, 85, 98);
+            r.revenue_growth_qoq_pct = pct_growth(r.revenue, qoq.and_then(|p| p.revenue));
+            r.net_profit_growth_qoq_pct = pct_growth(r.net_profit, qoq.and_then(|p| p.net_profit));
         }
     }
 }
@@ -403,16 +562,51 @@ mod tests {
         let mut rows = vec![quarter_row("2026-03-31", "FY", Some(13.54))];
         derive_ttm_eps(&mut rows);
         assert_eq!(rows[0].ttm_eps, Some(13.54));
+        assert_eq!(rows[0].ttm_eps_method, "fy_eps");
     }
 
     #[test]
-    fn q4_row_uses_matching_fy_eps() {
+    fn q4_row_falls_back_to_matching_fy_eps_without_four_quarters() {
         let mut rows = vec![
             quarter_row("2026-03-31", "Q4", Some(3.71)),
             quarter_row("2026-03-31", "FY", Some(13.54)),
         ];
         derive_ttm_eps(&mut rows);
-        assert_eq!(rows[0].ttm_eps, Some(13.54), "Q4 should use FY (audited) EPS");
+        assert_eq!(rows[0].ttm_eps, Some(13.54), "Q4 falls back to FY (audited) EPS");
+        assert_eq!(rows[0].ttm_eps_method, "fy_eps");
+    }
+
+    #[test]
+    fn q4_row_prefers_true_four_quarter_sum_over_fy_eps() {
+        // Phase 4: with 4 consecutive quarters, the TRUE TTM sum wins even
+        // when a matching FY row exists; the method column says which.
+        let mut rows = vec![
+            quarter_row("2025-06-30", "Q1", Some(1.0)),
+            quarter_row("2025-09-30", "Q2", Some(2.0)),
+            quarter_row("2025-12-31", "Q3", Some(3.0)),
+            quarter_row("2026-03-31", "Q4", Some(4.0)),
+            quarter_row("2026-03-31", "FY", Some(13.54)),
+        ];
+        derive_ttm_eps(&mut rows);
+        let q4 = rows.iter().find(|r| r.fiscal_quarter == "Q4").unwrap();
+        assert_eq!(q4.ttm_eps, Some(10.0), "sum of the 4 real quarters");
+        assert_eq!(q4.ttm_eps_method, "sum4q");
+        let fy = rows.iter().find(|r| r.fiscal_quarter == "FY").unwrap();
+        assert_eq!(fy.ttm_eps, Some(13.54), "FY row keeps its own EPS");
+        assert_eq!(fy.ttm_eps_method, "fy_eps");
+    }
+
+    #[test]
+    fn derive_ttm_resets_stale_values_first() {
+        // Rows read back from an older parquet carry derived values; the
+        // recompute must be a pure function of today's row set.
+        let mut lone = quarter_row("2026-06-30", "Q1", Some(5.0));
+        lone.ttm_eps = Some(99.0);
+        lone.ttm_eps_method = "sum4q".into();
+        let mut rows = vec![lone];
+        derive_ttm_eps(&mut rows);
+        assert_eq!(rows[0].ttm_eps, None, "stale ttm_eps must not survive");
+        assert_eq!(rows[0].ttm_eps_method, "");
     }
 
     #[test]
@@ -426,6 +620,7 @@ mod tests {
         derive_ttm_eps(&mut rows);
         let q1 = rows.iter().find(|r| r.period_end == "2026-06-30").unwrap();
         assert_eq!(q1.ttm_eps, Some(14.0));
+        assert_eq!(q1.ttm_eps_method, "sum4q");
     }
 
     #[test]
@@ -449,13 +644,138 @@ mod tests {
         assert_eq!(rows[0].ttm_eps, None);
     }
 
+    // ── Growth derivation (Phase 4) ──────────────────────────────────────────
+
+    /// Quarter row with revenue / net profit / eps set explicitly.
+    fn growth_row(pe: &str, fq: &str, rev: Option<f64>, np: Option<f64>, eps: Option<f64>) -> FundRow {
+        let mut r = quarter_row(pe, fq, eps);
+        r.revenue = rev;
+        r.net_profit = np;
+        r
+    }
+
+    #[test]
+    fn growth_yoy_and_qoq_pick_the_right_rows() {
+        let mut rows = vec![
+            growth_row("2025-06-30", "Q1", Some(100.0), Some(10.0), Some(1.0)),
+            growth_row("2025-09-30", "Q2", Some(110.0), Some(11.0), Some(1.1)),
+            growth_row("2025-12-31", "Q3", Some(120.0), Some(12.0), Some(1.2)),
+            growth_row("2026-03-31", "Q4", Some(130.0), Some(13.0), Some(1.3)),
+            growth_row("2026-06-30", "Q1", Some(125.0), Some(15.0), Some(1.5)),
+        ];
+        derive_growth(&mut rows);
+        let q1 = rows.iter().find(|r| r.period_end == "2026-06-30").unwrap();
+        // YoY: vs 2025-06-30 (NOT the prior quarter).
+        assert!((q1.revenue_growth_yoy_pct.unwrap() - 25.0).abs() < 1e-9);
+        assert!((q1.net_profit_growth_yoy_pct.unwrap() - 50.0).abs() < 1e-9);
+        assert!((q1.eps_growth_yoy_pct.unwrap() - 50.0).abs() < 1e-9);
+        // QoQ: vs 2026-03-31 (NOT the year-ago quarter).
+        assert!((q1.revenue_growth_qoq_pct.unwrap() - (-5.0 / 1.30)).abs() < 1e-6);
+        assert!((q1.net_profit_growth_qoq_pct.unwrap() - (2.0 / 0.13)).abs() < 1e-6);
+        // The earliest quarter has no prior rows at all → all NULL.
+        let first = rows.iter().find(|r| r.period_end == "2025-06-30").unwrap();
+        assert!(first.revenue_growth_yoy_pct.is_none());
+        assert!(first.revenue_growth_qoq_pct.is_none());
+    }
+
+    #[test]
+    fn growth_missing_year_ago_is_null_even_with_other_history() {
+        // Year-ago quarter absent (gap) but older data exists: day-span
+        // matching must yield NULL, never silently compare a wrong base.
+        let mut rows = vec![
+            growth_row("2025-03-31", "Q4", Some(90.0), Some(9.0), Some(0.9)),
+            growth_row("2026-03-31", "Q4", Some(130.0), Some(13.0), Some(1.3)),
+            growth_row("2026-06-30", "Q1", Some(125.0), Some(15.0), Some(1.5)),
+        ];
+        derive_growth(&mut rows);
+        let q1 = rows.iter().find(|r| r.period_end == "2026-06-30").unwrap();
+        assert!(q1.revenue_growth_yoy_pct.is_none(), "no 2025-06-30 row → NULL");
+        assert!(q1.revenue_growth_qoq_pct.is_some(), "QoQ vs 2026-03-31 still works");
+        let q4 = rows.iter().find(|r| r.period_end == "2026-03-31").unwrap();
+        assert!(q4.revenue_growth_yoy_pct.is_some(), "2025-03-31 is a valid year-ago");
+        assert!(q4.revenue_growth_qoq_pct.is_none(), "prior quarter missing → NULL");
+    }
+
+    #[test]
+    fn growth_loss_to_profit_is_null_profit_to_loss_is_a_decline() {
+        let mut rows = vec![
+            growth_row("2025-06-30", "Q1", Some(100.0), Some(-5.0), Some(-0.5)),
+            growth_row("2025-09-30", "Q2", Some(100.0), Some(10.0), Some(1.0)),
+            growth_row("2025-12-31", "Q3", Some(100.0), Some(-2.0), None),
+        ];
+        derive_growth(&mut rows);
+        // Loss → profit: base ≤ 0 → NULL, never +∞ or a sign-flipped number.
+        let q2 = rows.iter().find(|r| r.fiscal_quarter == "Q2").unwrap();
+        assert!(q2.net_profit_growth_qoq_pct.is_none(), "loss→profit must be NULL");
+        // Profit → loss: positive base → a real decline below -100%.
+        let q3 = rows.iter().find(|r| r.fiscal_quarter == "Q3").unwrap();
+        assert!((q3.net_profit_growth_qoq_pct.unwrap() - (-120.0)).abs() < 1e-9);
+        // Zero base guard: base == 0 is also NULL (division blow-up).
+        assert_eq!(pct_growth(Some(5.0), Some(0.0)), None);
+        assert_eq!(pct_growth(None, Some(5.0)), None, "missing current → NULL");
+        assert_eq!(pct_growth(Some(5.0), None), None, "missing base → NULL");
+    }
+
+    #[test]
+    fn growth_fy_rows_compare_fy_to_fy_and_never_qoq() {
+        let mut rows = vec![
+            growth_row("2025-03-31", "FY", Some(1000.0), Some(100.0), Some(10.0)),
+            growth_row("2025-03-31", "Q4", Some(260.0), Some(26.0), Some(2.6)),
+            growth_row("2026-03-31", "FY", Some(1200.0), Some(150.0), Some(15.0)),
+            growth_row("2026-03-31", "Q4", Some(300.0), Some(30.0), Some(3.0)),
+        ];
+        derive_growth(&mut rows);
+        let fy = rows
+            .iter()
+            .find(|r| r.fiscal_quarter == "FY" && r.period_end == "2026-03-31")
+            .unwrap();
+        assert!((fy.revenue_growth_yoy_pct.unwrap() - 20.0).abs() < 1e-9, "FY vs prior FY");
+        assert!((fy.net_profit_growth_yoy_pct.unwrap() - 50.0).abs() < 1e-9);
+        assert!((fy.eps_growth_yoy_pct.unwrap() - 50.0).abs() < 1e-9);
+        assert!(fy.revenue_growth_qoq_pct.is_none(), "QoQ is meaningless on FY rows");
+        // The Q4 row compares against the year-ago Q4 QUARTER row (not FY).
+        let q4 = rows
+            .iter()
+            .find(|r| r.fiscal_quarter == "Q4" && r.period_end == "2026-03-31")
+            .unwrap();
+        assert!((q4.revenue_growth_yoy_pct.unwrap() - (40.0 / 2.6)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn growth_respects_basis_separation() {
+        let mut rows = vec![
+            growth_row("2025-06-30", "Q1", Some(100.0), Some(10.0), Some(1.0)),
+            growth_row("2026-06-30", "Q1", Some(150.0), Some(15.0), Some(1.5)),
+        ];
+        rows[0].basis = "standalone".into(); // year-ago row is the OTHER basis
+        derive_growth(&mut rows);
+        let cur = rows.iter().find(|r| r.period_end == "2026-06-30").unwrap();
+        assert!(
+            cur.revenue_growth_yoy_pct.is_none(),
+            "a standalone base must never serve a consolidated row"
+        );
+    }
+
+    #[test]
+    fn growth_is_reset_before_recompute() {
+        let mut lone = growth_row("2026-06-30", "Q1", Some(100.0), Some(10.0), Some(1.0));
+        lone.revenue_growth_yoy_pct = Some(42.0); // stale value from an old parquet
+        let mut rows = vec![lone];
+        derive_growth(&mut rows);
+        assert!(rows[0].revenue_growth_yoy_pct.is_none(), "stale growth must not survive");
+    }
+
     #[test]
     fn same_data_ignores_as_of_and_ttm_eps_only() {
         let a = quarter_row("2026-06-30", "Q1", Some(5.0));
         let mut b = a.clone();
         b.as_of = "2026-09-01".into();
         b.ttm_eps = Some(14.0);
-        assert!(a.same_data(&b), "as_of/ttm_eps differences are not data changes");
+        b.ttm_eps_method = "sum4q".into();
+        b.revenue_growth_yoy_pct = Some(25.0);
+        b.net_profit_growth_qoq_pct = Some(-3.0);
+        b.eps_growth_yoy_pct = Some(11.1);
+        assert!(a.same_data(&b), "as_of/derived differences are not data changes");
         let mut c = a.clone();
         c.net_profit = Some(999.0);
         assert!(!a.same_data(&c), "a real value change IS a data change");

@@ -85,6 +85,13 @@ pub trait FilingSource {
     /// Bulk discovery over a rolling window: who filed + instance locators.
     fn discover(&self, window: DiscoveryWindow) -> Result<Vec<FilingRef>, String>;
 
+    /// Full filing history for ONE instrument (Phase 4 backfill). The source
+    /// maps the canonical `instrument_key` (ISIN) to its native id itself —
+    /// native identity never leaks upward. `Err` = this source cannot serve
+    /// the symbol (unknown to it, or the request failed); the registry falls
+    /// through to the next source.
+    fn discover_history(&self, instrument_key: &str) -> Result<Vec<FilingRef>, String>;
+
     /// Fetch the raw XBRL instance bytes for a ref this source discovered.
     fn fetch_instance(&self, r: &FilingRef) -> Result<Vec<u8>, String>;
 }
@@ -138,6 +145,22 @@ impl SourceRegistry {
             format!("all filing sources failed: {}", errors.join("; "))
         })
     }
+
+    /// Per-symbol history discovery via the fallback chain (Phase 4 backfill).
+    pub fn discover_history(&self, instrument_key: &str) -> Result<Vec<FilingRef>, String> {
+        let mut errors: Vec<String> = Vec::new();
+        for source in self.chain() {
+            match source.discover_history(instrument_key) {
+                Ok(refs) => return Ok(refs),
+                Err(e) => errors.push(format!("{}: {e}", source.source_id())),
+            }
+        }
+        Err(if errors.is_empty() {
+            "no filing sources registered".to_string()
+        } else {
+            errors.join("; ")
+        })
+    }
 }
 
 #[cfg(test)]
@@ -167,6 +190,22 @@ mod tests {
                 broadcast_at: "2026-07-11T21:18:07".into(),
                 is_audited_hint: true,
                 instance_locator: Some("doc.xml".into()),
+            }])
+        }
+        fn discover_history(&self, instrument_key: &str) -> Result<Vec<FilingRef>, String> {
+            if self.fail_discovery {
+                return Err("boom".into());
+            }
+            Ok(vec![FilingRef {
+                source_id: self.id.to_string(),
+                native_id: "123".into(),
+                instrument_key: Some(instrument_key.to_string()),
+                company_name: "Fake Co".into(),
+                period_hint: "MQ2024-2025".into(),
+                basis_hint: Some(StatementBasis::Consolidated),
+                broadcast_at: "2025-04-25T13:41:03".into(),
+                is_audited_hint: true,
+                instance_locator: Some("hist.xml".into()),
             }])
         }
         fn fetch_instance(&self, _r: &FilingRef) -> Result<Vec<u8>, String> {
@@ -206,6 +245,25 @@ mod tests {
         let mut reg = SourceRegistry::new();
         reg.register(Box::new(FakeSource { id: "a", fail_discovery: true }));
         let err = reg.discover(DiscoveryWindow::Today).unwrap_err();
+        assert!(err.contains("a: boom"), "err = {err}");
+    }
+
+    #[test]
+    fn history_discovery_falls_back_down_the_chain() {
+        let mut reg = SourceRegistry::new();
+        reg.register(Box::new(FakeSource { id: "primary", fail_discovery: true }));
+        reg.register(Box::new(FakeSource { id: "fallback", fail_discovery: false }));
+        let refs = reg.discover_history("INE000A01001").unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].source_id, "fallback");
+        assert_eq!(refs[0].instrument_key.as_deref(), Some("INE000A01001"));
+    }
+
+    #[test]
+    fn history_discovery_all_failing_is_err() {
+        let mut reg = SourceRegistry::new();
+        reg.register(Box::new(FakeSource { id: "a", fail_discovery: true }));
+        let err = reg.discover_history("INE000A01001").unwrap_err();
         assert!(err.contains("a: boom"), "err = {err}");
     }
 

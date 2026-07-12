@@ -280,3 +280,27 @@ nsearchives remains a per-symbol fallback for instance bytes; it is no longer on
 - **Datacenter reachability** of `api.bseindia.com` + `www.bseindia.com/XBRLFILES` from a GitHub-hosted runner (§8 throwaway workflow) — the only remaining Phase-0 gate.
 - XBRL-attachment lag vs the PDF (fresh filings may briefly have no XMLName): incremental state must keep a symbol pending until its XMLName appears, not mark it done off the PDF row.
 - `.xml`-twin existence should be verified across sectors (bank/NBFC/insurance variants of the IFIndAs path) during Phase 1's first 50-symbol run.
+
+---
+
+## §14 Phase-4 backfill probe (2026-07-12, residential IP, ~8 requests, ≥2 s spacing)
+
+Resolves §13.4 (FlagDur behaviour with empty/non-empty scrip beyond "today") and establishes the honest historical depth.
+
+### 14.1 `Corp_FinanceResult_ng` FlagDur=6 BULK works; FlagDur=7 per-scrip returns FULL history
+- `SCRIP_CD=&FlagDur=6` (empty scrip, "last 1 year") → **200, 19,898,391 bytes, 34,039 rows**, one response, no pagination. Bulk beyond "today" CONFIRMED. (The first attempt took >90 s server-side; a retry was fast — budget generous timeouts.)
+- `SCRIP_CD=500325&FlagDur=7` (RELIANCE, "beyond last 1 year") → **200, 78,455 bytes, 132 rows — the COMPLETE broadcast history back to 2016**, newest first, *including* the last year (the dropdown label "beyond last 1 year" is wrong for per-scrip: it is effectively "all"). Same shape/fields as §1.1; XMLName/Consol_XMLName populated throughout. Confirmed identically for HDFCBANK `500180` (140 rows) and JUSTDIAL `535648` (68 rows). **This is the Phase-4 discovery channel: one request per symbol.** (`AnnSubCategoryGetData` §1.2 was NOT chosen: it returns announcement PDFs, no XMLName, paginated — it would need a second resolution step that FlagDur=7 makes unnecessary.)
+
+### 14.2 The era boundary — integrated filing starts with the March-2025 quarter
+Consistent across RELIANCE / HDFCBANK / JUSTDIAL: rows for `MQ2024-2025` (quarter ending 2025-03-31, broadcast ~2025-04-10 onward) and later carry `IFIndas…`/`IFBanking…`/`IFNBFC…`/`IFGI…`/`IFLI…` `…UploadDocument` paths (the §9.2 in-capmkt chain; sector families confirm the `.html→.xml` chain across sectors). Everything `DQ2024-2025` (Dec-2024) and older is **`FourOneUploadDocument/Main_*.xml`** — a DIFFERENT, directly-`.xml` format. Taxonomy year advances within the era: a RELIANCE MQ2024-2025 instance is `http://www.sebi.gov.in/xbrl/2025-01-31/in-capmkt` (7.0 MB!, 200 text/xml) with the same `OneD` contexts and facts — parses with the app parser (local-name matching; taxonomy year is irrelevant).
+
+### 14.3 KEY FINDING — pre-integration `FourOneUploadDocument` instances parse with the SAME parser
+`FourOneUploadDocument/Main_Ind_As_500325_161202520722.xml` (RELIANCE Dec-2024 quarter) → 200, text/xml, 63 KB, root namespace **`http://www.bseindia.com/xbrl/fin/2020-03-31/in-bse-fin`** (BSE's own pre-integration results taxonomy) — but with **identical context ids (`OneD`, `FourD`) and identical local element names** (`RevenueFromOperations`, `ProfitLossForPeriod`, `BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations`, `ISIN`, `ScripCode`, `NatureOfReportStandaloneConsolidated`, `WhetherResultsAreAuditedOrUnaudited`, …). The Rust parser matches local names only → **parses as-is**; verified against RELIANCE's published Q3-FY25 standalone numbers (revenue ₹1,28,260 cr, PAT ₹8,721 cr, EPS ₹6.44) — vendored as `fundamentals-core/fixtures/bse-fourone-reliance-q3fy25.xml` with a regression test. Note: the FourD context in a Q3 filing is a 9-month YTD (275 days) — the producer's 350–380-day annual filter already rejects it.
+
+### 14.4 Honest depth verdict (drives `--backfill-from`)
+- **in-capmkt era:** Mar-2025 quarter → today = 5–6 quarters + 2 FYs. If only this era were parseable, THAT would be the depth (not 8–12).
+- **in-bse-fin 2020-03-31 era:** extends parseable history back to at least FY21 broadcasts for the general sector (bank/NBFC/insurance in-bse-fin variants unverified — outcomes will record reality). Producer default `--backfill-from 2023-04-01` targets ~12–14 quarters (the design's 8–12 with margin) while staying inside the verified taxonomy generation; deeper is an explicit operator choice and taxonomy generations before 2020 are UNVERIFIED.
+- Pre-era filings are skipped WITHOUT fetching (broadcast-date filter), recorded per symbol — never null-published, never guessed.
+
+### 14.5 Rate-limit note
+8 requests over ~10 min incl. a 19.9 MB bulk and a 7.0 MB instance: no 429, no blocks. The FlagDur=6 bulk can be server-side slow (>90 s once) — backfill uses per-scrip FlagDur=7 (fast, small) instead.

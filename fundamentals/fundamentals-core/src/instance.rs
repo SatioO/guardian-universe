@@ -275,6 +275,48 @@ mod tests {
     }
 
     #[test]
+    fn pre_integration_in_bse_fin_instance_parses_with_proven_parser() {
+        // Phase 4 backfill: pre-integration quarters (broadcast before
+        // ~Apr 2025) live under `FourOneUploadDocument/Main_*.xml` and use
+        // BSE's own `in-bse-fin` taxonomy (2020-03-31 generation) — but with
+        // the SAME `OneD`/`FourD` context ids and the SAME local element
+        // names as SEBI in-capmkt. The parser matches local names only, so
+        // the era extends back through that taxonomy generation. This is a
+        // real RELIANCE Q3 FY25 (Dec-2024) standalone filing fetched from
+        // www.bseindia.com/XBRLFILES (probe 2026-07-12).
+        let xml = include_str!("../fixtures/bse-fourone-reliance-q3fy25.xml");
+        let info = extract_instance_info(xml).unwrap();
+        assert_eq!(info.isin.as_deref(), Some("INE002A01018"));
+        assert_eq!(info.scrip_code.as_deref(), Some("500325"));
+        assert_eq!(info.symbol.as_deref(), Some("RELIANCE"));
+        assert_eq!(info.quarter_start.as_deref(), Some("2024-10-01"));
+        assert_eq!(info.quarter_end.as_deref(), Some("2024-12-31"));
+        assert_eq!(info.basis, Some(StatementBasis::Standalone));
+        assert!(!info.is_audited);
+        assert_eq!(info.sector_kind, Some(SectorKind::General));
+
+        let meta = crate::xbrl_integrated::meta_from_iso_period_end(
+            "2024-12-31",
+            info.is_audited,
+            SectorKind::General,
+            StatementBasis::Standalone,
+        );
+        let (q, fy, _val) = crate::xbrl_integrated::parse_integrated_xbrl(xml, &meta).unwrap();
+        let q = q.expect("OneD quarter must parse");
+        // RIL standalone Q3 FY25 (published): revenue ₹1,28,260 cr,
+        // net profit ₹8,721 cr, basic EPS ₹6.44.
+        assert!((q.core.revenue_equiv.unwrap() - 128_260.0).abs() < 0.5);
+        assert!((q.core.net_profit.unwrap() - 8_721.0).abs() < 0.5);
+        assert!((q.core.eps.unwrap() - 6.44).abs() < 0.001);
+        assert_eq!(q.fiscal_quarter, "Q3");
+        assert_eq!(q.period_end, "2024-12-31");
+        // FourD here is a 9-month YTD (Apr–Dec), NOT a fiscal year — the
+        // producer's 350–380-day FY filter must reject it as an annual row.
+        assert_eq!(info.fy_duration_days(), Some(275));
+        assert!(fy.is_some(), "FourD parses, but the producer must not publish it as FY");
+    }
+
+    #[test]
     fn duration_math() {
         assert_eq!(duration_days_inclusive("2026-01-01", "2026-03-31"), Some(90));
         assert_eq!(duration_days_inclusive("2025-04-01", "2026-03-31"), Some(365));

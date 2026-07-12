@@ -26,11 +26,11 @@ mod universe;
 use clap::Parser;
 use std::path::PathBuf;
 
-use crate::pipeline::{run, RunConfig, RunSummary};
+use crate::pipeline::{run, BackfillConfig, RunConfig, RunMode, RunSummary, BACKFILL_ERA_START};
 use crate::source::DiscoveryWindow;
 
 #[derive(Parser, Debug)]
-#[command(name = "fundamentals-producer", about = "Bulk BSE+NSE fundamentals producer (P5 Phase 2)")]
+#[command(name = "fundamentals-producer", about = "Bulk BSE+NSE fundamentals producer (P5 Phases 2-4)")]
 struct Args {
     /// Coverage entry floor: cover symbols with scrip-master Mktcap ≥ this (₹ crore).
     #[arg(long, default_value_t = 800.0)]
@@ -51,8 +51,36 @@ struct Args {
 
     /// Discovery window: today | week | 15d | month | 3m | 1y.
     /// Daily incremental uses `week` (overlap-safe); first full run: `3m`/`1y`.
+    /// Ignored in --backfill mode.
     #[arg(long, default_value = "week")]
     window: String,
+
+    /// Phase 4: historical backfill — per-symbol full-history discovery over
+    /// one shard of the covered universe, filings older than --backfill-from
+    /// skipped (outcome-recorded), everything else fetched/parsed/merged.
+    #[arg(long, default_value_t = false)]
+    backfill: bool,
+
+    /// Backfill shard index (0-based). Sharding is FNV-1a hash-mod over
+    /// instrument_key — stable across runs, machines and re-dispatches.
+    #[arg(long, default_value_t = 0)]
+    shard_index: u32,
+
+    /// Total backfill shards.
+    #[arg(long, default_value_t = 1)]
+    total_shards: u32,
+
+    /// Backfill era floor (ISO date, broadcast-based): filings broadcast
+    /// before this are skipped without fetching. Default = the probed start
+    /// of parser-compatible history (SOURCE-CONTRACT §14).
+    #[arg(long, default_value = BACKFILL_ERA_START)]
+    backfill_from: String,
+
+    /// Soft time budget (minutes) for a backfill shard: stop starting new
+    /// symbols after this and finish cleanly so CI publishes partial
+    /// progress; re-dispatching the same shard resumes where it left off.
+    #[arg(long)]
+    max_runtime_mins: Option<u64>,
 
     /// Minimum milliseconds between HTTP requests (politeness floor 1500).
     #[arg(long, default_value_t = 1500)]
@@ -83,11 +111,40 @@ fn write_run_summary(out_dir: &std::path::Path, s: &RunSummary) -> Result<(), St
 
 fn main() {
     let args = Args::parse();
-    let window = match parse_window(&args.window) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("error: {e}");
+    let mode = if args.backfill {
+        if args.total_shards == 0 || args.shard_index >= args.total_shards {
+            eprintln!(
+                "error: invalid shard {}/{} (need 0 ≤ index < total)",
+                args.shard_index, args.total_shards
+            );
             std::process::exit(2);
+        }
+        let f = &args.backfill_from;
+        let date_shaped = f.len() == 10
+            && f.bytes().enumerate().all(|(i, b)| {
+                if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() }
+            });
+        if !date_shaped {
+            eprintln!("error: --backfill-from must be an ISO date (YYYY-MM-DD), got '{f}'");
+            std::process::exit(2);
+        }
+        RunMode::Backfill(BackfillConfig {
+            shard_index: args.shard_index,
+            total_shards: args.total_shards,
+            from: args.backfill_from.clone(),
+            max_runtime_mins: args.max_runtime_mins,
+        })
+    } else {
+        if args.shard_index != 0 || args.total_shards != 1 {
+            eprintln!("error: --shard-index/--total-shards require --backfill");
+            std::process::exit(2);
+        }
+        match parse_window(&args.window) {
+            Ok(w) => RunMode::Window(w),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
         }
     };
     // Politeness floor: never hammer, even if asked to.
@@ -98,7 +155,7 @@ fn main() {
         exit_mktcap_cr: args.exit_mktcap_cr,
         limit: args.limit,
         out_dir: args.out,
-        window,
+        mode,
         throttle_ms,
     };
 
@@ -146,6 +203,23 @@ fn main() {
             }
             if s.state_migration_invalidated > 0 {
                 println!("state migration invalidated: {}", s.state_migration_invalidated);
+            }
+            if let Some(shard) = &s.backfill_shard {
+                println!("backfill shard            : {shard}");
+                println!("  symbols in shard        : {}", s.backfill_symbols_in_shard);
+                println!("  already done (resume)   : {}", s.backfill_symbols_already_done);
+                println!("  scanned this run        : {}", s.backfill_symbols_scanned);
+                println!("  unresolved (no source)  : {}", s.backfill_symbols_unresolved);
+                for e in &s.backfill_discovery_errors {
+                    println!("   - {e}");
+                }
+                println!("  pre-era filings skipped : {}", s.backfill_pre_era_skipped);
+                println!("  instances unavailable   : {}", s.backfill_instance_unavailable.len());
+                for e in &s.backfill_instance_unavailable {
+                    println!("   - {e}");
+                }
+                println!("  budget stopped early    : {}", s.backfill_budget_stopped);
+                println!("  shard complete          : {}", s.backfill_complete);
             }
             println!("rows flagged (published)  : {}", s.rows_flagged);
             println!("rows new/updated          : {}", s.rows_new_or_updated);

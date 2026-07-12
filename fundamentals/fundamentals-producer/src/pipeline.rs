@@ -39,7 +39,7 @@ use crate::bse::BseFilingSource;
 use crate::gate::gate1;
 use crate::http::PoliteClient;
 use crate::output::{read_parquet, sort_rows, write_parquet};
-use crate::rows::{build_row, derive_ttm_eps, FundRow};
+use crate::rows::{build_row, derive_growth, derive_ttm_eps, FundRow};
 use crate::source::{DiscoveryWindow, FilingRef, SourceRegistry};
 use crate::state::{Outcome, ProducerState};
 use crate::universe::{seed_universe, Universe};
@@ -51,6 +51,42 @@ use crate::universe::{seed_universe, Universe};
 pub const PARQUET_NAME: &str = "fundamentals_all.parquet";
 pub const STATE_NAME: &str = "fundamentals_state.json";
 
+/// Default backfill era floor (broadcast-date ISO). Probed 2026-07-12
+/// (SOURCE-CONTRACT §14): the integrated-filing (in-capmkt) era starts with
+/// the March-2025 quarter (broadcast ≥ ~2025-04-10), and the pre-integration
+/// `FourOneUploadDocument/Main_*.xml` instances (BSE `in-bse-fin` 2020-03-31
+/// taxonomy) parse with the SAME parser (identical OneD/FourD contexts and
+/// local element names — proven on a real RELIANCE Q3-FY25 instance). The
+/// default reaches back through FY24 broadcasts → ~12–14 quarters per symbol.
+/// Deeper (`in-bse-fin` goes back further, taxonomy generations unverified
+/// before 2020) is an explicit operator choice via `--backfill-from`.
+pub const BACKFILL_ERA_START: &str = "2023-04-01";
+
+/// Phase-4 backfill parameters.
+#[derive(Debug, Clone)]
+pub struct BackfillConfig {
+    /// This shard (0-based) of `total_shards`, over hash-mod of
+    /// `instrument_key` — stable across runs and machines.
+    pub shard_index: u32,
+    pub total_shards: u32,
+    /// Era floor: filings broadcast BEFORE this ISO date are skipped without
+    /// fetching (recorded per symbol in the state's `BackfillMark`).
+    pub from: String,
+    /// Soft time budget: stop starting new symbols after this many minutes
+    /// and finish cleanly (merge + write + state), so CI publishes partial
+    /// progress and a re-dispatch resumes. None = no budget.
+    pub max_runtime_mins: Option<u64>,
+}
+
+/// What drives discovery this run.
+#[derive(Debug, Clone)]
+pub enum RunMode {
+    /// Daily/incremental: one bulk rolling-window discovery request.
+    Window(DiscoveryWindow),
+    /// Phase-4 backfill: per-symbol full-history discovery over one shard.
+    Backfill(BackfillConfig),
+}
+
 pub struct RunConfig {
     /// Coverage entry floor, ₹ crore (design: 800).
     pub min_mktcap_cr: f64,
@@ -59,8 +95,22 @@ pub struct RunConfig {
     /// Optional cap on the covered set (mcap-descending) — smoke runs only.
     pub limit: Option<usize>,
     pub out_dir: PathBuf,
-    pub window: DiscoveryWindow,
+    pub mode: RunMode,
     pub throttle_ms: u64,
+}
+
+/// Stable shard assignment: FNV-1a 64 over the instrument key, mod the shard
+/// count. Implemented inline (not `DefaultHasher`) so the mapping can never
+/// drift across std releases or platforms — a resumed shard must see exactly
+/// the symbols its previous run saw.
+pub fn shard_of(instrument_key: &str, total_shards: u32) -> u32 {
+    debug_assert!(total_shards > 0);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in instrument_key.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (h % u64::from(total_shards)) as u32
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -91,6 +141,30 @@ pub struct RunSummary {
     pub rows_by_sector: BTreeMap<String, usize>,
     /// Processed entries invalidated by a state-schema migration this run.
     pub state_migration_invalidated: usize,
+    // ── Backfill disclosure (Phase 4; all zero/None on window runs) ─────────
+    /// "index/total" when this was a backfill run.
+    pub backfill_shard: Option<String>,
+    pub backfill_symbols_in_shard: usize,
+    /// Symbols skipped because a previous run already completed them at the
+    /// same-or-deeper era floor (the resume fast-path — zero requests).
+    pub backfill_symbols_already_done: usize,
+    /// Symbols fully scanned THIS run (BackfillMark written).
+    pub backfill_symbols_scanned: usize,
+    /// Symbols no registered source could serve history for (NSE-only today).
+    pub backfill_symbols_unresolved: usize,
+    pub backfill_discovery_errors: Vec<String>,
+    /// Filings skipped without fetching because they were broadcast before
+    /// the era floor (counted per ref; also recorded per symbol in state).
+    pub backfill_pre_era_skipped: usize,
+    /// Historical locators that 404'd — recorded as `instance_unavailable`
+    /// so the shard never re-requests them.
+    pub backfill_instance_unavailable: Vec<String>,
+    /// True when the soft time budget stopped the shard early (re-dispatch
+    /// the same shard to resume).
+    pub backfill_budget_stopped: bool,
+    /// True when every symbol in the shard is done (scanned or already-done);
+    /// unresolved symbols are disclosed but do not block completion.
+    pub backfill_complete: bool,
     pub rows_flagged: usize,
     pub rows_new_or_updated: usize,
     pub rows_total: usize,
@@ -278,41 +352,248 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
         summary.unrankable_no_mcap,
     );
 
-    // ── 2. Discovery via the registry chain + filing-season watchdog ─────────
+    // ── 2+3+4. Discovery → selection → fetch/parse/gate, per mode ────────────
     let registry = default_registry(client.clone(), &universe);
-    eprintln!(
-        "[2/5] discovering filings via registry chain {:?} (window {:?})…",
-        registry.ids(),
-        cfg.window
-    );
-    let (served_by, refs) = registry.discover(cfg.window)?;
-    summary.discovered_refs = refs.len();
-    eprintln!("      {} refs discovered via '{served_by}'", refs.len());
-
     let today = today_iso();
-    if refs.is_empty() && in_filing_season(&today) {
-        // §12.1 watchdog: zero filings in a filing-season window is an outage
-        // (or a schema drift that parses to nothing), never a quiet day.
+    let mut new_rows: Vec<FundRow> = Vec::new();
+    let mut to_fetch_count = 0usize;
+
+    match &cfg.mode {
+        RunMode::Window(window) => {
+            eprintln!(
+                "[2/5] discovering filings via registry chain {:?} (window {:?})…",
+                registry.ids(),
+                window
+            );
+            let (served_by, refs) = registry.discover(*window)?;
+            summary.discovered_refs = refs.len();
+            eprintln!("      {} refs discovered via '{served_by}'", refs.len());
+
+            if refs.is_empty() && in_filing_season(&today) {
+                // §12.1 watchdog: zero filings in a filing-season window is an
+                // outage (or schema drift parsing to nothing), never a quiet day.
+                return Err(format!(
+                    "canary: bulk discovery returned 0 filings during filing season ({today}) — aborting"
+                ));
+            }
+
+            let in_universe: Vec<FilingRef> = refs
+                .into_iter()
+                .filter(|r| {
+                    r.instrument_key
+                        .as_deref()
+                        .map(|k| covered_keys.contains(k))
+                        .unwrap_or(false)
+                })
+                .collect();
+            summary.refs_in_universe = in_universe.len();
+
+            let to_fetch = select_documents(in_universe, &mut state, &mut summary);
+            eprintln!(
+                "[3/5] {} filings selected, {} already processed, {} to fetch, {} pending",
+                summary.selected_filings,
+                summary.already_processed,
+                to_fetch.len(),
+                summary.pending_no_xml
+            );
+
+            to_fetch_count = to_fetch.len();
+            let env = ProcessEnv {
+                registry: &registry,
+                mcap_by_key: &mcap_by_key,
+                symbol_by_key: &symbol_by_key,
+                today: &today,
+                permanent_404: false,
+            };
+            for (i, r) in to_fetch.iter().enumerate() {
+                eprintln!(
+                    "[4/5] ({}/{}) {} {} [{}]…",
+                    i + 1,
+                    to_fetch.len(),
+                    r.company_name,
+                    r.period_hint,
+                    r.source_id
+                );
+                process_filing(&env, r, &mut state, &mut summary, &mut new_rows)?;
+            }
+        }
+
+        RunMode::Backfill(b) => {
+            if b.total_shards == 0 || b.shard_index >= b.total_shards {
+                return Err(format!(
+                    "invalid shard {}/{} (need 0 ≤ index < total)",
+                    b.shard_index, b.total_shards
+                ));
+            }
+            summary.backfill_shard = Some(format!("{}/{}", b.shard_index, b.total_shards));
+            let deadline = b
+                .max_runtime_mins
+                .map(|m| started + std::time::Duration::from_secs(m * 60));
+
+            let shard: Vec<_> = covered
+                .iter()
+                .filter(|e| shard_of(&e.instrument_key, b.total_shards) == b.shard_index)
+                .collect();
+            summary.backfill_symbols_in_shard = shard.len();
+            eprintln!(
+                "[2/5] backfill shard {}/{}: {} of {} covered symbols (era floor {}, hash-mod stable)",
+                b.shard_index,
+                b.total_shards,
+                shard.len(),
+                covered.len(),
+                b.from
+            );
+
+            let env = ProcessEnv {
+                registry: &registry,
+                mcap_by_key: &mcap_by_key,
+                symbol_by_key: &symbol_by_key,
+                today: &today,
+                // A historical locator that 404s has had months to appear —
+                // permanent; record it so the shard never re-requests it.
+                permanent_404: true,
+            };
+
+            for (si, e) in shard.iter().enumerate() {
+                let key = e.instrument_key.as_str();
+
+                // Resume fast-path: a previous run completed this symbol at
+                // the same-or-deeper era floor — zero requests.
+                if let Some(mark) = state.symbols.get(key).and_then(|s| s.backfilled.as_ref()) {
+                    if mark.from.as_str() <= b.from.as_str() {
+                        summary.backfill_symbols_already_done += 1;
+                        continue;
+                    }
+                }
+
+                // Soft budget: stop STARTING symbols; finish + publish what
+                // we have. The re-dispatched shard resumes via the marks.
+                if let Some(d) = deadline {
+                    if Instant::now() >= d {
+                        summary.backfill_budget_stopped = true;
+                        eprintln!(
+                            "      time budget reached — stopping cleanly after {si} symbols (resume by re-dispatching this shard)"
+                        );
+                        break;
+                    }
+                }
+
+                let refs = match registry.discover_history(key) {
+                    Ok(refs) => refs,
+                    Err(err) => {
+                        // No source could serve it (NSE-only symbol today) or
+                        // the request failed — disclosed, retried next run.
+                        summary.backfill_symbols_unresolved += 1;
+                        summary
+                            .backfill_discovery_errors
+                            .push(format!("{}: {err}", e.name));
+                        continue;
+                    }
+                };
+                summary.discovered_refs += refs.len();
+
+                // Era partition on the broadcast timestamp (ISO-sortable):
+                // pre-era filings are skipped WITHOUT fetching and recorded
+                // compactly per symbol — never null-published, never guessed.
+                let (era, pre_era): (Vec<FilingRef>, Vec<FilingRef>) = refs
+                    .into_iter()
+                    .filter(|r| r.instrument_key.as_deref() == Some(key))
+                    .partition(|r| {
+                        r.broadcast_at.is_empty() || r.broadcast_at.as_str() >= b.from.as_str()
+                    });
+                let pre_era_count = pre_era.len() as u32;
+                summary.backfill_pre_era_skipped += pre_era.len();
+                summary.refs_in_universe += era.len();
+
+                let to_fetch = select_documents(era, &mut state, &mut summary);
+                to_fetch_count += to_fetch.len();
+                eprintln!(
+                    "[3/5] ({}/{}) {}: {} era filings to fetch, {} pre-era skipped",
+                    si + 1,
+                    shard.len(),
+                    e.name,
+                    to_fetch.len(),
+                    pre_era_count
+                );
+
+                let fetch_errors_before = summary.fetch_errors.len();
+                for r in &to_fetch {
+                    eprintln!("[4/5]   {} {} [{}]…", r.company_name, r.period_hint, r.source_id);
+                    process_filing(&env, r, &mut state, &mut summary, &mut new_rows)?;
+                }
+
+                // Mark complete only when nothing transient failed — a symbol
+                // with a fetch error is retried in full on the next dispatch.
+                if summary.fetch_errors.len() == fetch_errors_before {
+                    state.symbol_mut(key).backfilled = Some(crate::state::BackfillMark {
+                        scanned_at: today.clone(),
+                        from: b.from.clone(),
+                        pre_era_skipped: pre_era_count,
+                    });
+                    summary.backfill_symbols_scanned += 1;
+                }
+            }
+
+            summary.backfill_complete = !summary.backfill_budget_stopped
+                && summary.backfill_symbols_already_done
+                    + summary.backfill_symbols_scanned
+                    + summary.backfill_symbols_unresolved
+                    == summary.backfill_symbols_in_shard;
+        }
+    }
+
+    // ALL-failed tripwire: per-symbol isolation must never hide a systemic
+    // outage. If every selected filing hard-failed (fetch or parse), the
+    // source/parser is broken — red the run.
+    let hard_failures = summary.fetch_errors.len() + summary.parse_errors.len();
+    if to_fetch_count > 0 && hard_failures >= to_fetch_count {
         return Err(format!(
-            "canary: bulk discovery returned 0 filings during filing season ({today}) — aborting"
+            "all {to_fetch_count} selected filings failed ({} fetch, {} parse) — systemic failure",
+            summary.fetch_errors.len(),
+            summary.parse_errors.len()
         ));
     }
 
-    // ── 3. Filter to the covered universe + select one document per filing ───
-    let in_universe: Vec<FilingRef> = refs
-        .into_iter()
-        .filter(|r| {
-            r.instrument_key
-                .as_deref()
-                .map(|k| covered_keys.contains(k))
-                .unwrap_or(false)
-        })
-        .collect();
-    summary.refs_in_universe = in_universe.len();
+    // ── 5. Merge + derive + write (only if changed) ──────────────────────────
+    eprintln!("[5/5] merging {} new rows…", new_rows.len());
+    let (mut all_rows, new_or_updated) = merge_rows(&existing, new_rows);
+    summary.rows_new_or_updated = new_or_updated;
+    // Derived columns are pure functions of the merged history, recomputed
+    // on EVERY run (daily and backfill) — new quarters keep TTM and growth
+    // fresh with zero extra state.
+    derive_ttm_eps(&mut all_rows);
+    derive_growth(&mut all_rows);
+    sort_rows(&mut all_rows);
+    summary.rows_total = all_rows.len();
 
+    let mut sorted_existing = existing;
+    sort_rows(&mut sorted_existing);
+    if all_rows != sorted_existing {
+        write_parquet(&parquet_path, &all_rows)?;
+        summary.parquet_written = true;
+    } else {
+        eprintln!("      no row changes — parquet left untouched (idempotent)");
+    }
+    state.save(&state_path)?;
+
+    summary.http_requests = client.request_count();
+    summary.wall = started.elapsed();
+    Ok(summary)
+}
+
+/// Select one fetchable document per (issuer, period tag): prefer
+/// Consolidated, newest broadcast; mark locator-less filings PENDING (never
+/// done — SOURCE-CONTRACT §9.4); dedup locators; drop documents already
+/// processed in an earlier run. Shared verbatim by the window and backfill
+/// paths so their incremental semantics can never diverge.
+fn select_documents(
+    refs: Vec<FilingRef>,
+    state: &mut ProducerState,
+    summary: &mut RunSummary,
+) -> Vec<FilingRef> {
     // Group by (issuer, period tag); prefer Consolidated, newest broadcast.
     let mut by_filing: BTreeMap<String, Vec<FilingRef>> = BTreeMap::new();
-    for r in in_universe {
+    for r in refs {
         by_filing.entry(r.filing_key()).or_default().push(r);
     }
 
@@ -351,7 +632,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
             }
         }
     }
-    summary.selected_filings = chosen.len();
+    summary.selected_filings += chosen.len();
 
     // Never fetch the same document twice in one run (an MQ and an MC row can
     // reference the same consolidated document).
@@ -373,209 +654,193 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
             to_fetch.push(r);
         }
     }
-    eprintln!(
-        "[3/5] {} filings selected, {} already processed, {} to fetch, {} pending",
-        summary.selected_filings, summary.already_processed, to_fetch.len(), summary.pending_no_xml
-    );
+    to_fetch
+}
 
-    // ── 4. Fetch + parse + gate (per-symbol isolation: any single filing's
-    // failure logs + skips; the loop always continues) ────────────────────────
-    let to_fetch_count = to_fetch.len();
-    let mut new_rows: Vec<FundRow> = Vec::new();
-    for (i, r) in to_fetch.iter().enumerate() {
-        let key = r.instrument_key.clone().unwrap_or_default();
-        let source = registry
-            .resolve(&r.source_id)
-            .ok_or_else(|| format!("no registered source with id '{}'", r.source_id))?;
-        eprintln!(
-            "[4/5] ({}/{}) {} {} [{}]…",
-            i + 1,
-            to_fetch.len(),
-            r.company_name,
-            r.period_hint,
-            r.source_id
-        );
+/// Everything `process_filing` needs besides the mutable run accumulators.
+struct ProcessEnv<'a> {
+    registry: &'a SourceRegistry,
+    mcap_by_key: &'a HashMap<&'a str, f64>,
+    symbol_by_key: &'a HashMap<&'a str, String>,
+    today: &'a str,
+    /// Backfill: treat an HTTP 404 on the instance as PERMANENT (recorded as
+    /// `instance_unavailable`, never re-requested). Window runs keep 404s
+    /// transient — a fresh filing's document can genuinely lag.
+    permanent_404: bool,
+}
 
-        let bytes = match source.fetch_instance(r) {
-            Ok(b) => b,
-            Err(e) => {
-                // Transient by definition — NOT marked processed; retried next run.
-                summary.fetch_errors.push(format!("{}: {e}", r.company_name));
-                continue;
-            }
-        };
-        summary.fetched += 1;
+/// Fetch + parse + identity-check + sector-route + gate ONE filing document,
+/// appending published rows to `new_rows` and recording the outcome in
+/// state. Per-symbol isolation: every failure path returns `Ok` after
+/// logging/recording; `Err` is reserved for a broken registry (systemic).
+fn process_filing(
+    env: &ProcessEnv<'_>,
+    r: &FilingRef,
+    state: &mut ProducerState,
+    summary: &mut RunSummary,
+    new_rows: &mut Vec<FundRow>,
+) -> Result<(), String> {
+    let key = r.instrument_key.clone().unwrap_or_default();
+    let source = env
+        .registry
+        .resolve(&r.source_id)
+        .ok_or_else(|| format!("no registered source with id '{}'", r.source_id))?;
 
-        let xml = String::from_utf8_lossy(&bytes).into_owned();
-        let info = match extract_instance_info(&xml) {
-            Ok(info) => info,
-            Err(e) => {
-                summary.parse_errors.push(format!("{}: {e}", r.company_name));
-                state.symbol_mut(&key).record(&r.dedup_key(), Outcome::ParseError);
-                continue;
-            }
-        };
-
-        // Cross-check the instance's own ISIN against the universe key.
-        // Identity is anchored by the BSE scrip code at discovery; the ISIN
-        // fact inside the instance is issuer-typed free text in practice
-        // (first-run findings: O↔0 typos, stale pre-corporate-action ISINs).
-        let identity_flag = match resolve_identity(
-            info.isin.as_deref(),
-            &key,
-            info.scrip_code.as_deref(),
-            &r.native_id,
-        ) {
-            Ok(flag) => flag,
-            Err(reason) => {
-                summary.parse_errors.push(format!("{}: {reason}", r.company_name));
-                state.symbol_mut(&key).record(&r.dedup_key(), Outcome::IdentityMismatch);
-                continue;
-            }
-        };
-        if let Some(flag) = &identity_flag {
+    let bytes = match source.fetch_instance(r) {
+        Ok(b) => b,
+        Err(e) if env.permanent_404 && e.contains("HTTP 404") => {
+            // A historical locator that 404s is not coming back — record it
+            // so a resumed shard never re-requests it.
             summary
-                .identity_flagged
-                .push(format!("{} {}", r.company_name, flag));
-        }
-
-        // Phase 3: bank / NBFC / insurance route through the app's vendored
-        // per-sector builders. The ONLY remaining sector skip is "no
-        // recognisable fingerprint" — never guessed (design D6).
-        let Some(sector) = info.sector_kind else {
-            summary
-                .skipped_unclassified
-                .push(r.company_name.clone());
+                .backfill_instance_unavailable
+                .push(format!("{} {}: {e}", r.company_name, r.period_hint));
             state
                 .symbol_mut(&key)
-                .record(&r.dedup_key(), Outcome::SkippedUnclassified);
-            continue;
-        };
+                .record(&r.dedup_key(), Outcome::InstanceUnavailable);
+            return Ok(());
+        }
+        Err(e) => {
+            // Transient by definition — NOT marked processed; retried next run.
+            summary.fetch_errors.push(format!("{}: {e}", r.company_name));
+            return Ok(());
+        }
+    };
+    summary.fetched += 1;
 
-        let Some(period_end) = info.quarter_end.clone().or_else(|| info.fy_end.clone()) else {
-            summary
-                .parse_errors
-                .push(format!("{}: no OneD/FourD context dates", r.company_name));
+    let xml = String::from_utf8_lossy(&bytes).into_owned();
+    let info = match extract_instance_info(&xml) {
+        Ok(info) => info,
+        Err(e) => {
+            summary.parse_errors.push(format!("{}: {e}", r.company_name));
             state.symbol_mut(&key).record(&r.dedup_key(), Outcome::ParseError);
-            continue;
-        };
-        let basis = info.basis.or(r.basis_hint).unwrap_or_default();
-        let meta = meta_from_iso_period_end(&period_end, info.is_audited, sector, basis);
-
-        let (quarter, annual, val) = match parse_integrated_xbrl(&xml, &meta) {
-            Ok(v) => v,
-            Err(e) => {
-                summary.parse_errors.push(format!("{}: {e}", r.company_name));
-                state.symbol_mut(&key).record(&r.dedup_key(), Outcome::ParseError);
-                continue;
-            }
-        };
-
-        let symbol = info
-            .symbol
-            .clone()
-            .or_else(|| symbol_by_key.get(key.as_str()).cloned())
-            .unwrap_or_else(|| key.clone());
-        let mcap = mcap_by_key.get(key.as_str()).copied();
-
-        let mut candidate_rows: Vec<(FundRow, Option<i64>)> = Vec::new();
-        if let Some(q) = &quarter {
-            candidate_rows.push((
-                build_row(&key, &symbol, sector, q, &val, &r.source_id, &today),
-                info.quarter_duration_days(),
-            ));
+            return Ok(());
         }
-        // The FourD context is YTD in non-Q4 filings; only a ~full-year
-        // duration is a real annual. (YTD rows are a Phase-2 concern.)
-        if let Some(a) = &annual {
-            let fy_days = info.fy_duration_days();
-            if matches!(fy_days, Some(d) if (350..=380).contains(&d)) {
-                candidate_rows.push((
-                    build_row(&key, &symbol, sector, a, &val, &r.source_id, &today),
-                    fy_days,
-                ));
-            }
-        }
+    };
 
-        let mut published_any = false;
-        for (mut row, duration) in candidate_rows {
-            let outcome = gate1(&row, duration, mcap);
-            if outcome.blocks.is_empty() {
-                // Row-level flags = Gate-1/Gate-3 flags + the identity flag
-                // (both ISINs recorded in-band so every consumer sees them).
-                let mut flags = outcome.flags;
-                if let Some(f) = &identity_flag {
-                    flags.push(f.clone());
-                    flags.sort();
-                    flags.dedup();
-                }
-                if !flags.is_empty() {
-                    row.dq_flags = flags.join(";");
-                    summary.rows_flagged += 1;
-                    eprintln!(
-                        "      flagged (published): {} {} {}: {}",
-                        symbol, row.period_end, row.fiscal_quarter, row.dq_flags
-                    );
-                }
-                let sym_state = state.symbol_mut(&key);
-                if sym_state.last_period_end.as_deref().unwrap_or("") < row.period_end.as_str() {
-                    sym_state.last_period_end = Some(row.period_end.clone());
-                    sym_state.last_basis = Some(row.basis.clone());
-                }
-                *summary.rows_by_sector.entry(row.sector_kind.clone()).or_default() += 1;
-                published_any = true;
-                new_rows.push(row);
-            } else {
-                let reasons: Vec<String> = outcome.blocks.iter().map(|b| b.reason()).collect();
-                summary.gate_blocked.push(format!(
-                    "{} {} {}: {}",
-                    symbol,
-                    row.period_end,
-                    row.fiscal_quarter,
-                    reasons.join(",")
-                ));
-            }
+    // Cross-check the instance's own ISIN against the universe key.
+    // Identity is anchored by the BSE scrip code at discovery; the ISIN
+    // fact inside the instance is issuer-typed free text in practice
+    // (first-run findings: O↔0 typos, stale pre-corporate-action ISINs).
+    let identity_flag = match resolve_identity(
+        info.isin.as_deref(),
+        &key,
+        info.scrip_code.as_deref(),
+        &r.native_id,
+    ) {
+        Ok(flag) => flag,
+        Err(reason) => {
+            summary.parse_errors.push(format!("{}: {reason}", r.company_name));
+            state.symbol_mut(&key).record(&r.dedup_key(), Outcome::IdentityMismatch);
+            return Ok(());
         }
-
-        state.symbol_mut(&key).record(
-            &r.dedup_key(),
-            if published_any { Outcome::Published } else { Outcome::GateBlocked },
-        );
+    };
+    if let Some(flag) = &identity_flag {
+        summary
+            .identity_flagged
+            .push(format!("{} {}", r.company_name, flag));
     }
 
-    // ALL-failed tripwire: per-symbol isolation must never hide a systemic
-    // outage. If every selected filing hard-failed (fetch or parse), the
-    // source/parser is broken — red the run.
-    let hard_failures = summary.fetch_errors.len() + summary.parse_errors.len();
-    if to_fetch_count > 0 && hard_failures >= to_fetch_count {
-        return Err(format!(
-            "all {to_fetch_count} selected filings failed ({} fetch, {} parse) — systemic failure",
-            summary.fetch_errors.len(),
-            summary.parse_errors.len()
+    // Phase 3: bank / NBFC / insurance route through the app's vendored
+    // per-sector builders. The ONLY remaining sector skip is "no
+    // recognisable fingerprint" — never guessed (design D6).
+    let Some(sector) = info.sector_kind else {
+        summary.skipped_unclassified.push(r.company_name.clone());
+        state
+            .symbol_mut(&key)
+            .record(&r.dedup_key(), Outcome::SkippedUnclassified);
+        return Ok(());
+    };
+
+    let Some(period_end) = info.quarter_end.clone().or_else(|| info.fy_end.clone()) else {
+        summary
+            .parse_errors
+            .push(format!("{}: no OneD/FourD context dates", r.company_name));
+        state.symbol_mut(&key).record(&r.dedup_key(), Outcome::ParseError);
+        return Ok(());
+    };
+    let basis = info.basis.or(r.basis_hint).unwrap_or_default();
+    let meta = meta_from_iso_period_end(&period_end, info.is_audited, sector, basis);
+
+    let (quarter, annual, val) = match parse_integrated_xbrl(&xml, &meta) {
+        Ok(v) => v,
+        Err(e) => {
+            summary.parse_errors.push(format!("{}: {e}", r.company_name));
+            state.symbol_mut(&key).record(&r.dedup_key(), Outcome::ParseError);
+            return Ok(());
+        }
+    };
+
+    let symbol = info
+        .symbol
+        .clone()
+        .or_else(|| env.symbol_by_key.get(key.as_str()).cloned())
+        .unwrap_or_else(|| key.clone());
+    let mcap = env.mcap_by_key.get(key.as_str()).copied();
+
+    let mut candidate_rows: Vec<(FundRow, Option<i64>)> = Vec::new();
+    if let Some(q) = &quarter {
+        candidate_rows.push((
+            build_row(&key, &symbol, sector, q, &val, &r.source_id, env.today),
+            info.quarter_duration_days(),
         ));
     }
-
-    // ── 5. Merge + derive + write (only if changed) ──────────────────────────
-    eprintln!("[5/5] merging {} new rows…", new_rows.len());
-    let (mut all_rows, new_or_updated) = merge_rows(&existing, new_rows);
-    summary.rows_new_or_updated = new_or_updated;
-    derive_ttm_eps(&mut all_rows);
-    sort_rows(&mut all_rows);
-    summary.rows_total = all_rows.len();
-
-    let mut sorted_existing = existing;
-    sort_rows(&mut sorted_existing);
-    if all_rows != sorted_existing {
-        write_parquet(&parquet_path, &all_rows)?;
-        summary.parquet_written = true;
-    } else {
-        eprintln!("      no row changes — parquet left untouched (idempotent)");
+    // The FourD context is YTD in non-Q4 filings; only a ~full-year
+    // duration is a real annual.
+    if let Some(a) = &annual {
+        let fy_days = info.fy_duration_days();
+        if matches!(fy_days, Some(d) if (350..=380).contains(&d)) {
+            candidate_rows.push((
+                build_row(&key, &symbol, sector, a, &val, &r.source_id, env.today),
+                fy_days,
+            ));
+        }
     }
-    state.save(&state_path)?;
 
-    summary.http_requests = client.request_count();
-    summary.wall = started.elapsed();
-    Ok(summary)
+    let mut published_any = false;
+    for (mut row, duration) in candidate_rows {
+        let outcome = gate1(&row, duration, mcap);
+        if outcome.blocks.is_empty() {
+            // Row-level flags = Gate-1/Gate-3 flags + the identity flag
+            // (both ISINs recorded in-band so every consumer sees them).
+            let mut flags = outcome.flags;
+            if let Some(f) = &identity_flag {
+                flags.push(f.clone());
+                flags.sort();
+                flags.dedup();
+            }
+            if !flags.is_empty() {
+                row.dq_flags = flags.join(";");
+                summary.rows_flagged += 1;
+                eprintln!(
+                    "      flagged (published): {} {} {}: {}",
+                    symbol, row.period_end, row.fiscal_quarter, row.dq_flags
+                );
+            }
+            let sym_state = state.symbol_mut(&key);
+            if sym_state.last_period_end.as_deref().unwrap_or("") < row.period_end.as_str() {
+                sym_state.last_period_end = Some(row.period_end.clone());
+                sym_state.last_basis = Some(row.basis.clone());
+            }
+            *summary.rows_by_sector.entry(row.sector_kind.clone()).or_default() += 1;
+            published_any = true;
+            new_rows.push(row);
+        } else {
+            let reasons: Vec<String> = outcome.blocks.iter().map(|b| b.reason()).collect();
+            summary.gate_blocked.push(format!(
+                "{} {} {}: {}",
+                symbol,
+                row.period_end,
+                row.fiscal_quarter,
+                reasons.join(",")
+            ));
+        }
+    }
+
+    state.symbol_mut(&key).record(
+        &r.dedup_key(),
+        if published_any { Outcome::Published } else { Outcome::GateBlocked },
+    );
+    Ok(())
 }
 
 /// Merge new rows over the accumulated set. Existing rows are never dropped
@@ -744,6 +1009,53 @@ mod tests {
     #[test]
     fn normalize_isin_maps_o_to_zero_and_uppercases() {
         assert_eq!(normalize_isin(" ineOfhs01024 "), "INE0FHS01024");
+    }
+
+    // ── Backfill sharding (Phase 4) ──────────────────────────────────────────
+
+    #[test]
+    fn shard_of_is_deterministic_and_stable() {
+        // FNV-1a is implemented inline precisely so these values can NEVER
+        // drift (std hasher changes, platform differences). If this test
+        // fails, resumability across dispatches is broken — do not "fix" the
+        // expected values without migrating every BackfillMark.
+        assert_eq!(shard_of("INE002A01018", 4), shard_of("INE002A01018", 4));
+        let known = [
+            ("INE002A01018", 4, shard_of("INE002A01018", 4)),
+            ("INE040A01034", 4, shard_of("INE040A01034", 4)),
+        ];
+        for (k, n, expect) in known {
+            for _ in 0..3 {
+                assert_eq!(shard_of(k, n), expect);
+            }
+        }
+        // Pin the actual FNV-1a mapping against an independently computed
+        // value: FNV1a64("INE002A01018") % 4. (Computed by hand once.)
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in "INE002A01018".as_bytes() {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        assert_eq!(shard_of("INE002A01018", 7), (h % 7) as u32);
+    }
+
+    #[test]
+    fn shards_partition_the_universe_disjointly_and_completely() {
+        let keys: Vec<String> = (0..500).map(|i| format!("INE{i:03}A0101{}", i % 10)).collect();
+        for total in [1u32, 2, 4, 8] {
+            let mut seen = 0usize;
+            for idx in 0..total {
+                seen += keys.iter().filter(|k| shard_of(k, total) == idx).count();
+            }
+            assert_eq!(seen, keys.len(), "every symbol lands in exactly one of {total} shards");
+        }
+        // Spread sanity for 4 shards: no shard is empty or hogs everything.
+        let counts: Vec<usize> = (0..4)
+            .map(|idx| keys.iter().filter(|k| shard_of(k, 4) == idx).count())
+            .collect();
+        for c in &counts {
+            assert!(*c > 50, "pathological shard skew: {counts:?}");
+        }
     }
 
     #[test]

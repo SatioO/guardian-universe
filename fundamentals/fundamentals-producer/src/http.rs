@@ -21,7 +21,11 @@ pub struct PoliteClient {
 impl PoliteClient {
     pub fn new(throttle_ms: u64) -> Self {
         let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(60))
+            // 120 s: the timeout covers the WHOLE transfer, and Phase-4
+            // backfill fetches multi-MB historical instances (RELIANCE
+            // ~7 MB, big-bank consolidated filings larger still) — 60 s
+            // left too little headroom on slow residential links.
+            .timeout(Duration::from_secs(120))
             .redirects(4)
             .build();
         Self {

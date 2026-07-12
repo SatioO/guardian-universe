@@ -29,11 +29,18 @@ pub struct BseFilingSource {
     /// BSE scrip code → ISIN, injected from the universe seed so the source
     /// can resolve refs to the canonical instrument key itself.
     scrip_to_isin: HashMap<String, String>,
+    /// ISIN → BSE scrip code (the reverse map, for per-symbol history
+    /// discovery). Kept INSIDE the source: native identity never leaks up.
+    isin_to_scrip: HashMap<String, String>,
 }
 
 impl BseFilingSource {
     pub fn new(client: Arc<PoliteClient>, scrip_to_isin: HashMap<String, String>) -> Self {
-        Self { client, scrip_to_isin }
+        let isin_to_scrip = scrip_to_isin
+            .iter()
+            .map(|(scrip, isin)| (isin.clone(), scrip.clone()))
+            .collect();
+        Self { client, scrip_to_isin, isin_to_scrip }
     }
 
     fn flag_dur(window: DiscoveryWindow) -> u8 {
@@ -146,6 +153,20 @@ impl FilingSource for BseFilingSource {
         self.parse_discovery(&body)
     }
 
+    /// Full filing history for one symbol: `SCRIP_CD=<scrip>&FlagDur=7`.
+    /// Probed 2026-07-12 (SOURCE-CONTRACT §14): per-scrip FlagDur=7 returns
+    /// the COMPLETE broadcast history (not just "beyond 1 year") — e.g.
+    /// RELIANCE → 132 rows back to 2016 — in one ~40–80 KB response.
+    fn discover_history(&self, instrument_key: &str) -> Result<Vec<FilingRef>, String> {
+        let scrip = self
+            .isin_to_scrip
+            .get(instrument_key)
+            .ok_or_else(|| format!("no BSE scrip code for {instrument_key}"))?;
+        let url = format!("{DISCOVERY_URL}?SCRIP_CD={scrip}&FlagDur=7&HFQ=&ISUBGROUP_CODE=");
+        let body = self.client.get_text(&url, Some(REFERER))?;
+        self.parse_discovery(&body)
+    }
+
     fn fetch_instance(&self, r: &FilingRef) -> Result<Vec<u8>, String> {
         let locator = r
             .instance_locator
@@ -219,6 +240,14 @@ mod tests {
             url,
             "https://www.bseindia.com/XBRLFILES/IFIndasDuplicateUploadDocument/Integrated_Finance_Ind_As_517506_1172026211629_IFIndAs.xml"
         );
+    }
+
+    #[test]
+    fn history_discovery_rejects_unknown_isin_without_a_request() {
+        // NSE-only symbols have no BSE scrip code — the source must refuse
+        // locally (zero HTTP cost) so the registry can fall through.
+        let err = source().discover_history("INE999X01010").unwrap_err();
+        assert!(err.contains("no BSE scrip code"), "err = {err}");
     }
 
     #[test]
