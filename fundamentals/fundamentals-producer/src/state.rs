@@ -3,11 +3,55 @@
 //! Deterministic serialization (BTree collections, no timestamps) so a re-run
 //! with no new filings writes byte-identical state — half of the Phase-1
 //! idempotency milestone.
+//!
+//! # Versioning (Phase 3)
+//! `version` is a schema/semantics version for the state file itself.
+//!
+//! - **v1** (Phases 1–2): `processed` recorded WHICH (filing, document) pairs
+//!   were handled but not WHY — a bank filing skipped under design D6 was
+//!   indistinguishable from a published one.
+//! - **v2** (Phase 3): every processed dedup key also records its
+//!   [`Outcome`] in `outcomes`, so future migrations can invalidate exactly
+//!   one outcome class (e.g. "re-ingest everything we skipped as
+//!   `skipped_non_general`") without touching anything else — see
+//!   [`ProducerState::invalidate_outcome`].
+//!
+//! **v1 → v2 migration** (`migrate`): v1 cannot be invalidated per outcome
+//! (outcomes weren't recorded), so the migration uses the accumulated parquet
+//! as ground truth: a symbol with ZERO published rows only ever produced
+//! non-publishing outcomes (the D6 non-general skips, plus a handful of
+//! parse errors / ISIN-identity skips) — its `processed` set is cleared so
+//! Phase 3 re-fetches exactly that backlog. Symbols WITH published rows keep
+//! their state untouched, so the ~2,700-row general universe is NOT
+//! re-fetched. (A symbol with both published rows and a D6 skip cannot occur
+//! in practice — sector classification is stable per issuer; if one ever
+//! slipped through, the cost is one missed re-ingest until the next filing
+//! revision, never wrong data.)
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+/// Current state-file schema version.
+pub const STATE_VERSION: u32 = 2;
+
+/// Why a (filing, document) was marked processed. Recorded from v2 on so
+/// future state bumps can invalidate a single outcome class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// At least one row from this document reached the parquet.
+    Published,
+    /// Sector fingerprint yielded no classification — never guessed (D6).
+    SkippedUnclassified,
+    /// Instance identity could not be anchored to the universe key.
+    IdentityMismatch,
+    /// Structural/parse failure on fetched bytes.
+    ParseError,
+    /// Every candidate row was hard-blocked by Gate-1.
+    GateBlocked,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SymbolState {
@@ -18,15 +62,26 @@ pub struct SymbolState {
     #[serde(default)]
     pub last_basis: Option<String>,
     /// Dedup keys of (filing, document) pairs already fetched+processed —
-    /// including non-general skips and Gate-1 blocks (with outcome recorded
-    /// below), so they are not refetched every run.
+    /// including skips and Gate-1 blocks (with outcome recorded below), so
+    /// they are not refetched every run.
     #[serde(default)]
     pub processed: BTreeSet<String>,
+    /// dedup key → why it was processed (v2+; v1 entries have no outcome).
+    #[serde(default)]
+    pub outcomes: BTreeMap<String, Outcome>,
     /// Filing keys broadcast WITHOUT an XBRL locator yet (PDF-first lag).
     /// Stays pending until a locator appears — never marked done off the
     /// PDF row (SOURCE-CONTRACT §9.4).
     #[serde(default)]
     pub pending_xml: BTreeSet<String>,
+}
+
+impl SymbolState {
+    /// Mark a dedup key processed with its outcome (v2 semantics).
+    pub fn record(&mut self, dedup_key: &str, outcome: Outcome) {
+        self.processed.insert(dedup_key.to_string());
+        self.outcomes.insert(dedup_key.to_string(), outcome);
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -41,7 +96,7 @@ pub struct ProducerState {
 
 impl ProducerState {
     pub fn new() -> Self {
-        Self { version: 1, symbols: BTreeMap::new() }
+        Self { version: STATE_VERSION, symbols: BTreeMap::new() }
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -74,6 +129,54 @@ impl ProducerState {
             .map(|s| s.processed.contains(dedup_key))
             .unwrap_or(false)
     }
+
+    /// Migrate an older state file to [`STATE_VERSION`]. Idempotent: a
+    /// current-version state is returned untouched.
+    ///
+    /// v1 → v2: clear `processed` for every symbol WITHOUT published parquet
+    /// rows (`published_symbols` = instrument keys present in the accumulated
+    /// parquet). That is exactly the Phase-2 non-publishing backlog — the D6
+    /// non-general skips plus the ISIN-identity/parse skips — re-ingested on
+    /// the next run at the cost of one polite fetch each, while the general
+    /// universe's state (and therefore its fetch schedule) is untouched.
+    /// `pending_xml` survives migration: pending is pending in any version.
+    pub fn migrate(&mut self, published_symbols: &HashSet<String>) -> usize {
+        if self.version >= STATE_VERSION {
+            return 0;
+        }
+        let mut invalidated = 0usize;
+        for (key, sym) in self.symbols.iter_mut() {
+            if !published_symbols.contains(key) {
+                invalidated += sym.processed.len();
+                sym.processed.clear();
+                sym.outcomes.clear();
+            }
+        }
+        self.version = STATE_VERSION;
+        invalidated
+    }
+
+    /// Targeted invalidation for FUTURE state bumps (v2+ semantics): drop
+    /// every processed entry whose recorded outcome matches, so only that
+    /// class is re-fetched. Entries without a recorded outcome are kept.
+    #[allow(dead_code)]
+    pub fn invalidate_outcome(&mut self, outcome: Outcome) -> usize {
+        let mut invalidated = 0usize;
+        for sym in self.symbols.values_mut() {
+            let keys: Vec<String> = sym
+                .outcomes
+                .iter()
+                .filter(|(_, o)| **o == outcome)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in keys {
+                sym.processed.remove(&k);
+                sym.outcomes.remove(&k);
+                invalidated += 1;
+            }
+        }
+        invalidated
+    }
 }
 
 #[cfg(test)]
@@ -87,7 +190,7 @@ mod tests {
             let s = st.symbol_mut("INE690A01028");
             s.last_period_end = Some("2026-03-31".into());
             s.last_basis = Some("standalone".into());
-            s.processed.insert("517506|MQ2025-2026|standalone|a.html".into());
+            s.record("517506|MQ2025-2026|standalone|a.html", Outcome::Published);
             s.pending_xml.insert("999999|JQ2026-2027".into());
         }
         let a = serde_json::to_string_pretty(&st).unwrap();
@@ -102,7 +205,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         let mut st = ProducerState::new();
-        st.symbol_mut("INE117A01022").processed.insert("k1".into());
+        st.symbol_mut("INE117A01022").record("k1", Outcome::Published);
         st.save(&path).unwrap();
         let bytes1 = std::fs::read(&path).unwrap();
         // Saving the same state again → byte-identical file.
@@ -119,6 +222,90 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let st = ProducerState::load(&dir.path().join("nope.json")).unwrap();
         assert!(st.symbols.is_empty());
+        assert_eq!(st.version, STATE_VERSION);
+    }
+
+    #[test]
+    fn v1_state_json_loads_with_empty_outcomes() {
+        // A real Phase-2 state file has no `outcomes` field.
+        let v1 = r#"{
+          "version": 1,
+          "symbols": {
+            "INE040A01034": {
+              "processed": ["500180|MQ2025-2026|consolidated|a.html"],
+              "pending_xml": []
+            }
+          }
+        }"#;
+        let st: ProducerState = serde_json::from_str(v1).unwrap();
         assert_eq!(st.version, 1);
+        assert!(st.symbols["INE040A01034"].outcomes.is_empty());
+        assert!(st.is_processed("INE040A01034", "500180|MQ2025-2026|consolidated|a.html"));
+    }
+
+    #[test]
+    fn migrate_v1_invalidates_only_unpublished_symbols() {
+        let mut st = ProducerState { version: 1, symbols: BTreeMap::new() };
+        // General symbol WITH published rows — must keep its state.
+        st.symbol_mut("INE002A01018").processed.insert("gen|doc".into());
+        st.symbol_mut("INE002A01018").last_period_end = Some("2026-03-31".into());
+        // Bank symbol skipped under D6 — no rows → must be invalidated.
+        st.symbol_mut("INE040A01034").processed.insert("bank|doc".into());
+        // Pending marker must survive on both.
+        st.symbol_mut("INE040A01034").pending_xml.insert("500180|JQ2026-2027".into());
+
+        let published: HashSet<String> = ["INE002A01018".to_string()].into_iter().collect();
+        let n = st.migrate(&published);
+
+        assert_eq!(n, 1, "exactly the bank doc invalidated");
+        assert_eq!(st.version, STATE_VERSION);
+        assert!(st.is_processed("INE002A01018", "gen|doc"), "published symbol untouched");
+        assert!(!st.is_processed("INE040A01034", "bank|doc"), "skipped symbol re-ingestable");
+        assert!(
+            st.symbols["INE040A01034"].pending_xml.contains("500180|JQ2026-2027"),
+            "pending survives migration"
+        );
+        assert_eq!(
+            st.symbols["INE002A01018"].last_period_end.as_deref(),
+            Some("2026-03-31")
+        );
+    }
+
+    #[test]
+    fn migrate_is_idempotent_on_current_version() {
+        let mut st = ProducerState::new();
+        st.symbol_mut("INE040A01034").record("bank|doc", Outcome::Published);
+        let before = st.clone();
+        let n = st.migrate(&HashSet::new()); // empty published set
+        assert_eq!(n, 0, "v2 state must never be invalidated by migrate()");
+        assert_eq!(st, before);
+    }
+
+    #[test]
+    fn invalidate_outcome_targets_one_class_only() {
+        let mut st = ProducerState::new();
+        st.symbol_mut("INE0A").record("a|1", Outcome::Published);
+        st.symbol_mut("INE0A").record("a|2", Outcome::SkippedUnclassified);
+        st.symbol_mut("INE0B").record("b|1", Outcome::SkippedUnclassified);
+        st.symbol_mut("INE0C").record("c|1", Outcome::GateBlocked);
+
+        let n = st.invalidate_outcome(Outcome::SkippedUnclassified);
+        assert_eq!(n, 2);
+        assert!(st.is_processed("INE0A", "a|1"), "published entry kept");
+        assert!(!st.is_processed("INE0A", "a|2"));
+        assert!(!st.is_processed("INE0B", "b|1"));
+        assert!(st.is_processed("INE0C", "c|1"), "other classes kept");
+    }
+
+    #[test]
+    fn outcome_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&Outcome::SkippedUnclassified).unwrap(),
+            "\"skipped_unclassified\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Outcome>("\"identity_mismatch\"").unwrap(),
+            Outcome::IdentityMismatch
+        );
     }
 }

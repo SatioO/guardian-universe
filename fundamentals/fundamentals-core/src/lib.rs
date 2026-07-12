@@ -17,9 +17,21 @@
 //! - `fetch_integrated()` (NSE cookie-primed fetch) removed; the pure
 //!   `select_integrated_filings()` list-selection and `parse_integrated_xbrl()`
 //!   are kept verbatim (fixture tests included).
-//! - Insurance fixtures (SBILIFE/ICICIGI, ~1.1 MB) were not copied to keep the
-//!   fixture set minimal; their tests are omitted. The insurance builder code
-//!   itself is retained unchanged.
+//! - Insurance fixtures (SBILIFE/ICICIGI, ~1.1 MB) were initially omitted;
+//!   Phase 3 restored both fixtures and their tests (D6: per-sector element
+//!   names are confirmed by fixture before rows ship unflagged).
+//! - Phase-3 divergence from "vendored verbatim": the bank builder (a) reads
+//!   NPA ratios as XBRL percentItemType FRACTIONS and scales x100 (verified
+//!   on six live 2026 IFBanking instances; the app's raw-percent reading was
+//!   never exercised — its fixture holds only 0-placeholders), (b) treats
+//!   literal-0 NPA values as unfilled placeholders (→ None), (c) extracts
+//!   `PercentageOfNpa` as `net_npa_pct`, and (d) drops post-scale values
+//!   above 50% as implausible (see `build_bank`). The insurance builder maps
+//!   core net_profit/pbt/tax to the TRUE shareholder P&L elements
+//!   (life: `ProfitLossAfterTaxAndExtraordinaryItems`; general:
+//!   `ProfitLossAfterTax`/`ProfitOrLossBeforeTax`/`ProvisionForTax`) instead
+//!   of the surplus-transfer/operating-profit lines (see
+//!   `build_insurance_general`). Both worth upstreaming to the app.
 //! - NEW module [`instance`]: derives per-instance metadata (ISIN, symbol,
 //!   period dates, basis, audited flag, sector fingerprint, context durations)
 //!   from the XBRL itself — needed by the BSE flow where the discovery feed's

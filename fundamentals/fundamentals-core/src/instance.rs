@@ -227,6 +227,23 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_insurance_for_sbilife_and_icicigi() {
+        // Life (NetPremiumIncome) and general (NetPremiumWritten) insurers
+        // must both fingerprint as Insurance — Phase 3 routes them to the
+        // vendored insurance builder instead of skipping.
+        let sbilife = include_str!("../fixtures/nse-integrated-sbilife.xml");
+        let icicigi = include_str!("../fixtures/nse-integrated-icicigi.xml");
+        assert_eq!(
+            extract_instance_info(sbilife).unwrap().sector_kind,
+            Some(SectorKind::Insurance)
+        );
+        assert_eq!(
+            extract_instance_info(icicigi).unwrap().sector_kind,
+            Some(SectorKind::Insurance)
+        );
+    }
+
+    #[test]
     fn bse_instance_parses_with_proven_parser() {
         // End-to-end: the BSE `.xml` twin feeds the app parser unchanged.
         let info = extract_instance_info(BSE_TTK).unwrap();

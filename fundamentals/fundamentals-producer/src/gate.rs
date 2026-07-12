@@ -107,6 +107,31 @@ pub fn gate1(
         }
     }
 
+    // ── Gate-3 identity checks (ingest design §4) — flags, never blocks ─────
+    // pbt − tax ≈ net_profit within ±5%. Legitimate divergence exists
+    // (minority interest, discontinued operations, associate share on
+    // consolidated statements) — exactly why this caveats, never suppresses.
+    if let (Some(pbt), Some(tax), Some(np)) = (row.pbt, row.tax, row.net_profit) {
+        let expected = pbt - tax;
+        let denom = np.abs().max(expected.abs());
+        if denom > 1e-9 && (expected - np).abs() / denom > 0.05 {
+            out.flags.push("pbt_tax_np_identity".into());
+        }
+    }
+    // Bank NII identity: interest_earned − interest_expended ≈ NII within
+    // ±1%. Today NII is derived from exactly these two elements, so this is
+    // structurally satisfied — it exists as a tripwire for any future source
+    // that supplies NII directly (element-name drift shows up here first).
+    if let (Some(ie), Some(ix), Some(nii)) =
+        (row.interest_earned, row.interest_expended, row.net_interest_income)
+    {
+        let expected = ie - ix;
+        let denom = nii.abs().max(expected.abs());
+        if denom > 1e-9 && (expected - nii).abs() / denom > 0.01 {
+            out.flags.push("nii_identity".into());
+        }
+    }
+
     // Scale cross-check: annualized revenue vs market cap (both ₹ crore).
     // A rupees-vs-crore slip is a factor of 1e7 — x10 / /1000 catches it with
     // huge margin while tolerating real high/low revenue-to-mcap businesses.
@@ -175,6 +200,7 @@ mod tests {
             fields_resolved_pct: 1.0,
             dq_flags: String::new(),
             is_audited: true,
+            ..Default::default()
         }
     }
 
@@ -293,5 +319,55 @@ mod tests {
     fn missing_duration_does_not_block() {
         // Duration unknown → cannot judge; other gates still apply.
         assert!(gate1(&base_row(), None, None).blocks.is_empty());
+    }
+
+    // ── Gate-3 identity checks (Phase 3) ─────────────────────────────────────
+
+    #[test]
+    fn pbt_tax_np_identity_within_5pct_is_clean() {
+        // base_row: 140 − 35 = 105 = net_profit → exact identity.
+        let out = gate1(&base_row(), Some(90), None);
+        assert!(!out.flags.iter().any(|f| f == "pbt_tax_np_identity"));
+    }
+
+    #[test]
+    fn pbt_tax_np_identity_beyond_5pct_flags_never_blocks() {
+        let mut r = base_row();
+        r.net_profit = Some(90.0); // expected 105 → ~14% off
+        r.eps = Some(9.0);         // keep eps coherent so only one flag fires
+        let out = gate1(&r, Some(90), None);
+        assert!(out.flags.iter().any(|f| f == "pbt_tax_np_identity"), "flags = {:?}", out.flags);
+        assert!(out.blocks.is_empty(), "identity failures must never block");
+    }
+
+    #[test]
+    fn pbt_tax_np_identity_skipped_when_any_input_missing() {
+        // Insurance rows carry no pbt/tax by design — no spurious flag.
+        let mut r = base_row();
+        r.pbt = None;
+        r.tax = None;
+        let out = gate1(&r, Some(90), None);
+        assert!(!out.flags.iter().any(|f| f == "pbt_tax_np_identity"));
+    }
+
+    #[test]
+    fn nii_identity_within_1pct_is_clean() {
+        let mut r = base_row();
+        r.interest_earned = Some(87182.5);
+        r.interest_expended = Some(45220.44);
+        r.net_interest_income = Some(41962.06); // exact
+        let out = gate1(&r, Some(90), None);
+        assert!(!out.flags.iter().any(|f| f == "nii_identity"));
+    }
+
+    #[test]
+    fn nii_identity_beyond_1pct_flags() {
+        let mut r = base_row();
+        r.interest_earned = Some(1000.0);
+        r.interest_expended = Some(400.0);
+        r.net_interest_income = Some(650.0); // expected 600 → ~7.7% off
+        let out = gate1(&r, Some(90), None);
+        assert!(out.flags.iter().any(|f| f == "nii_identity"), "flags = {:?}", out.flags);
+        assert!(out.blocks.is_empty());
     }
 }

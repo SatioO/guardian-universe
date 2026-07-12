@@ -1,11 +1,13 @@
-//! Bulk fundamentals producer (P5 Phase 2).
+//! Bulk fundamentals producer (P5 Phases 2+3).
 //!
 //! Pipeline: universe seed (BSE ListofScripData ∪ NSE EQUITY_L.csv EQ-series,
 //! ISIN-keyed) → market-cap floor partition with hysteresis (enter ≥800 cr,
 //! exit <720 cr) → canary → bulk discovery via the FilingSource registry →
-//! raw in-capmkt XBRL fetch → fundamentals-core parse → §3.2 rows (general
-//! sector only) → Gate-1 blocks + row-level dq_flags → deterministic
-//! `fundamentals_all.parquet` + `fundamentals_state.json` + `run_summary.json`
+//! raw in-capmkt XBRL fetch → fundamentals-core parse (general + bank +
+//! NBFC + insurance via the app's vendored per-sector builders) → §3.2 rows
+//! incl. the nullable sector union → Gate-1 blocks + Gate-3 identity flags +
+//! row-level dq_flags → deterministic `fundamentals_all.parquet` +
+//! `fundamentals_state.json` (v2, per-outcome) + `run_summary.json`
 //! (the machine-readable signal CI publishes on).
 //!
 //! Politeness: HTTP/1.1 + browser UA + BSE Referer, ≥1.5 s between requests,
@@ -122,13 +124,28 @@ fn main() {
             for e in &s.parse_errors {
                 println!("   - {e}");
             }
-            println!("skipped non-general (D6)  : {}", s.skipped_non_general.len());
-            for e in &s.skipped_non_general {
+            println!("skipped unclassified (D6) : {}", s.skipped_unclassified.len());
+            for e in &s.skipped_unclassified {
+                println!("   - {e}");
+            }
+            println!("identity flagged (ISIN)   : {}", s.identity_flagged.len());
+            for e in &s.identity_flagged {
                 println!("   - {e}");
             }
             println!("gate-1 blocked rows       : {}", s.gate_blocked.len());
             for e in &s.gate_blocked {
                 println!("   - {e}");
+            }
+            if !s.rows_by_sector.is_empty() {
+                let per_sector: Vec<String> = s
+                    .rows_by_sector
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect();
+                println!("new rows by sector        : {}", per_sector.join(", "));
+            }
+            if s.state_migration_invalidated > 0 {
+                println!("state migration invalidated: {}", s.state_migration_invalidated);
             }
             println!("rows flagged (published)  : {}", s.rows_flagged);
             println!("rows new/updated          : {}", s.rows_new_or_updated);
