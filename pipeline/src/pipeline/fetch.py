@@ -40,6 +40,7 @@ from typing import Protocol
 import pandas as pd
 import requests
 
+from pipeline import config
 from pipeline.errors import NotYetPublished, UnexpectedFailure
 from pipeline.sources import nse_indices, nse_udiff
 
@@ -107,6 +108,14 @@ class NseUdiffFetcher:
         self._fallbacks = tuple(fallbacks)
 
     def fetch_raw(self, d: date) -> FetchResult:
+        # Pre-UDiFF days (d < UDIFF_MIN_DATE) 404 on the primary permanently, and
+        # a primary NotYetPublished is re-raised WITHOUT trying fallbacks (to
+        # preserve today's "wait for UDiFF" lateness semantics). So for those
+        # old days skip the doomed primary request entirely and go straight to
+        # the fallback (sec_bhavdata_full) -- otherwise a multi-year backfill
+        # loses every pre-2024 day. Today's path (d >= floor) is unchanged.
+        if d < config.UDIFF_MIN_DATE:
+            return self._fetch_fallbacks(d)
         try:
             return self._fetch_primary(d)
         except NotYetPublished:

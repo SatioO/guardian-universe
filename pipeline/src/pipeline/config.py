@@ -1,11 +1,21 @@
 """Project-wide constants and path helpers."""
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 SCHEMA_VERSION = 1
 MANIFEST_VERSION = 2
 MIN_CLIENT_VERSION = "0.1.0"
+
+# UDiFF CM bhavcopy coverage floor. NSE's UDiFF format only exists from this
+# date forward; earlier days 404 on the UDiFF endpoint permanently (verified
+# live: 2024-01-15 serves, 2023-07-14 404s, and the 3-yr backfill filled all
+# of 2024 via UDiFF). For d < this floor the equities fetcher skips the doomed
+# primary request and goes straight to the sec_bhavdata_full fallback — without
+# this, a pre-UDiFF 404 raises NotYetPublished and the fallback never fires,
+# so a multi-year backfill silently loses every pre-2024 day.
+UDIFF_MIN_DATE = date(2024, 1, 1)
 
 # Canonical long-format columns, in exact order.
 CANON_COLUMNS: list[str] = [
