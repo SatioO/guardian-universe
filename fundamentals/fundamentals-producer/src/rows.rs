@@ -82,6 +82,11 @@ pub struct FundRow {
     pub cash: Option<f64>,
     pub shares_outstanding: Option<f64>,
     pub face_value: Option<f64>,
+    /// BSE full market cap (₹ crore) at row-creation time, paired with as_of;
+    /// NULL when the universe seed had no BSE mktcap. Not a filing fact — a
+    /// per-instrument market anchor the client uses to derive shares when XBRL
+    /// share capital is absent.
+    pub mktcap_cr: Option<f64>,
     pub ebitda_annual: Option<f64>,
     pub capital_employed: Option<f64>,
     // ── Derived ──────────────────────────────────────────────────────────────
@@ -132,6 +137,11 @@ impl FundRow {
         let norm = |r: &FundRow| {
             let mut c = r.clone();
             c.as_of = String::new();
+            // Excluded like `as_of`: BSE market cap drifts DAILY with price, so
+            // letting it participate in data-equality would mark every row
+            // changed each run → full republish churn. Frozen with `as_of` at
+            // row-creation time instead (the pair stays internally consistent).
+            c.mktcap_cr = None;
             c.ttm_eps = None;
             c.ttm_eps_method = String::new();
             c.revenue_growth_yoy_pct = None;
@@ -308,6 +318,7 @@ pub fn build_row(
         cash: val.cash_cr,
         shares_outstanding: val.shares_outstanding,
         face_value: val.face_value,
+        mktcap_cr: None, // set by the pipeline after build (BSE per-instrument mktcap)
         ebitda_annual: if is_annual { val.ebitda_cr } else { None },
         capital_employed,
         ttm_eps: None, // filled by `derive_ttm_eps` over the full row set
@@ -775,7 +786,8 @@ mod tests {
         b.revenue_growth_yoy_pct = Some(25.0);
         b.net_profit_growth_qoq_pct = Some(-3.0);
         b.eps_growth_yoy_pct = Some(11.1);
-        assert!(a.same_data(&b), "as_of/derived differences are not data changes");
+        b.mktcap_cr = Some(50000.0); // daily price drift must NOT count as a data change
+        assert!(a.same_data(&b), "as_of/derived/mktcap differences are not data changes");
         let mut c = a.clone();
         c.net_profit = Some(999.0);
         assert!(!a.same_data(&c), "a real value change IS a data change");
