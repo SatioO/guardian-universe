@@ -1,5 +1,9 @@
 {
   "sessions": [
+    { "date": "2023-11-12", "label": "muhurat-2023 (Diwali Laxmi Pujan — Sunday evening Muhurat trading; NSE published a bhavcopy)" },
+    { "date": "2024-01-20", "label": "special-session-2024-01-20 (Saturday NSE special live/DR session; bhavcopy published — derived from NSE archive)" },
+    { "date": "2024-03-02", "label": "special-session-2024-03-02 (Saturday NSE special live/DR session; bhavcopy published — derived from NSE archive)" },
+    { "date": "2024-05-18", "label": "special-session-2024-05-18 (Saturday NSE special live/DR session; bhavcopy published — derived from NSE archive)" },
     { "date": "2025-10-21", "label": "muhurat-2025 (Diwali Laxmi Pujan — evening Muhurat trading; NSE publishes a bhavcopy)" },
     { "date": "2026-02-01", "label": "budget-2026 (Union Budget special live session; Sunday — NSE publishes a bhavcopy)" },
     { "date": "2026-11-08", "label": "muhurat-2026 (Diwali Laxmi Pujan — VERIFY against NSE circular before November 2026)" }
