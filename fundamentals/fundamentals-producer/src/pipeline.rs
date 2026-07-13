@@ -798,6 +798,10 @@ fn process_filing(
 
     let mut published_any = false;
     for (mut row, duration) in candidate_rows {
+        // Freeze the BSE per-instrument market cap onto the row at creation
+        // time, paired with `as_of` (excluded from `same_data` so daily price
+        // drift never causes republish churn).
+        row.mktcap_cr = mcap;
         let outcome = gate1(&row, duration, mcap);
         if outcome.blocks.is_empty() {
             // Row-level flags = Gate-1/Gate-3 flags + the identity flag

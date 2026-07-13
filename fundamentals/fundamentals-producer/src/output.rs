@@ -92,6 +92,10 @@ pub fn schema() -> Schema {
         Field::new("fields_resolved_pct", DataType::Float64, false),
         utf8("dq_flags"),
         Field::new("is_audited", DataType::Boolean, false),
+        // Appended LAST (post-Phase-4) so old readers/files stay compatible:
+        // BSE full market cap (₹ crore), a per-instrument market anchor paired
+        // with `as_of`. Nullable; absent in older parquets → None on read.
+        f64_null("mktcap_cr"),
     ])
 }
 
@@ -125,6 +129,9 @@ fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
     let mut f_resolved = Float64Builder::new();
     let mut s_flags = StringBuilder::new();
     let mut b_audited = BooleanBuilder::new();
+    // Appended-last mktcap: kept as its own builder so the existing 43-wide
+    // `f` Vec (and its column ordering) is untouched.
+    let mut f_mktcap = Float64Builder::new();
 
     for r in rows {
         s_date.append_value(&r.as_of);
@@ -190,6 +197,7 @@ fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
         f_resolved.append_value(r.fields_resolved_pct);
         s_flags.append_value(&r.dq_flags);
         b_audited.append_value(r.is_audited);
+        f_mktcap.append_option(r.mktcap_cr);
     }
 
     let mut fi = f.into_iter();
@@ -254,6 +262,7 @@ fn to_batch(rows: &[FundRow]) -> Result<RecordBatch, String> {
         Arc::new(f_resolved.finish()),
         Arc::new(s_flags.finish()),
         Arc::new(b_audited.finish()),
+        Arc::new(f_mktcap.finish()), // mktcap_cr — appended last
     ];
 
     RecordBatch::try_new(Arc::new(schema()), columns).map_err(|e| format!("record batch: {e}"))
@@ -383,6 +392,8 @@ fn batch_to_rows(batch: &RecordBatch) -> Result<Vec<FundRow>, String> {
     let growth_cols: Vec<Option<&arrow_array::PrimitiveArray<Float64Type>>> =
         growth_names.iter().map(|n| fcol_opt(n)).collect();
     let ttm_eps_method = scol_opt("ttm_eps_method");
+    // Appended-last mktcap: absent in pre-mktcap parquets → None on every row.
+    let mktcap_col = fcol_opt("mktcap_cr");
 
     let mut rows = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
@@ -432,6 +443,7 @@ fn batch_to_rows(batch: &RecordBatch) -> Result<Vec<FundRow>, String> {
             cash: n(12),
             shares_outstanding: n(13),
             face_value: n(14),
+            mktcap_cr: mktcap_col.and_then(|arr| opt(arr, i)),
             ebitda_annual: n(15),
             capital_employed: n(16),
             ttm_eps: n(17),
@@ -684,6 +696,55 @@ mod tests {
             assert!(r.revenue_growth_yoy_pct.is_none(), "absent column reads None");
             assert!(r.eps_growth_yoy_pct.is_none());
             assert_eq!(r.ttm_eps_method, "", "absent string column reads empty");
+        }
+        assert_eq!(back[0].revenue, rows[0].revenue, "old columns still round-trip");
+    }
+
+    #[test]
+    fn mktcap_cr_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fundamentals_all.parquet");
+        let mut rows = sample_rows();
+        rows[0].mktcap_cr = Some(1234.5);
+        // A row with no BSE mktcap must stay NULL through the round-trip.
+        rows[1].mktcap_cr = None;
+        sort_rows(&mut rows);
+        write_parquet(&path, &rows).unwrap();
+        let back = read_parquet(&path).unwrap();
+        assert_eq!(rows, back);
+        let with_mcap = back.iter().find(|r| r.mktcap_cr.is_some()).unwrap();
+        assert_eq!(with_mcap.mktcap_cr, Some(1234.5), "mktcap_cr survives intact");
+    }
+
+    #[test]
+    fn reading_pre_mktcap_parquet_yields_null_mktcap() {
+        // Simulate an accumulated file written before mktcap_cr existed by
+        // projecting the column away; the lenient reader must default it None.
+        use parquet::arrow::ArrowWriter;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fundamentals_all.parquet");
+        let mut rows = sample_rows();
+        rows[0].mktcap_cr = Some(9999.0); // dropped by projection
+        sort_rows(&mut rows);
+        let batch = to_batch(&rows).unwrap();
+        let keep: Vec<usize> = batch
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.name() != "mktcap_cr")
+            .map(|(i, _)| i)
+            .collect();
+        let old_batch = batch.project(&keep).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, old_batch.schema(), None).unwrap();
+        w.write(&old_batch).unwrap();
+        w.close().unwrap();
+
+        let back = read_parquet(&path).unwrap();
+        assert_eq!(back.len(), rows.len());
+        for r in &back {
+            assert!(r.mktcap_cr.is_none(), "absent mktcap_cr column reads as None");
         }
         assert_eq!(back[0].revenue, rows[0].revenue, "old columns still round-trip");
     }
