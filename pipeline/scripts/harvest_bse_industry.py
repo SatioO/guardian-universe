@@ -135,6 +135,11 @@ def run(args: argparse.Namespace) -> int:
     session.headers.update(_HEADERS)
     print(f"Fetching BSE scrip list from {BSE_LIST_URL} ...")
     scrips = fetch_scrips(session)
+    if not scrips:
+        # BSE bulk list empty = outage/blocked, NOT "nothing to do". Fail so the
+        # CI job goes red (and never commits a header-only seed).
+        print("ABORT: BSE returned no scrips (outage/blocked) — fail-closed, seed untouched")
+        return 1
     print(f"  {len(scrips)} active equity scrips")
 
     done = _load_done(out_path)
@@ -151,6 +156,7 @@ def run(args: argparse.Namespace) -> int:
     write_header = not out_path.exists() or out_path.stat().st_size == 0
     ok = 0
     failed: list[str] = []
+    consecutive_fail = 0
     with out_path.open("a", newline="") as f:
         writer = csv.writer(f)
         if write_header:
@@ -161,11 +167,21 @@ def run(args: argparse.Namespace) -> int:
             # key; a scrip with no sector classification is skipped (logged).
             if tiers is None or not tiers["sector"]:
                 failed.append(isin)
+                consecutive_fail += 1
+                # Circuit breaker: a long unbroken run of failures means BSE is
+                # down/blocking (not that these scrips are all unclassified) —
+                # abort rather than grind through thousands and the 60-min CI cap.
+                if consecutive_fail >= 50:
+                    failures_path.write_text("\n".join(failed) + "\n")
+                    print(f"\nABORT: {consecutive_fail} consecutive BSE failures "
+                          "(systemic outage) — fail-closed")
+                    return 1
             else:
                 writer.writerow([isin, symbol, tiers["sector"],
                                  tiers["industry"], tiers["basic_industry"]])
                 f.flush()
                 ok += 1
+                consecutive_fail = 0
             if n % 100 == 0:
                 print(f"  [{n}/{len(scrips)}] ok={ok} failed={len(failed)}")
             time.sleep(args.sleep)
@@ -173,6 +189,8 @@ def run(args: argparse.Namespace) -> int:
     if failed:
         failures_path.write_text("\n".join(failed) + "\n")
         print(f"\n{len(failed)} failures -> {failures_path} (retry with --retry-failed)")
+    else:
+        failures_path.unlink(missing_ok=True)  # clean run -> clear any stale sidecar
 
     _sort_seed(out_path)
     _summarize(out_path)
