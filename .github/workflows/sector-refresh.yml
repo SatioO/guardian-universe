@@ -1,0 +1,93 @@
+name: sector-refresh
+
+# Monthly full BSE industry re-harvest. NSE's per-symbol classification API is
+# behind Akamai Bot Manager (unreachable from CI); BSE exposes the identical
+# SEBI 4-tier taxonomy via a plain JSON endpoint, so we harvest from BSE here.
+# This runs OFF the daily critical path (its own 60-min job) because the harvest
+# is ~4900 per-scrip calls. It re-fetches EVERY scrip (--fresh, not resume) so
+# reclassifications of existing stocks are caught, not just new listings, then
+# commits the refreshed seed to main. The next `data-daily` run reads the seed
+# and publishes the updated sector_industry parquet to the release.
+
+on:
+  schedule:
+    - cron: "0 20 1 * *"   # 01:30 IST on the 2nd of each month
+  workflow_dispatch:
+
+permissions:
+  contents: write   # git push the refreshed seed
+  issues: write     # failure alerting
+
+concurrency:
+  group: sector-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh-seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: pipeline
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -r requirements.lock -e . --no-deps
+
+      - name: Full BSE industry re-harvest (fresh — re-fetches every scrip)
+        run: python scripts/harvest_bse_industry.py --fresh --out /tmp/seed_new.csv
+
+      - name: Retry transient BSE failures once
+        run: python scripts/harvest_bse_industry.py --retry-failed --out /tmp/seed_new.csv || true
+
+      - name: Shrink-guard + stage the refreshed seed
+        id: guard
+        run: |
+          new=/tmp/seed_new.csv
+          cur=seeds/sector_industry_seed.csv
+          [ -s "$new" ] || { echo "::error::harvest produced no seed"; exit 1; }
+          nrows=$(($(wc -l < "$new") - 1))
+          crows=0; [ -f "$cur" ] && crows=$(($(wc -l < "$cur") - 1))
+          echo "new rows: $nrows | current committed: $crows"
+          # Fail-closed: never overwrite a good seed with a shrunken one (a flaky
+          # BSE run that lost >2% of rows) — mirrors the pipeline's shrink-guard.
+          if [ "$crows" -gt 0 ] && [ "$nrows" -lt "$((crows * 98 / 100))" ]; then
+            echo "::error::refreshed seed shrank ($nrows < $crows, >2%) — refusing to commit"
+            exit 1
+          fi
+          mkdir -p seeds && cp "$new" "$cur"
+          if git diff --quiet -- "$cur"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "seed unchanged — nothing to commit"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "seed changed — will commit"
+          fi
+
+      - name: Commit + push the refreshed seed
+        if: steps.guard.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seeds/sector_industry_seed.csv
+          git commit -m "chore(sector): monthly BSE industry seed refresh"
+          git push
+
+      - name: Alert on failure
+        if: failure()
+        working-directory: ${{ github.workspace }}
+        run: |
+          gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true
+          body="sector-refresh FAILED on $(date -u +%F). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number' || true)
+          if [ -z "$n" ]; then
+            gh issue create --title "Data pipeline: sector-refresh failed" --label pipeline-failure --body "$body"
+          else
+            gh issue comment "$n" --body "$body"
+          fi
