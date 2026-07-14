@@ -50,6 +50,7 @@ on NSE and places no orders. It is intentionally NOT imported by the pipeline.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import io
 import sys
@@ -148,6 +149,163 @@ def fetch_industry_info(session: requests.Session, symbol: str) -> dict[str, str
         time.sleep(2 ** attempt)
     print(f"  ! {symbol}: giving up ({last})", file=sys.stderr)
     return None
+
+
+def _dump(symbol: str) -> int:
+    """Diagnostic: probe ONE symbol's quote-equity API two ways and print the raw
+    result, so we can see WHY it 403s before changing the main flow.
+
+      A = the current failing shape: homepage warm + session Referer=homepage.
+      B = hypothesis fix: warm the symbol's quote PAGE, then call the API with
+          Referer=that page + browser Sec-Fetch-* headers.
+
+    If B returns 200, the Referer/warm shaping was the root cause. If B also
+    fails, we dump its status, response headers, session cookie names, and body
+    snippet so the actual block reason (Akamai challenge, geo, cookie) is visible."""
+    symbol = symbol.upper()
+
+    # Attempt A — reproduce the current flow.
+    sa = _new_session()
+    sa.get(HOMEPAGE, timeout=_TIMEOUT)
+    a = sa.get(QUOTE_API.format(symbol=symbol), timeout=_TIMEOUT)
+    print(f"A [homepage warm, Referer=homepage]          -> HTTP {a.status_code}")
+
+    # Attempt B — page-warm + per-symbol Referer + Sec-Fetch headers.
+    sb = _new_session()
+    sb.get(HOMEPAGE, timeout=_TIMEOUT)
+    sb.get(QUOTE_PAGE.format(symbol=symbol), timeout=_TIMEOUT)
+    api_headers = {
+        "Referer": QUOTE_PAGE.format(symbol=symbol),
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+    }
+    b = sb.get(QUOTE_API.format(symbol=symbol), headers=api_headers, timeout=_TIMEOUT)
+    print(f"B [page warm, Referer=quote page, sec-fetch] -> HTTP {b.status_code}")
+
+    # Attempt C — faithful nsepython recipe: browser PAGE-LOAD headers (text/html
+    # Accept + navigate Sec-Fetch) to prime `/` and `/option-chain`, then the API
+    # on the same session. The key difference from A/B: the priming GETs look like
+    # real browser navigations, not a JSON XHR.
+    page_headers = {
+        "User-Agent": _UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                  "image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+    }
+    sc = requests.Session()
+    sc.headers.update(page_headers)
+    sc.get(HOMEPAGE, timeout=_TIMEOUT)
+    sc.get(f"{HOMEPAGE}option-chain", timeout=_TIMEOUT)
+    c = sc.get(QUOTE_API.format(symbol=symbol), timeout=_TIMEOUT)
+    print(f"C [nsepython recipe: text/html prime + / + /option-chain] -> HTTP {c.status_code}")
+
+    # Attempt D — curl_cffi impersonating Chrome's TLS + HTTP2 fingerprint. This
+    # is the real hypothesis: Akamai fingerprints the TLS ClientHello (JA3), so
+    # python-requests is flagged regardless of headers/cookies. curl_cffi mimics
+    # Chrome's handshake, which is what defeats it. Optional dependency.
+    d = None
+    try:
+        from curl_cffi import requests as cffi  # type: ignore
+        sd = cffi.Session(impersonate="chrome")
+        sd.get(HOMEPAGE, timeout=_TIMEOUT)
+        sd.get(f"{HOMEPAGE}option-chain", timeout=_TIMEOUT)
+        d = sd.get(QUOTE_API.format(symbol=symbol), timeout=_TIMEOUT)
+        print(f"D [curl_cffi impersonate=chrome]             -> HTTP {d.status_code}")
+    except ImportError:
+        print("D [curl_cffi] -> SKIPPED (run: pip install curl_cffi, then re-run --dump)")
+
+    candidates = [("B", b), ("C", c)] + ([("D", d)] if d is not None else [])
+    for label, resp in candidates:
+        if resp.status_code == 200:
+            info = resp.json().get("industryInfo") or {}
+            print(f"  ✅ {label} works — industryInfo: {info}")
+            return 0
+
+    worst = d if d is not None else c
+    tag = "D (curl_cffi)" if d is not None else "C"
+    print(f"\n--- attempt {tag} failing response (diagnose the block) ---")
+    print(f"status: {worst.status_code}")
+    print("response headers:")
+    for k, v in worst.headers.items():
+        print(f"  {k}: {v}")
+    print("body[:800]:")
+    print(worst.text[:800])
+    return 1
+
+
+def _probe(symbol: str, headed: bool = False) -> int:
+    """Playwright PROOF: drive a real Chromium so Akamai's JS sensor runs and
+    validates `_abck`, then fetch ONE symbol's industryInfo from the page
+    context. Confirms the browser approach clears the 403 before we rewrite the
+    whole harvest. `--headed` opens a visible window (most reliable if headless
+    is fingerprinted)."""
+    symbol = symbol.upper()
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore
+    except ImportError:
+        print("Install first:  pip install playwright  &&  playwright install chromium")
+        return 2
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=not headed,
+            # --disable-http2: Akamai often RST_STREAMs the h2 connection for
+            # clients it distrusts -> Chromium reports ERR_HTTP2_PROTOCOL_ERROR.
+            # Forcing HTTP/1.1 sidesteps that.
+            args=["--disable-blink-features=AutomationControlled", "--disable-http2"],
+        )
+        ctx = browser.new_context(user_agent=_UA, locale="en-US")
+        page = ctx.new_page()
+
+        # Capture the quote-equity response the PAGE fetches on its own — that
+        # request rides NSE's legitimate flow (post-sensor) and is not denied,
+        # unlike a fetch we inject ourselves.
+        captured: dict[str, object] = {}
+
+        def _on_response(resp) -> None:  # noqa: ANN001 - playwright Response
+            if "/api/quote-equity" in resp.url and resp.status == 200 and "data" not in captured:
+                # non-JSON/blocked body -> ignore
+                with contextlib.suppress(Exception):
+                    captured["data"] = resp.json()
+
+        page.on("response", _on_response)
+
+        print(f"navigating to {QUOTE_PAGE.format(symbol=symbol)} (Akamai JS solving _abck)...")
+        for attempt in range(3):
+            try:
+                page.goto(QUOTE_PAGE.format(symbol=symbol),
+                          wait_until="domcontentloaded", timeout=60000)
+                break
+            except Exception as e:  # noqa: BLE001 - retry transient nav/protocol errors
+                print(f"  nav attempt {attempt + 1} failed: {type(e).__name__}; retrying...")
+                page.wait_for_timeout(2000)
+
+        # Wait (up to ~20s) for the page's own quote-equity XHR to land.
+        for _ in range(20):
+            if "data" in captured:
+                break
+            page.wait_for_timeout(1000)
+        browser.close()
+
+    if "data" in captured:
+        data = captured["data"]
+        info = (data.get("industryInfo") if isinstance(data, dict) else None) or {}
+        print("captured the page's own quote-equity response ✅")
+        print(f"  industryInfo: {info}")
+        return 0 if info else 1
+    print("  ❌ the page never produced a 200 quote-equity response (Akamai blocked its XHR too).")
+    print("     Look at the browser window: did RELIANCE's price/quote actually render,")
+    print("     or an 'Access Denied' / blank page? Tell me which.")
+    return 1
 
 
 def _load_done(out_path: Path) -> set[str]:
@@ -252,7 +410,18 @@ def main() -> int:
                    help="Seconds between symbol requests (default 0.4)")
     p.add_argument("--retry-failed", action="store_true",
                    help="Re-attempt only symbols in the .failures.txt sidecar")
-    return run(p.parse_args())
+    p.add_argument("--dump", metavar="SYMBOL",
+                   help="Diagnose the quote-equity API for ONE symbol (probe + raw dump)")
+    p.add_argument("--probe", metavar="SYMBOL",
+                   help="Playwright proof: fetch ONE symbol's industryInfo via a real browser")
+    p.add_argument("--headed", action="store_true",
+                   help="With --probe: open a visible browser window (most reliable)")
+    args = p.parse_args()
+    if args.dump:
+        return _dump(args.dump)
+    if args.probe:
+        return _probe(args.probe, headed=args.headed)
+    return run(args)
 
 
 if __name__ == "__main__":

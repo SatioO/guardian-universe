@@ -2,75 +2,80 @@
 
 Offline, human-run scripts. Not imported by the pipeline; not run in CI.
 
-## `harvest_nse_industry.py` — full-universe sector/industry seed
+## `harvest_bse_industry.py` — full-universe sector/industry seed (PRIMARY)
 
-### Why
-The scanner classifies each stock by industry from `sector_industry_all.parquet`.
+### Why BSE (and why not NSE)
+The scanner classifies each stock by its sector tiers from `sector_industry_all.parquet`.
 Historically that parquet was built from NSE's **Nifty-Total-Market** index CSV,
-which lists only ~750 index constituents — so ~1500 of the ~2258 tradable
-symbols had **no** industry and were excluded from every industry/sector filter
-(the app's "Industry known for 743 of 2258 symbols" disclosure).
+which lists only ~750 index constituents — so ~1500 of the ~2360 tradable
+symbols had **no** classification.
 
-NSE publishes **no bulk per-security classification file**. The full 4-tier
-classification (macro → sector → industry → basicIndustry) exists only in the
-per-symbol `quote-equity` API, which is anti-bot gated and unreliable from CI
-IPs. So we harvest it **once, offline, from a machine that can reach NSE**
-(your laptop) and commit the result as a static seed CSV. `build_sector_industry`
-reads that seed on every pipeline run — classifying the **whole** universe.
+The full **SEBI/AMFI 4-tier** classification (macro → sector → industry →
+basicIndustry) is the same on both exchanges. NSE only exposes it via its
+per-symbol `quote-equity` API, which is behind **Akamai Bot Manager's JavaScript
+sensor** — unreachable from *any* HTTP client (`requests`, `curl_cffi` with a
+real Chrome TLS fingerprint, and even a headed Chromium's in-page fetch all get
+403; see the diagnostics in `harvest_nse_industry.py --dump/--probe`).
 
-Classification is near-static, so re-running is infrequent (see *Refresh* below).
+**BSE exposes the identical 4-tier data via a plain JSON endpoint that is NOT
+JS-gated.** So we harvest from BSE and key by **ISIN**, which is exchange-neutral.
+
+### Tier mapping (BSE field → our column; identical to NSE's tiers)
+| our column       | BSE field (`ComHeadernew`) | NSE tier      | example (RELIANCE)          |
+|------------------|----------------------------|---------------|-----------------------------|
+| `sector`         | `IndustryNew`              | sector        | Oil, Gas & Consumable Fuels |
+| `industry`       | `IGroup`                   | industry      | Petroleum Products          |
+| `basic_industry` | `ISubGroup`                | basicIndustry | Refineries & Marketing      |
+
+BSE `Sector` ("Energy") is NSE's coarsest `macro` tier and is dropped, exactly as
+the NSE mapping drops macro. `is_cyclical` is derived from `sector`
+(punctuation-tolerantly, so BSE's `"Oil, Gas & …"` matches the cyclical set).
 
 ### Run it
 ```bash
 cd pipeline
-source .venv/bin/activate          # or: rye run / uv run — your project venv
+source .venv/bin/activate
 
-python scripts/harvest_nse_industry.py --limit 25   # smoke test first (~25 symbols)
-python scripts/harvest_nse_industry.py              # full run (~2000 symbols, ~15–25 min)
+python scripts/harvest_bse_industry.py --limit 25 --out /tmp/smoke.csv  # smoke test
+python scripts/harvest_bse_industry.py                                  # full run (~30–45 min)
 ```
-- Writes `seeds/sector_industry_seed.csv` (path = `config.SECTOR_SEED_PATH`).
-- **Resumable**: re-running skips symbols already in the output. Failures are
-  logged to `seeds/sector_industry_seed.failures.txt`; retry just those with
-  `--retry-failed`.
-- `--sleep 0.6` if NSE rate-limits you (default 0.4s between requests).
+- One bulk call lists every active equity scrip (BSE code + ISIN + symbol); a
+  per-scrip call fetches its tiers. **Resumable** (skips ISINs already written);
+  failures → `seeds/sector_industry_seed.failures.txt`, retry with `--retry-failed`.
+- Writes `seeds/sector_industry_seed.csv` (= `config.SECTOR_SEED_PATH`), the SAME
+  file the pipeline reads. `sector` is the required tier; finer tiers may be NULL.
+
+### Coverage check (how much of NSE is covered)
+BSE is a near-superset of NSE by ISIN (most stocks dual-list), but a few NSE-only
+listings may be missing. Measure it exactly:
+```bash
+python scripts/check_nse_coverage.py     # covered / missing NSE symbols vs the seed
+```
+For any residual NSE-only gap, top up from NSE's Total-Market CSV (reachable CDN,
+coarser sector-tier only) or accept it (those stay unclassified, fail-closed).
 
 ### After the run — review, then commit
-The script prints a summary: total rows, and every distinct `sector` value
-with its cyclical flag. **Eyeball it** — confirm coverage jumped to ~full
-universe and the cyclical sectors (Metals & Mining, Oil Gas & Consumable Fuels,
-Automobile and Auto Components, …) are flagged. Then:
+The harvest prints a distinct-`sector` + cyclical summary. Eyeball it, then:
 ```bash
 git add seeds/sector_industry_seed.csv
-git commit -m "chore(sector): harvest full-universe NSE 4-tier industry seed"
+git commit -m "chore(sector): full-universe industry seed (BSE, SEBI 4-tier)"
 ```
 
-> **Ordering matters.** The pipeline's default sector source is now the seed. On
-> a *fresh* build with no seed committed and no prior parquet, `sector_industry`
-> fail-closes to empty (an honest "no data", never a bad overwrite). So **commit
-> the seed before/with deploying** the code change — then the next pipeline run
-> publishes a full-coverage `sector_industry_all.parquet`.
-
-### Tier mapping (NSE's 4 tiers → our 3 columns)
-Name-to-name: NSE `macro` is dropped, and the remaining three NSE tiers map
-straight across to the three parquet columns.
-
-| parquet column   | NSE tier      | example (RELIANCE)              |
-|------------------|---------------|----------------------------------|
-| `sector`         | sector        | Oil, Gas & Consumable Fuels      |
-| `industry`       | industry      | Petroleum Products               |
-| `basic_industry` | basicIndustry | Refineries & Marketing           |
-
-`is_cyclical` is derived from the **`sector`** tier, punctuation-tolerantly
-(`nse_sector.is_cyclical_seed`) so the API's `"Oil, Gas & …"` still matches the
-Total-Market `"Oil Gas & …"` cyclical set.
+> **Ordering matters.** The pipeline's default sector source is the seed. On a
+> *fresh* build with no seed committed and no prior parquet, `sector_industry`
+> fail-closes to empty (honest "no data", never a bad overwrite). Commit the seed
+> **before/with** deploying the code change.
 
 ### Refresh cadence
-Re-run when you want new listings classified (they're absent until harvested) —
-monthly, quarterly, or after a batch of IPOs. It's just: run → review → commit.
-The nightly pipeline itself never fetches this; it only reads the committed seed.
+Re-run when you want new listings classified — monthly/quarterly. Classification
+is near-static; the nightly pipeline only reads the committed seed.
 
-### Follow-up (optional, client-side)
-`sector_industry_all.parquet` now carries a populated `sector` column, but the
-app currently reads only `industry` + `is_cyclical`. Surfacing the coarser
-`sector` (and finer `basic_industry`) in the scanner UI is a separate,
-app-side change in `traderview` — the data is ready when you want it.
+## `harvest_nse_industry.py` — NSE harvester (DEPRECATED: Akamai-blocked)
+Kept for reference and for its `--dump`/`--probe` diagnostics, which document why
+the NSE API is unreachable (Akamai Bot Manager JS sensor). Do not use for
+harvesting — it returns 403. Use `harvest_bse_industry.py`.
+
+## `try_bse.py` / `try_nsepython.py` — one-off probes
+Diagnostics used to find a reachable source. `try_bse.py` confirms BSE's list +
+per-scrip tier fields; `try_nsepython.py` confirms the NSE library is also
+Akamai-blocked.

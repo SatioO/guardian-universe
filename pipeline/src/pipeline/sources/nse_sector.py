@@ -185,9 +185,11 @@ def parse_sector_seed(csv_bytes: bytes) -> pd.DataFrame:
     Output columns: SECTOR_COLUMNS (adds the derived `is_cyclical`; no `date` --
     the builder stamps that). Robustness mirrors `parse_sector_csv`: stdlib csv
     reader (quoted-comma safe), skips the header, skips any row missing a
-    required field (instrument_key, symbol, or industry), dedupes on ISIN
-    keeping the first occurrence, and never raises on malformed input. Empty
-    `sector`/`basic_industry` cells become NULL (coverage honesty)."""
+    required field (instrument_key, symbol, or sector), dedupes on ISIN
+    keeping the first occurrence, and never raises on malformed input. `sector`
+    is the required key -- it is the primary filter tier and the is_cyclical
+    source; the finer `industry`/`basic_industry` cells may be empty -> NULL
+    (coverage honesty: a stock filterable by sector need not have every tier)."""
     text = csv_bytes.decode("utf-8-sig", errors="replace")
     reader = csv.reader(io.StringIO(text))
 
@@ -203,9 +205,9 @@ def parse_sector_seed(csv_bytes: bytes) -> pd.DataFrame:
         sector = parts[2].strip()
         industry = parts[3].strip()
         basic_industry = parts[4].strip()
-        # `industry` (NSE industry tier) is the required key; `sector` drives
-        # the cyclical flag (the cyclical vocabulary is sector-tier names).
-        if not instrument_key or not symbol or not industry:
+        # `sector` (NSE sector tier) is the required key -- the primary filter
+        # tier and the cyclical source. Finer tiers may be empty -> NULL.
+        if not instrument_key or not symbol or not sector:
             continue
         if instrument_key in seen_isin:
             continue  # dedupe by ISIN, keep first
@@ -213,10 +215,10 @@ def parse_sector_seed(csv_bytes: bytes) -> pd.DataFrame:
         rows.append({
             "instrument_key": instrument_key,
             "symbol": symbol,
-            "sector": sector or None,
-            "industry": industry,
+            "sector": sector,
+            "industry": industry or None,
             "basic_industry": basic_industry or None,
-            "is_cyclical": is_cyclical_seed(sector),   # <- from SECTOR, not industry
+            "is_cyclical": is_cyclical_seed(sector),   # <- from SECTOR
         })
 
     if not rows:

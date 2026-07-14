@@ -73,14 +73,13 @@ def test_is_cyclical_seed_normalizes_case_and_punctuation():
     assert not nse_sector.is_cyclical_seed("Information Technology")
 
 
-def test_seed_missing_optional_basic_becomes_null_but_row_kept():
-    # sector present (required for cyclical), industry present (required key),
-    # basic_industry empty -> NULL.
-    df = nse_sector.parse_sector_seed(_seed("INE111A01011,ACME,Chemicals,Commodity Chemicals,"))
+def test_seed_missing_optional_finer_tiers_become_null_but_row_kept():
+    # sector present (the required key); industry + basic_industry empty -> NULL.
+    df = nse_sector.parse_sector_seed(_seed("INE111A01011,ACME,Chemicals,,"))
     assert len(df) == 1
     row = df.iloc[0]
     assert row["sector"] == "Chemicals"
-    assert row["industry"] == "Commodity Chemicals"
+    assert pd.isna(row["industry"])
     assert pd.isna(row["basic_industry"])
     assert bool(row["is_cyclical"]) is True   # "Chemicals" is a cyclical sector
 
@@ -88,10 +87,10 @@ def test_seed_missing_optional_basic_becomes_null_but_row_kept():
 def test_seed_skips_rows_missing_required_fields():
     df = nse_sector.parse_sector_seed(_seed(
         "OnlyOne",
-        "INE1,SYM1,Macro,,Basic",          # empty industry -> skip
-        ",SYM2,Macro,Chemicals,Basic",     # empty ISIN -> skip
-        "INE3,,Macro,Chemicals,Basic",     # empty symbol -> skip
-        "INE4,GOODCO,Commodities,Chemicals,Commodity Chemicals",  # the one valid row
+        "INE1,SYM1,,Petroleum Products,Basic",   # empty sector -> skip
+        ",SYM2,Chemicals,Chemicals,Basic",       # empty ISIN -> skip
+        "INE3,,Chemicals,Chemicals,Basic",       # empty symbol -> skip
+        "INE4,GOODCO,Chemicals,Commodity Chemicals,Commodity Chemicals",  # valid
     ))
     assert len(df) == 1
     assert df.iloc[0]["symbol"] == "GOODCO"
