@@ -194,7 +194,7 @@ def run(args: argparse.Namespace) -> int:
             writer.writerow(nse_sector.SEED_HEADER)
         for n, (symbol, isin) in enumerate(universe, 1):
             info = fetch_industry_info(session, symbol)
-            if info is None or not info["sector"]:
+            if info is None or not info["industry"]:
                 failed.append(symbol)
             else:
                 # Tier mapping (see nse_sector.parse_sector_seed): name-to-name.
