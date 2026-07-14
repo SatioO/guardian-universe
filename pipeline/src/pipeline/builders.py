@@ -233,12 +233,33 @@ def _read_all_years_for_ca_flags(source_spec: DatasetSpec) -> pd.DataFrame:
 # guard -- see build_sector_industry.
 # ---------------------------------------------------------------------------
 
+def _read_seed_frame(target: date) -> pd.DataFrame:
+    """Read the committed full-universe seed CSV into the normalized sector
+    frame -- the DEFAULT source for build_sector_industry.
+
+    Same `date -> DataFrame` seam as `_fetch_sector_frame`, but a local file read
+    (no network): the seed is harvested offline (scripts/harvest_nse_industry.py)
+    because NSE has no bulk per-security classification file. Covers the whole
+    tradable universe with all NSE tiers, so sector/basic_industry are populated
+    (not NULL) and the industry filter reaches every symbol, not just the ~750
+    Total-Market members. A missing/empty seed yields an empty frame, which the
+    builder's fail-closed guard turns into a retained-prior/failed outcome --
+    never a bad overwrite."""
+    path = config.SECTOR_SEED_PATH
+    if not path.exists():
+        return nse_sector.parse_sector_seed(b"")  # empty -> builder fail-closes
+    return nse_sector.parse_sector_seed(path.read_bytes())
+
+
 def _fetch_sector_frame(target: date) -> pd.DataFrame:
     """Fetch + parse the NSE Total-Market CSV into the normalized sector frame,
     reusing the shared warm-session + retry contract (`fetch._fetch_with_retry`)
     exactly as the equities/indices fetchers do -- `parse=parse_sector_csv` is a
     `bytes -> DataFrame` parser of the same shape as `_unzip_to_df`/`_csv_to_df`.
-    A 404/exhaustion raises (caught by the builder's fail-closed guard)."""
+    A 404/exhaustion raises (caught by the builder's fail-closed guard).
+
+    Retained as the seam for the future incremental top-up (seed UNION a live
+    fetch of brand-new index entrants); no longer the default source."""
     session = requests.Session()
     session.headers.update({"User-Agent": _BROWSER_UA})
     return _fetch_with_retry(
@@ -295,11 +316,14 @@ def build_sector_industry(
     spec: DatasetSpec,
     target: date,
     *,
-    fetch_frame: Callable[[date], pd.DataFrame] = _fetch_sector_frame,
+    fetch_frame: Callable[[date], pd.DataFrame] = _read_seed_frame,
     ttl_days: int = config.SECTOR_REFRESH_TTL_DAYS,
     min_rows: int = config.SECTOR_MIN_ROWS,
 ) -> RunStatus:
-    """Fetch + normalize + full-rewrite the `sector_industry` reference.
+    """Read (default) or fetch + normalize + full-rewrite the `sector_industry`
+    reference. The default source is the committed full-universe seed
+    (`_read_seed_frame`); inject `fetch_frame=_fetch_sector_frame` for the
+    legacy Total-Market fetch, or any `date -> DataFrame` seam in tests.
 
     Weekly TTL: if the stored file's as-of date is younger than `ttl_days`,
     skip the fetch entirely (cheap idempotent no-op on the nightly cron).

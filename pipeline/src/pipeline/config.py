@@ -136,6 +136,15 @@ META_DIR: Path = DATA_DIR / "meta"
 SECTOR_REFRESH_TTL_DAYS: int = 7
 SECTOR_MIN_ROWS: int = 400
 
+# Full-universe sector/industry SEED (committed, not fetched). Harvested offline
+# from NSE's per-symbol quote-equity industryInfo (all 4 tiers) by
+# scripts/harvest_nse_industry.py, because NSE publishes no bulk per-security
+# classification file. build_sector_industry reads this as its default source so
+# the whole tradable universe (~2258) is classified rather than only the ~750
+# Total-Market index members. Refreshed by re-running the harvest (see the
+# script's header); classification is near-static so this is infrequent.
+SECTOR_SEED_PATH: Path = PROJECT_ROOT / "seeds" / "sector_industry_seed.csv"
+
 # Corporate-action ex-date detector (G1b task 7): flag an instrument when
 # abs(prevclose_today / close_prev - 1) exceeds this fraction -- a split,
 # bonus, or other ex-date discontinuity, not ordinary price movement.

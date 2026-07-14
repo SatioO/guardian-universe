@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 
 import pandas as pd
 
@@ -129,3 +130,105 @@ def _empty_sector_frame() -> pd.DataFrame:
         df[col] = df[col].astype("string")
     df["is_cyclical"] = df["is_cyclical"].astype(bool)
     return df
+
+
+# ---------------------------------------------------------------------------
+# 3. Full-universe SEED source (all 4 NSE tiers, harvested per-symbol)
+# ---------------------------------------------------------------------------
+#
+# The Total-Market CSV above tops out at ~750 index constituents. To classify
+# the WHOLE tradable universe (~2258) we harvest NSE's per-symbol
+# `quote-equity` `industryInfo` (macro -> sector -> industry -> basicIndustry)
+# offline (see `scripts/harvest_nse_industry.py`) and commit the result as a
+# static seed CSV. This parser reads that seed into the SAME normalized frame
+# `parse_sector_csv` produces -- identical schema, just fuller coverage and
+# non-NULL sector/basic_industry -- so the builder, manifest, and Rust client
+# are all unchanged.
+#
+# Tier mapping (NSE's 4 tiers -> our 3 columns, chosen to keep the existing app
+# behaviour bit-for-bit while adding the two previously-NULL columns):
+#   NSE macro         -> `sector`         (coarsest; was NULL)
+#   NSE sector        -> `industry`       (UNCHANGED vocabulary: same "Metals &
+#                                          Mining"-style names the Total-Market
+#                                          CSV put here, so the app's industry
+#                                          filter + is_cyclical keep working)
+#   NSE basicIndustry -> `basic_industry` (finest; was NULL)
+# NSE's 3rd "industry" tier (e.g. "Ferrous Metals") is intentionally dropped --
+# three columns cannot hold four tiers, and macro+sector+basicIndustry span the
+# widest useful range. The seed CSV keeps all four for provenance; we select.
+
+# Canonical header the harvest writes and this parser expects (is_cyclical is
+# DERIVED here, never stored, so there is one source of truth for it).
+SEED_HEADER: list[str] = ["instrument_key", "symbol", "sector", "industry", "basic_industry"]
+
+
+def _norm_industry(s: str) -> str:
+    """Normalize an industry label for cyclical matching: lower-case, drop
+    punctuation (commas/hyphens), collapse whitespace. This absorbs the
+    punctuation drift between NSE sources -- the Total-Market CSV emits
+    "Oil Gas & Consumable Fuels" while the per-symbol API emits
+    "Oil, Gas & Consumable Fuels" -- so the same stock is cyclical from either."""
+    return re.sub(r"[^a-z0-9&]+", " ", s.lower()).strip()
+
+
+_CYCLICAL_NORMALIZED: frozenset[str] = frozenset(_norm_industry(x) for x in CYCLICAL_INDUSTRIES)
+
+
+def is_cyclical_seed(industry: str) -> bool:
+    """Cyclical test for SEED-sourced rows: punctuation/case-insensitive match
+    against `CYCLICAL_INDUSTRIES`. Distinct from the exact `is_cyclical` used by
+    the Total-Market path (and mirrored in `industry.rs`) precisely so the
+    per-symbol API's slightly different punctuation still classifies correctly."""
+    return _norm_industry(industry) in _CYCLICAL_NORMALIZED
+
+
+def parse_sector_seed(csv_bytes: bytes) -> pd.DataFrame:
+    """Parse the committed full-universe seed CSV into the normalized frame.
+
+    Expected header (SEED_HEADER, row 0, skipped):
+        instrument_key,symbol,sector,industry,basic_industry
+
+    Output columns: SECTOR_COLUMNS (adds the derived `is_cyclical`; no `date` --
+    the builder stamps that). Robustness mirrors `parse_sector_csv`: stdlib csv
+    reader (quoted-comma safe), skips the header, skips any row missing a
+    required field (instrument_key, symbol, or industry), dedupes on ISIN
+    keeping the first occurrence, and never raises on malformed input. Empty
+    `sector`/`basic_industry` cells become NULL (coverage honesty)."""
+    text = csv_bytes.decode("utf-8-sig", errors="replace")
+    reader = csv.reader(io.StringIO(text))
+
+    rows: list[dict[str, object]] = []
+    seen_isin: set[str] = set()
+    for i, parts in enumerate(reader):
+        if i == 0:
+            continue  # header
+        if len(parts) < 5:
+            continue  # malformed / short row -- skip
+        instrument_key = parts[0].strip().upper()
+        symbol = parts[1].strip().upper()
+        sector = parts[2].strip()
+        industry = parts[3].strip()
+        basic_industry = parts[4].strip()
+        # `industry` (NSE sector tier) is the filter + cyclical key: required.
+        if not instrument_key or not symbol or not industry:
+            continue
+        if instrument_key in seen_isin:
+            continue  # dedupe by ISIN, keep first
+        seen_isin.add(instrument_key)
+        rows.append({
+            "instrument_key": instrument_key,
+            "symbol": symbol,
+            "sector": sector or None,
+            "industry": industry,
+            "basic_industry": basic_industry or None,
+            "is_cyclical": is_cyclical_seed(industry),
+        })
+
+    if not rows:
+        return _empty_sector_frame()
+
+    df = pd.DataFrame(rows)[SECTOR_COLUMNS]
+    for col in ("instrument_key", "symbol", "sector", "industry", "basic_industry"):
+        df[col] = df[col].astype("string")
+    df["is_cyclical"] = df["is_cyclical"].astype(bool)
+    return df.reset_index(drop=True)
