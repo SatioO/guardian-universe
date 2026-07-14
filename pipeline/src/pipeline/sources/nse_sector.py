@@ -145,17 +145,11 @@ def _empty_sector_frame() -> pd.DataFrame:
 # non-NULL sector/basic_industry -- so the builder, manifest, and Rust client
 # are all unchanged.
 #
-# Tier mapping (NSE's 4 tiers -> our 3 columns, chosen to keep the existing app
-# behaviour bit-for-bit while adding the two previously-NULL columns):
-#   NSE macro         -> `sector`         (coarsest; was NULL)
-#   NSE sector        -> `industry`       (UNCHANGED vocabulary: same "Metals &
-#                                          Mining"-style names the Total-Market
-#                                          CSV put here, so the app's industry
-#                                          filter + is_cyclical keep working)
-#   NSE basicIndustry -> `basic_industry` (finest; was NULL)
-# NSE's 3rd "industry" tier (e.g. "Ferrous Metals") is intentionally dropped --
-# three columns cannot hold four tiers, and macro+sector+basicIndustry span the
-# widest useful range. The seed CSV keeps all four for provenance; we select.
+# Tier mapping (NSE's 4 tiers -> our 3 columns, name-to-name):
+#   NSE sector        -> `sector`         (e.g. "Metals & Mining"; drives is_cyclical)
+#   NSE industry      -> `industry`       (e.g. "Ferrous Metals")
+#   NSE basicIndustry -> `basic_industry` (e.g. "Iron & Steel")
+# NSE's coarsest `macro` tier is dropped (three columns, name-to-name).
 
 # Canonical header the harvest writes and this parser expects (is_cyclical is
 # DERIVED here, never stored, so there is one source of truth for it).
@@ -209,7 +203,8 @@ def parse_sector_seed(csv_bytes: bytes) -> pd.DataFrame:
         sector = parts[2].strip()
         industry = parts[3].strip()
         basic_industry = parts[4].strip()
-        # `industry` (NSE sector tier) is the filter + cyclical key: required.
+        # `industry` (NSE industry tier) is the required key; `sector` drives
+        # the cyclical flag (the cyclical vocabulary is sector-tier names).
         if not instrument_key or not symbol or not industry:
             continue
         if instrument_key in seen_isin:
@@ -221,7 +216,7 @@ def parse_sector_seed(csv_bytes: bytes) -> pd.DataFrame:
             "sector": sector or None,
             "industry": industry,
             "basic_industry": basic_industry or None,
-            "is_cyclical": is_cyclical_seed(industry),
+            "is_cyclical": is_cyclical_seed(sector),   # <- from SECTOR, not industry
         })
 
     if not rows:

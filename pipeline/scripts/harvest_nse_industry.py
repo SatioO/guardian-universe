@@ -22,14 +22,14 @@ WHAT IT DOES
    universe.
 2. For each symbol, GETs quote-equity `industryInfo` behind a warm anti-bot
    session, extracting the four tiers.
-3. Writes rows to the seed CSV (SEED_HEADER), mapping tiers to our 3 columns:
-       sector         <- NSE macro
-       industry       <- NSE sector          (keeps the app filter + is_cyclical
-                                               vocabulary unchanged)
+3. Writes rows to the seed CSV (SEED_HEADER), mapping tiers name-to-name:
+       sector         <- NSE sector          (drives is_cyclical)
+       industry       <- NSE industry
        basic_industry <- NSE basicIndustry
+   NSE's coarsest `macro` tier is dropped.
 4. Resumable: re-running skips symbols already in the output; failures are
    logged to a sidecar so you can retry just those.
-5. Prints a coverage + distinct-`industry` summary at the end, including which
+5. Prints a coverage + distinct-`sector` summary at the end, including which
    values matched the cyclical set -- eyeball this before committing to catch
    any NSE-vs-Total-Market punctuation drift.
 
@@ -197,12 +197,13 @@ def run(args: argparse.Namespace) -> int:
             if info is None or not info["sector"]:
                 failed.append(symbol)
             else:
-                # Tier mapping (see nse_sector.parse_sector_seed docstring):
-                #   sector col <- NSE macro ; industry col <- NSE sector ;
-                #   basic_industry col <- NSE basicIndustry.
-                writer.writerow([
-                    isin, symbol, info["macro"], info["sector"], info["basic_industry"],
-                ])
+                # Tier mapping (see nse_sector.parse_sector_seed): name-to-name.
+                #   sector col <- NSE sector ; industry col <- NSE industry ;
+                #   basic_industry col <- NSE basicIndustry. NSE macro dropped.
+                writerow_cols = [
+                    isin, symbol, info["sector"], info["industry"], info["basic_industry"],
+                ]
+                writer.writerow(writerow_cols)
                 f.flush()
                 ok += 1
             if n % 50 == 0:
@@ -222,7 +223,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _summarize(out_path: Path) -> None:
-    """Print total coverage + distinct `industry` (NSE sector) values with their
+    """Print total coverage + distinct `sector` (NSE sector) values with their
     cyclical flag, so vocabulary drift is visible before committing."""
     try:
         with out_path.open(newline="") as f:
@@ -230,14 +231,14 @@ def _summarize(out_path: Path) -> None:
             rows = list(reader)
     except OSError:
         return
-    industries: dict[str, int] = {}
+    sectors: dict[str, int] = {}
     for r in rows:
-        ind = r.get("industry", "").strip()
-        industries[ind] = industries.get(ind, 0) + 1
-    print(f"\n=== seed summary: {len(rows)} rows, {len(industries)} distinct industries ===")
-    for ind in sorted(industries):
-        cyc = "cyclical" if nse_sector.is_cyclical_seed(ind) else ""
-        print(f"  {industries[ind]:>5}  {ind}  {cyc}")
+        sec = r.get("sector", "").strip()
+        sectors[sec] = sectors.get(sec, 0) + 1
+    print(f"\n=== seed summary: {len(rows)} rows, {len(sectors)} distinct sectors ===")
+    for sec in sorted(sectors):
+        cyc = "cyclical" if nse_sector.is_cyclical_seed(sec) else ""
+        print(f"  {sectors[sec]:>5}  {sec}  {cyc}")
 
 
 def main() -> int:

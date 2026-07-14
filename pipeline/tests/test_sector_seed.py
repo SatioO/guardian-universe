@@ -16,17 +16,15 @@ import pandas as pd
 from pipeline import builders, config, datasets
 from pipeline.sources import nse_sector
 
-# instrument_key(ISIN), symbol, sector(<-NSE macro), industry(<-NSE sector),
-# basic_industry(<-NSE basicIndustry). RELIANCE/TATASTEEL/MARUTI are cyclical;
-# HDFCBANK/INFY are not. RELIANCE deliberately uses the comma'd API spelling
-# "Oil, Gas & Consumable Fuels" to prove punctuation-tolerant cyclical matching.
+# instrument_key(ISIN), symbol, sector, industry, basic_industry.
+# RELIANCE/TATASTEEL/MARUTI cyclical (by SECTOR tier); HDFCBANK/INFY not.
 _HEADER = ",".join(nse_sector.SEED_HEADER)
 _GOOD_ROWS = [
-    'INE002A01018,RELIANCE,Energy,"Oil, Gas & Consumable Fuels",Refineries & Marketing',
-    "INE040A01034,HDFCBANK,Financial Services,Financial Services,Private Sector Bank",
-    "INE081A01020,TATASTEEL,Commodities,Metals & Mining,Iron & Steel",
-    "INE585B01010,MARUTI,Consumer Discretionary,Automobile and Auto Components,Passenger Cars",
-    "INE009A01021,INFY,Information Technology,Information Technology,Computers - Software",
+    'INE002A01018,RELIANCE,"Oil, Gas & Consumable Fuels",Petroleum Products,Refineries & Marketing',
+    "INE040A01034,HDFCBANK,Financial Services,Banks,Private Sector Bank",
+    "INE081A01020,TATASTEEL,Metals & Mining,Ferrous Metals,Iron & Steel",
+    "INE585B01010,MARUTI,Automobile and Auto Components,Automobiles,Passenger Cars",
+    "INE009A01021,INFY,Information Technology,IT - Software,Computers - Software",
 ]
 
 
@@ -49,20 +47,18 @@ def test_seed_schema_and_tier_mapping():
     assert list(df.columns) == nse_sector.SECTOR_COLUMNS
     assert len(df) == 5
     rel = df[df["symbol"] == "RELIANCE"].iloc[0]
-    assert rel["instrument_key"] == "INE002A01018"  # ISIN join key
-    assert rel["sector"] == "Energy"                       # <- NSE macro
-    assert rel["industry"] == "Oil, Gas & Consumable Fuels"  # <- NSE sector
+    assert rel["instrument_key"] == "INE002A01018"
+    assert rel["sector"] == "Oil, Gas & Consumable Fuels"   # <- NSE sector
+    assert rel["industry"] == "Petroleum Products"          # <- NSE industry
     assert rel["basic_industry"] == "Refineries & Marketing"  # <- NSE basicIndustry
-    # The whole point: unlike the Total-Market CSV, these are NOT all-NULL.
     assert df["sector"].notna().all()
     assert df["basic_industry"].notna().all()
     assert df["is_cyclical"].dtype == bool
 
 
-def test_seed_is_cyclical_is_punctuation_tolerant():
+def test_seed_is_cyclical_from_sector_tier():
     df = nse_sector.parse_sector_seed(_good_seed()).set_index("symbol")
-    # "Oil, Gas & Consumable Fuels" (comma) still matches the no-comma cyclical set.
-    assert bool(df.loc["RELIANCE", "is_cyclical"]) is True
+    assert bool(df.loc["RELIANCE", "is_cyclical"]) is True    # sector cyclical
     assert bool(df.loc["TATASTEEL", "is_cyclical"]) is True
     assert bool(df.loc["MARUTI", "is_cyclical"]) is True
     assert bool(df.loc["HDFCBANK", "is_cyclical"]) is False
@@ -77,15 +73,16 @@ def test_is_cyclical_seed_normalizes_case_and_punctuation():
     assert not nse_sector.is_cyclical_seed("Information Technology")
 
 
-def test_seed_missing_optional_tiers_become_null_but_row_kept():
-    # macro + basicIndustry empty, but industry (the required key) present -> kept.
-    df = nse_sector.parse_sector_seed(_seed("INE111A01011,ACME,,Chemicals,"))
+def test_seed_missing_optional_basic_becomes_null_but_row_kept():
+    # sector present (required for cyclical), industry present (required key),
+    # basic_industry empty -> NULL.
+    df = nse_sector.parse_sector_seed(_seed("INE111A01011,ACME,Chemicals,Commodity Chemicals,"))
     assert len(df) == 1
     row = df.iloc[0]
-    assert row["industry"] == "Chemicals"
-    assert pd.isna(row["sector"])
+    assert row["sector"] == "Chemicals"
+    assert row["industry"] == "Commodity Chemicals"
     assert pd.isna(row["basic_industry"])
-    assert bool(row["is_cyclical"]) is True
+    assert bool(row["is_cyclical"]) is True   # "Chemicals" is a cyclical sector
 
 
 def test_seed_skips_rows_missing_required_fields():
