@@ -11,7 +11,8 @@ name: sector-refresh
 
 on:
   schedule:
-    - cron: "0 20 1 * *"   # 01:30 IST on the 2nd of each month
+    - cron: "0 20 * * 0"   # weekly — Sun 20:00 UTC (01:30 IST Mon): full re-harvest
+    - cron: "0 20 1 * *"   # monthly — 1st of the month, as a guaranteed baseline
   workflow_dispatch:
 
 permissions:

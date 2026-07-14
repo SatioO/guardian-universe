@@ -68,8 +68,9 @@ git commit -m "chore(sector): full-universe industry seed (BSE, SEBI 4-tier)"
 
 ### Refresh cadence — automated (you no longer run this locally)
 The **`sector-refresh`** GitHub Actions workflow
-(`.github/workflows/sector-refresh.yml`) owns the refresh: **monthly** (1st of
-the month) + manual dispatch, in its own 60-min job off the daily critical path.
+(`.github/workflows/sector-refresh.yml`) owns the refresh: **weekly** (Sundays)
++ **monthly** (1st, baseline) + manual dispatch, in its own 60-min job off the
+daily critical path.
 It does a **full** re-harvest (`--fresh` — re-fetches *every* scrip, so
 reclassifications of existing stocks are caught, not just new listings),
 shrink-guards against a flaky BSE run, commits the refreshed
