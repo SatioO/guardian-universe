@@ -125,6 +125,12 @@ def run(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     failures_path = out_path.with_suffix(".failures.txt")
 
+    if args.fresh and not args.retry_failed:
+        # Full re-harvest: discard any prior seed so EVERY scrip is re-fetched
+        # (catches reclassifications of existing stocks, not just new listings).
+        out_path.unlink(missing_ok=True)
+        failures_path.unlink(missing_ok=True)
+
     session = requests.Session()
     session.headers.update(_HEADERS)
     print(f"Fetching BSE scrip list from {BSE_LIST_URL} ...")
@@ -168,9 +174,29 @@ def run(args: argparse.Namespace) -> int:
         failures_path.write_text("\n".join(failed) + "\n")
         print(f"\n{len(failed)} failures -> {failures_path} (retry with --retry-failed)")
 
+    _sort_seed(out_path)
     _summarize(out_path)
     print(f"\nSeed written to {out_path} ({ok} new rows this run).")
     return 0 if ok or not scrips else 1
+
+
+def _sort_seed(out_path: Path) -> None:
+    """Rewrite the seed sorted by instrument_key (ISIN) so a periodic re-harvest
+    yields a deterministic diff -- only real classification changes show, never
+    row-order churn."""
+    if not out_path.exists():
+        return
+    with out_path.open(newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        rows = [r for r in reader if r]
+    if header is None:
+        return
+    rows.sort(key=lambda r: r[0])
+    with out_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
 
 
 def _summarize(out_path: Path) -> None:
@@ -197,6 +223,9 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=0, help="Only harvest the first N scrips")
     p.add_argument("--sleep", type=float, default=0.3,
                    help="Seconds between per-scrip requests (default 0.3)")
+    p.add_argument("--fresh", action="store_true",
+                   help="Full re-harvest: discard any prior seed, re-fetch every scrip "
+                        "(catches reclassifications). Use for the periodic CI refresh.")
     p.add_argument("--retry-failed", action="store_true",
                    help="Re-attempt only ISINs in the .failures.txt sidecar")
     return run(p.parse_args())

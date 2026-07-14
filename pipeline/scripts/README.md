@@ -66,9 +66,17 @@ git commit -m "chore(sector): full-universe industry seed (BSE, SEBI 4-tier)"
 > fail-closes to empty (honest "no data", never a bad overwrite). Commit the seed
 > **before/with** deploying the code change.
 
-### Refresh cadence
-Re-run when you want new listings classified — monthly/quarterly. Classification
-is near-static; the nightly pipeline only reads the committed seed.
+### Refresh cadence — automated (you no longer run this locally)
+The **`sector-refresh`** GitHub Actions workflow
+(`.github/workflows/sector-refresh.yml`) owns the refresh: **monthly** (1st of
+the month) + manual dispatch, in its own 60-min job off the daily critical path.
+It does a **full** re-harvest (`--fresh` — re-fetches *every* scrip, so
+reclassifications of existing stocks are caught, not just new listings),
+shrink-guards against a flaky BSE run, commits the refreshed
+`seeds/sector_industry_seed.csv` to `main`, and the next `data-daily` run reads
+it and publishes the updated `sector_industry_all.parquet` to the release. The
+local `python scripts/harvest_bse_industry.py` commands above remain only for
+ad-hoc testing.
 
 ## `harvest_nse_industry.py` — NSE harvester (DEPRECATED: Akamai-blocked)
 Kept for reference and for its `--dump`/`--probe` diagnostics, which document why
