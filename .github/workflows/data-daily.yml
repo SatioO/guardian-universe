@@ -68,7 +68,12 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           echo "Ingest status: $status"
       - name: Publish the updated dataset
-        if: steps.decide.outputs.status == 'success'
+        # `success` = today's primary (OHLC) ingested fresh. `skipped_idempotent`
+        # = OHLC already current, but a SECONDARY dataset (e.g. sector_industry,
+        # rebuilt from its committed seed) may still have changed — publish those
+        # too. Publish is diff-based against the release manifest, so a genuine
+        # no-op uploads nothing. Only not_yet/failed/skipped_holiday skip publish.
+        if: steps.decide.outputs.status == 'success' || steps.decide.outputs.status == 'skipped_idempotent'
         run: python -m pipeline publish
       - name: Surface window (catch-up) failures
         # G2 final-review fix (C1): a healthy TARGET day always publishes now
