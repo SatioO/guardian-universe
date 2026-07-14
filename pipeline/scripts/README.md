@@ -35,7 +35,7 @@ python scripts/harvest_nse_industry.py              # full run (~2000 symbols, ~
 - `--sleep 0.6` if NSE rate-limits you (default 0.4s between requests).
 
 ### After the run — review, then commit
-The script prints a summary: total rows, and every distinct `industry` value
+The script prints a summary: total rows, and every distinct `sector` value
 with its cyclical flag. **Eyeball it** — confirm coverage jumped to ~full
 universe and the cyclical sectors (Metals & Mining, Oil Gas & Consumable Fuels,
 Automobile and Auto Components, …) are flagged. Then:
@@ -51,19 +51,16 @@ git commit -m "chore(sector): harvest full-universe NSE 4-tier industry seed"
 > publishes a full-coverage `sector_industry_all.parquet`.
 
 ### Tier mapping (NSE's 4 tiers → our 3 columns)
-Chosen to keep the app's existing behaviour bit-for-bit while filling the two
-columns that used to ship NULL:
+Name-to-name: NSE `macro` is dropped, and the remaining three NSE tiers map
+straight across to the three parquet columns.
 
-| parquet column   | NSE tier        | example                        |
-|------------------|-----------------|--------------------------------|
-| `sector`         | macro           | `Energy` (was NULL)            |
-| `industry`       | **sector**      | `Oil, Gas & Consumable Fuels`  |
-| `basic_industry` | basicIndustry   | `Refineries & Marketing` (was NULL) |
+| parquet column   | NSE tier      | example (RELIANCE)              |
+|------------------|---------------|----------------------------------|
+| `sector`         | sector        | Oil, Gas & Consumable Fuels      |
+| `industry`       | industry      | Petroleum Products               |
+| `basic_industry` | basicIndustry | Refineries & Marketing           |
 
-`industry` keeps the NSE **sector**-tier vocabulary the Total-Market CSV used, so
-the app's industry filter and the `is_cyclical` derivation are unchanged — only
-their coverage grows. NSE's 3rd "industry" tier is dropped (3 columns can't hold
-4 tiers). `is_cyclical` is derived punctuation-tolerantly
+`is_cyclical` is derived from the **`sector`** tier, punctuation-tolerantly
 (`nse_sector.is_cyclical_seed`) so the API's `"Oil, Gas & …"` still matches the
 Total-Market `"Oil Gas & …"` cyclical set.
 
