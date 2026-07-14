@@ -129,6 +129,28 @@ def test_read_seed_frame_missing_file_is_empty(tmp_path, monkeypatch):
     assert builders._read_seed_frame(date(2026, 7, 14)).empty
 
 
+def test_build_from_seed_ignores_ttl_and_rebuilds_on_seed_change(tmp_path, monkeypatch):
+    # Regression: a synced, fresh-dated prior parquet must NOT block a refreshed
+    # seed. The weekly TTL only guards the network fetch, never the local seed.
+    seed = tmp_path / "sector_industry_seed.csv"
+    seed.write_bytes(_good_seed())
+    monkeypatch.setattr(config, "SECTOR_SEED_PATH", seed)
+    spec = _sector_spec(tmp_path / "sector")
+
+    r1 = builders.build_sector_industry(spec, date(2026, 7, 14), min_rows=1)
+    assert r1.status == "success" and r1.symbol_count == 5
+
+    # Seed grows by one; SAME target date (well within any TTL window).
+    seed.write_bytes(_seed(*_GOOD_ROWS, "INE999Z01019,NEWCO,Chemicals,Commodity Chemicals,X"))
+    r2 = builders.build_sector_industry(spec, date(2026, 7, 14), min_rows=1)
+    assert r2.status == "success", "must rebuild despite a fresh-dated prior parquet"
+    assert r2.symbol_count == 6
+
+    # Unchanged seed on a later date -> content-guard skips (no daily churn).
+    r3 = builders.build_sector_industry(spec, date(2026, 7, 15), min_rows=1)
+    assert r3.status == "skipped_idempotent"
+
+
 def test_build_from_seed_writes_full_coverage_parquet(tmp_path, monkeypatch):
     seed = tmp_path / "sector_industry_seed.csv"
     seed.write_bytes(_good_seed())

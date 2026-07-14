@@ -345,7 +345,13 @@ def build_sector_industry(
     out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
     prior_rows = _sector_prior_rows(out_path)
 
-    if _sector_is_fresh(out_path, target, ttl_days):
+    # The weekly TTL exists ONLY to avoid re-FETCHING the Total-Market CSV over
+    # the network every day. The default seed source is a free local read, so the
+    # TTL must NOT apply to it -- otherwise a synced, fresh-dated prior parquet
+    # skips picking up a refreshed committed seed (the seed would never build).
+    # Only the legacy fetch path keeps the TTL; the seed path relies on the
+    # content-guard below to avoid churn.
+    if fetch_frame is not _read_seed_frame and _sector_is_fresh(out_path, target, ttl_days):
         return RunStatus(
             "skipped_idempotent", target, symbol_count=prior_rows or 0,
             source="nse-sector", message=f"within {ttl_days}-day TTL; not re-fetched",
@@ -374,5 +380,38 @@ def build_sector_industry(
     out = df.copy()
     out["date"] = pd.Timestamp(target)
     out = out[[*nse_sector.SECTOR_COLUMNS, "date"]]
+
+    # Content-guard (seed path only): skip the write (and thus the daily
+    # re-publish) when the classification is byte-identical to the current file,
+    # ignoring the as-of `date`. Lets the seed path rebuild whenever the seed
+    # changes without churning the release every day when it doesn't. The legacy
+    # fetch path keeps its original weekly-TTL write behavior.
+    if fetch_frame is _read_seed_frame and _sector_content_unchanged(out_path, df):
+        return RunStatus(
+            "skipped_idempotent", target, symbol_count=prior_rows or len(out),
+            source="nse-sector", message="seed unchanged; classification content identical",
+        )
+
     _write_atomic(out, out_path)
     return RunStatus("success", target, symbol_count=len(out), source="nse-sector")
+
+
+def _sector_content_unchanged(out_path: Path, df: pd.DataFrame) -> bool:
+    """True when `df`'s classification (SECTOR_COLUMNS, ignoring the as-of `date`)
+    matches the current file. Biased to False (rebuild) on any missing/unreadable
+    prior or shape mismatch, so a real change is never missed."""
+    if not out_path.exists():
+        return False
+    try:
+        prev = pd.read_parquet(out_path)
+    except Exception:  # noqa: BLE001 - unreadable prior -> rebuild
+        return False
+    cols = nse_sector.SECTOR_COLUMNS
+    if not set(cols).issubset(prev.columns):
+        return False
+
+    def _canon(frame: pd.DataFrame) -> str:
+        f = frame[cols].sort_values("instrument_key").reset_index(drop=True)
+        return f.astype("string").fillna("").to_csv(index=False)
+
+    return _canon(df) == _canon(prev)
