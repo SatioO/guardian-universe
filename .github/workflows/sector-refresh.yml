@@ -62,6 +62,17 @@ jobs:
             echo "::error::refreshed seed shrank ($nrows < $crows, >2%) — refusing to commit"
             exit 1
           fi
+          # Content plausibility: a broad BSE degradation (field rename, stale
+          # cache) can keep the row count stable while collapsing the tiers. There
+          # are ~22 distinct sectors; far fewer means the classification is bad.
+          # csv.reader is quote-aware (sector values contain commas, e.g. "Oil,
+          # Gas & Consumable Fuels"), so column 2 is the true `sector` field.
+          nsec=$(python -c "import csv; r=list(csv.reader(open('$new'))); print(len({x[2] for x in r[1:] if len(x)>2 and x[2]}))")
+          echo "distinct sectors: $nsec"
+          if [ "$nsec" -lt 15 ]; then
+            echo "::error::only $nsec distinct sectors (<15) — suspected BSE degradation; refusing to commit"
+            exit 1
+          fi
           mkdir -p seeds && cp "$new" "$cur"
           if git diff --quiet -- "$cur"; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -78,10 +89,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add seeds/sector_industry_seed.csv
           git commit -m "chore(sector): monthly BSE industry seed refresh"
-          git push
+          # One rebase-retry in case a human/PR merge landed on main during the
+          # ~45-min harvest, so the whole run isn't discarded on a stale push.
+          git push || { git pull --rebase origin main && git push; }
 
       - name: Alert on failure
-        if: failure()
+        if: failure() || cancelled()
         working-directory: ${{ github.workspace }}
         run: |
           gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true
