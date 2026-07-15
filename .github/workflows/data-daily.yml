@@ -68,7 +68,12 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           echo "Ingest status: $status"
       - name: Publish the updated dataset
-        if: steps.decide.outputs.status == 'success'
+        # `success` = today's primary (OHLC) ingested fresh. `skipped_idempotent`
+        # = OHLC already current, but a SECONDARY dataset (e.g. sector_industry,
+        # rebuilt from its committed seed) may still have changed — publish those
+        # too. Publish is diff-based against the release manifest, so a genuine
+        # no-op uploads nothing. Only not_yet/failed/skipped_holiday skip publish.
+        if: steps.decide.outputs.status == 'success' || steps.decide.outputs.status == 'skipped_idempotent'
         run: python -m pipeline publish
       - name: Surface window (catch-up) failures
         # G2 final-review fix (C1): a healthy TARGET day always publishes now
@@ -89,7 +94,10 @@ jobs:
           done
           exit 1
       - name: Surface secondary-dataset failures
-        if: always() && steps.decide.outputs.status == 'success'
+        # Also on skipped_idempotent: that is exactly the day-type where a
+        # secondary dataset (e.g. sector_industry) can have changed/failed while
+        # OHLC is unchanged — the same day-type the publish gate now covers.
+        if: always() && (steps.decide.outputs.status == 'success' || steps.decide.outputs.status == 'skipped_idempotent')
         run: |
           bad=0
           for f in data/meta/last_run_status_*.json; do
@@ -121,7 +129,10 @@ jobs:
             gh issue comment "$n" --body "$body"
           fi
       - name: Alert on failure
-        if: failure()
+        # `cancelled()` too: a job killed by `timeout-minutes` (e.g. a systemic
+        # NSE/BSE outage that stalls the run) is marked cancelled, not failed —
+        # `failure()` alone would let that time out silently with no alert.
+        if: failure() || cancelled()
         working-directory: ${{ github.workspace }}
         run: |
           gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true

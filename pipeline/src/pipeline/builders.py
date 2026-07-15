@@ -233,12 +233,33 @@ def _read_all_years_for_ca_flags(source_spec: DatasetSpec) -> pd.DataFrame:
 # guard -- see build_sector_industry.
 # ---------------------------------------------------------------------------
 
+def _read_seed_frame(target: date) -> pd.DataFrame:
+    """Read the committed full-universe seed CSV into the normalized sector
+    frame -- the DEFAULT source for build_sector_industry.
+
+    Same `date -> DataFrame` seam as `_fetch_sector_frame`, but a local file read
+    (no network): the seed is harvested offline (scripts/harvest_nse_industry.py)
+    because NSE has no bulk per-security classification file. Covers the whole
+    tradable universe with all NSE tiers, so sector/basic_industry are populated
+    (not NULL) and the industry filter reaches every symbol, not just the ~750
+    Total-Market members. A missing/empty seed yields an empty frame, which the
+    builder's fail-closed guard turns into a retained-prior/failed outcome --
+    never a bad overwrite."""
+    path = config.SECTOR_SEED_PATH
+    if not path.exists():
+        return nse_sector.parse_sector_seed(b"")  # empty -> builder fail-closes
+    return nse_sector.parse_sector_seed(path.read_bytes())
+
+
 def _fetch_sector_frame(target: date) -> pd.DataFrame:
     """Fetch + parse the NSE Total-Market CSV into the normalized sector frame,
     reusing the shared warm-session + retry contract (`fetch._fetch_with_retry`)
     exactly as the equities/indices fetchers do -- `parse=parse_sector_csv` is a
     `bytes -> DataFrame` parser of the same shape as `_unzip_to_df`/`_csv_to_df`.
-    A 404/exhaustion raises (caught by the builder's fail-closed guard)."""
+    A 404/exhaustion raises (caught by the builder's fail-closed guard).
+
+    Retained as the seam for the future incremental top-up (seed UNION a live
+    fetch of brand-new index entrants); no longer the default source."""
     session = requests.Session()
     session.headers.update({"User-Agent": _BROWSER_UA})
     return _fetch_with_retry(
@@ -295,11 +316,14 @@ def build_sector_industry(
     spec: DatasetSpec,
     target: date,
     *,
-    fetch_frame: Callable[[date], pd.DataFrame] = _fetch_sector_frame,
+    fetch_frame: Callable[[date], pd.DataFrame] = _read_seed_frame,
     ttl_days: int = config.SECTOR_REFRESH_TTL_DAYS,
     min_rows: int = config.SECTOR_MIN_ROWS,
 ) -> RunStatus:
-    """Fetch + normalize + full-rewrite the `sector_industry` reference.
+    """Read (default) or fetch + normalize + full-rewrite the `sector_industry`
+    reference. The default source is the committed full-universe seed
+    (`_read_seed_frame`); inject `fetch_frame=_fetch_sector_frame` for the
+    legacy Total-Market fetch, or any `date -> DataFrame` seam in tests.
 
     Weekly TTL: if the stored file's as-of date is younger than `ttl_days`,
     skip the fetch entirely (cheap idempotent no-op on the nightly cron).
@@ -321,7 +345,13 @@ def build_sector_industry(
     out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
     prior_rows = _sector_prior_rows(out_path)
 
-    if _sector_is_fresh(out_path, target, ttl_days):
+    # The weekly TTL exists ONLY to avoid re-FETCHING the Total-Market CSV over
+    # the network every day. The default seed source is a free local read, so the
+    # TTL must NOT apply to it -- otherwise a synced, fresh-dated prior parquet
+    # skips picking up a refreshed committed seed (the seed would never build).
+    # Only the legacy fetch path keeps the TTL; the seed path relies on the
+    # content-guard below to avoid churn.
+    if fetch_frame is not _read_seed_frame and _sector_is_fresh(out_path, target, ttl_days):
         return RunStatus(
             "skipped_idempotent", target, symbol_count=prior_rows or 0,
             source="nse-sector", message=f"within {ttl_days}-day TTL; not re-fetched",
@@ -350,5 +380,38 @@ def build_sector_industry(
     out = df.copy()
     out["date"] = pd.Timestamp(target)
     out = out[[*nse_sector.SECTOR_COLUMNS, "date"]]
+
+    # Content-guard (seed path only): skip the write (and thus the daily
+    # re-publish) when the classification is byte-identical to the current file,
+    # ignoring the as-of `date`. Lets the seed path rebuild whenever the seed
+    # changes without churning the release every day when it doesn't. The legacy
+    # fetch path keeps its original weekly-TTL write behavior.
+    if fetch_frame is _read_seed_frame and _sector_content_unchanged(out_path, df):
+        return RunStatus(
+            "skipped_idempotent", target, symbol_count=prior_rows or len(out),
+            source="nse-sector", message="seed unchanged; classification content identical",
+        )
+
     _write_atomic(out, out_path)
     return RunStatus("success", target, symbol_count=len(out), source="nse-sector")
+
+
+def _sector_content_unchanged(out_path: Path, df: pd.DataFrame) -> bool:
+    """True when `df`'s classification (SECTOR_COLUMNS, ignoring the as-of `date`)
+    matches the current file. Biased to False (rebuild) on any missing/unreadable
+    prior or shape mismatch, so a real change is never missed."""
+    if not out_path.exists():
+        return False
+    try:
+        prev = pd.read_parquet(out_path)
+    except Exception:  # noqa: BLE001 - unreadable prior -> rebuild
+        return False
+    cols = nse_sector.SECTOR_COLUMNS
+    if not set(cols).issubset(prev.columns):
+        return False
+
+    def _canon(frame: pd.DataFrame) -> str:
+        f = frame[cols].sort_values("instrument_key").reset_index(drop=True)
+        return f.astype("string").fillna("").to_csv(index=False)
+
+    return _canon(df) == _canon(prev)
