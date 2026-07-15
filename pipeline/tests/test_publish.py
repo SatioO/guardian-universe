@@ -98,6 +98,28 @@ def test_shrink_guard_blocks_row_regression():
         check_no_shrink(new, live)
 
 
+def test_allow_shrink_permits_row_shrink_but_keeps_other_guards():
+    # A deliberate correction that reduces a file's row count is allowed under
+    # allow_shrink=True (no raise) ...
+    new = {"latest_trading_date": "2026-07-03", "datasets": [{"name": "ca_flags", "files": [
+        {"name": "ca_flags_2023.parquet", "rows": 7, "sha256": "s", "bytes": 1, "asset": "a"}]}]}
+    live = {"latest_trading_date": "2026-07-03", "datasets": [{"name": "ca_flags", "files": [
+        {"name": "ca_flags_2023.parquet", "rows": 3011, "sha256": "t", "bytes": 9, "asset": "b"}]}]}
+    check_no_shrink(new, live, allow_shrink=True)  # no raise
+    with pytest.raises(UnexpectedFailure, match="shrink"):
+        check_no_shrink(new, live)  # default still blocks
+
+    # ... but allow_shrink NEVER relaxes a missing file or a date regression.
+    new_missing = {"latest_trading_date": "2026-07-03",
+                   "datasets": [{"name": "ca_flags", "files": []}]}
+    with pytest.raises(UnexpectedFailure, match="missing locally"):
+        check_no_shrink(new_missing, live, allow_shrink=True)
+    new_regress = {"latest_trading_date": "2026-07-01", "datasets": [{"name": "ca_flags", "files": [
+        {"name": "ca_flags_2023.parquet", "rows": 7, "sha256": "s", "bytes": 1, "asset": "a"}]}]}
+    with pytest.raises(UnexpectedFailure, match="regress"):
+        check_no_shrink(new_regress, live, allow_shrink=True)
+
+
 def test_shrink_guard_blocks_missing_year_and_date_regression():
     live = {"latest_trading_date": "2026-07-03", "datasets": [{"name": "ohlc", "files": [
         {"name": "ohlc_2025.parquet", "sha256": "t", "bytes": 9}]}]}

@@ -90,7 +90,13 @@ def build_parser() -> argparse.ArgumentParser:
     b = sub.add_parser("backfill")
     b.add_argument("--days", type=int, required=True)
     b.add_argument("--dataset", choices=[*datasets.DATASETS, "all"], default="all")
-    sub.add_parser("publish")
+    pub = sub.add_parser("publish")
+    # Operator opt-in for a DELIBERATE data-reducing correction (e.g. rebuilding
+    # ca_flags after fixing a bug that had inflated it). Off by default so the
+    # nightly cron always keeps the full shrink-guard; downgrades only the
+    # per-file row-shrink check to a warning (missing-file and
+    # latest_trading_date-regression stay hard errors). See check_no_shrink.
+    pub.add_argument("--allow-shrink", action="store_true")
     sub.add_parser("sync")
     sub.add_parser("check-freshness")
     sub.add_parser("snapshot")
@@ -821,6 +827,7 @@ def main(argv: list[str] | None = None) -> int:
             stage_dir=config.DATA_DIR / "stage", client=client,
             generated_at=datetime.now(UTC).isoformat(),
             now=datetime.now(UTC),
+            allow_shrink=getattr(args, "allow_shrink", False),
         )
     except (ReleaseError, UnexpectedFailure) as e:
         print(f"publish failed: {e}", file=sys.stderr)

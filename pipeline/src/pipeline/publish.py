@@ -54,7 +54,18 @@ def check_cas(live: dict[str, Any] | None, synced: dict[str, Any]) -> None:
         )
 
 
-def check_no_shrink(new: dict[str, Any], live: dict[str, Any] | None) -> None:
+def check_no_shrink(
+    new: dict[str, Any], live: dict[str, Any] | None, *, allow_shrink: bool = False
+) -> None:
+    """Guard against a publish that would drop data from the live release.
+
+    `allow_shrink` (operator opt-in, default off) downgrades the per-file
+    row-COUNT-shrink check to a stderr warning -- for a DELIBERATE correction
+    that legitimately reduces a dataset (e.g. rebuilding ca_flags after fixing
+    a bug that had inflated it with false rows). It never relaxes the two
+    almost-always-accidental checks: a file/dataset that vanishes locally, and
+    a `latest_trading_date` regression, both stay hard errors regardless.
+    """
     if live is None:
         return
     new_by_name = {ds["name"]: ds for ds in new["datasets"]}
@@ -76,9 +87,11 @@ def check_no_shrink(new: dict[str, Any], live: dict[str, Any] | None) -> None:
                     f"shrink-guard: {lf['name']} is on the live release but missing locally"
                 )
             if "rows" in lf and nf["rows"] < lf["rows"]:
-                raise UnexpectedFailure(
-                    f"shrink-guard: {lf['name']} rows {nf['rows']} < live {lf['rows']}"
-                )
+                msg = f"shrink-guard: {lf['name']} rows {nf['rows']} < live {lf['rows']}"
+                if allow_shrink:
+                    print(f"WARNING (--allow-shrink): {msg}", file=sys.stderr)
+                    continue
+                raise UnexpectedFailure(msg)
     if new["latest_trading_date"] < live["latest_trading_date"]:
         raise UnexpectedFailure("shrink-guard: latest_trading_date would regress")
 
@@ -206,6 +219,7 @@ def publish_dataset(
     client: ReleaseClient,
     generated_at: str,
     now: datetime,
+    allow_shrink: bool = False,
 ) -> None:
     # Empty-store guard: only the PRIMARY dataset (specs[0], equities) must
     # have baseline files. Other specs may be legitimately empty (they are
@@ -231,7 +245,7 @@ def publish_dataset(
     synced: dict[str, Any] = json.loads(synced_path.read_text())
 
     check_cas(live, synced)
-    check_no_shrink(new_manifest, live)
+    check_no_shrink(new_manifest, live, allow_shrink=allow_shrink)
     carry_forward_deltas(new_manifest, live, existing=existing)
 
     # Upload new content-addressed data assets (immutable: no clobber).

@@ -61,15 +61,20 @@ def build_secfull_url(d: date) -> str:
 
 
 def secfull_to_udiff_shape(
-    raw: pd.DataFrame, *, isin_map: Mapping[str, str] | None = None
+    raw: pd.DataFrame, *, isin_map: Mapping[tuple[str, str], str] | None = None
 ) -> pd.DataFrame:
     """Reshape a raw sec_bhavdata_full frame into the UDiFF primary's raw
     column shape so `normalize_equity_bhavcopy` can consume it unchanged.
 
     Args:
         raw: Raw secfull DataFrame with (at least) SECFULL_RAW_COLUMNS.
-        isin_map: symbol -> ISIN lookup (secfull has no ISIN column of its
-            own). A miss yields "" -- the downstream normalizer's "NSE:"
+        isin_map: (symbol, series) -> ISIN lookup (secfull has no ISIN column
+            of its own). Keying on (symbol, series) -- NOT symbol alone -- is
+            essential: an issuer's bonds/NCDs (series N1-N9/NA-NE etc.) trade
+            under the SAME symbol as its equity but have their OWN ISINs, so a
+            symbol-only map would collapse every series onto the equity ISIN
+            and the bond rows would displace the equity row for that date. A
+            miss yields "" -- the downstream normalizer's "NSE:"+symbol
             sentinel takes over from there; this adapter never invents a key.
 
     Raises:
@@ -121,7 +126,9 @@ def secfull_to_udiff_shape(
     # symbol's turnover both ways.
     out["TtlTrfVal"] = pd.to_numeric(df["TURNOVER_LACS"], errors="coerce").fillna(0.0) * 100_000
 
-    out["ISIN"] = symbol.map(lambda s: isin_map.get(s, ""))
+    out["ISIN"] = [
+        isin_map.get((s, sr), "") for s, sr in zip(symbol, series, strict=True)
+    ]
 
     # Fixed fields the UDiFF normalizer filters on -- secfull has no session
     # concept (it's always the final settled day file), so these are constant.
