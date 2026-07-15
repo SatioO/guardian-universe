@@ -90,7 +90,7 @@ def test_shape_adapter_produces_udiff_raw_columns():
 def test_shape_adapter_output_feeds_normalize_equity_bhavcopy_unchanged():
     # The core integration point at the unit level: the adapter's output must
     # be directly consumable by the EXISTING UDiFF normalizer with no changes.
-    out = secfull_to_udiff_shape(_raw(), isin_map={"RELIANCE": "INE002A01018"})
+    out = secfull_to_udiff_shape(_raw(), isin_map={("RELIANCE", "EQ"): "INE002A01018"})
     canonical = normalize_equity_bhavcopy(out, source="nse-secfull")
     assert list(canonical.columns) == config.CANON_COLUMNS
     assert len(canonical) == 1
@@ -214,14 +214,14 @@ def test_shape_adapter_dash_turnover_coerces_to_zero_rupees():
 
 
 def test_shape_adapter_isin_map_hit():
-    out = secfull_to_udiff_shape(_raw(), isin_map={"RELIANCE": "INE002A01018"})
+    out = secfull_to_udiff_shape(_raw(), isin_map={("RELIANCE", "EQ"): "INE002A01018"})
     assert out.iloc[0]["ISIN"] == "INE002A01018"
 
 
 def test_shape_adapter_isin_map_miss_yields_empty_string():
     # Empty ISIN -> the normalizer's NSE: sentinel takes over downstream;
     # the shape-adapter itself never invents a key.
-    out = secfull_to_udiff_shape(_raw(), isin_map={"OTHERSYMBOL": "INE999Z99999"})
+    out = secfull_to_udiff_shape(_raw(), isin_map={("OTHERSYMBOL", "EQ"): "INE999Z99999"})
     assert out.iloc[0]["ISIN"] == ""
 
 
@@ -230,9 +230,30 @@ def test_shape_adapter_isin_map_none_yields_empty_string_for_all_rows():
     assert out.iloc[0]["ISIN"] == ""
 
 
+def test_shape_adapter_bond_series_does_not_displace_equity():
+    # Regression: an issuer's equity (EQ) and its bond (N8) trade under the
+    # SAME symbol but have DIFFERENT ISINs. A symbol-only map keyed both onto
+    # the equity ISIN, so after normalize's one-row-per-(instrument_key, date)
+    # the bond displaced the equity. The (symbol, series) map keeps them apart.
+    raw = _raw(
+        _raw_row(SYMBOL="PFC", SERIES="EQ", CLOSE_PRICE=382.6),
+        _raw_row(SYMBOL="PFC", SERIES="N8", CLOSE_PRICE=1282.0),
+    )
+    isin_map = {("PFC", "EQ"): "INE134E01011", ("PFC", "N8"): "INE134E07463"}
+    out = secfull_to_udiff_shape(raw, isin_map=isin_map)
+    by_series = dict(zip(out["SctySrs"], out["ISIN"]))
+    assert by_series["EQ"] == "INE134E01011"
+    assert by_series["N8"] == "INE134E07463"  # its OWN ISIN, not the equity's
+    canonical = normalize_equity_bhavcopy(out, source="nse-secfull")
+    # both survive with distinct instrument_keys -> equity is not displaced
+    assert set(canonical["instrument_key"]) == {"INE134E01011", "INE134E07463"}
+    eq = canonical[canonical["series"] == "EQ"].iloc[0]
+    assert eq["close"] == 382.6
+
+
 def test_shape_adapter_isin_map_strips_symbol_whitespace_before_lookup():
     raw = _raw(_raw_row(SYMBOL=" RELIANCE "))
-    out = secfull_to_udiff_shape(raw, isin_map={"RELIANCE": "INE002A01018"})
+    out = secfull_to_udiff_shape(raw, isin_map={("RELIANCE", "EQ"): "INE002A01018"})
     assert out.iloc[0]["ISIN"] == "INE002A01018"
 
 
@@ -259,7 +280,7 @@ def test_shape_adapter_multiple_rows_each_mapped_independently():
         _raw_row(SYMBOL="RELIANCE", CLOSE_PRICE=3000.0),
         _raw_row(SYMBOL="INFY", CLOSE_PRICE=1500.0, SERIES="EQ"),
     )
-    out = secfull_to_udiff_shape(raw, isin_map={"RELIANCE": "INE002A01018"})
+    out = secfull_to_udiff_shape(raw, isin_map={("RELIANCE", "EQ"): "INE002A01018"})
     assert set(out["TckrSymb"]) == {"RELIANCE", "INFY"}
     infy = out[out["TckrSymb"] == "INFY"].iloc[0]
     assert infy["ISIN"] == ""  # miss -> empty, sentinel deferred to normalizer
@@ -385,24 +406,31 @@ def test_equities_fetcher_secfull_fallback_resolves_isin_from_reference(
 # ===========================================================================
 
 
-def test_load_isin_map_reads_active_rows_symbol_to_isin(tmp_path, monkeypatch):
+def test_load_isin_map_keys_by_symbol_and_series(tmp_path, monkeypatch):
+    # An issuer's equity and its bond share a SYMBOL but have distinct ISINs;
+    # the map keys on (symbol, series) so the bond resolves to its OWN ISIN and
+    # never collapses onto the equity's key. An inactive bond series is still
+    # mapped (latest per slot), not dropped -- it may still trade via fallback.
     from pipeline import datasets as ds_mod
 
     ref_dir = tmp_path / "reference"
     ref_dir.mkdir(parents=True)
     df = pd.DataFrame({
-        "instrument_key": ["INE002A01018", "INE_OLD"],
-        "isin": ["INE002A01018", "INE_OLD"],
-        "symbol": ["RELIANCE", "DEADCO"],
-        "series": ["EQ", "EQ"],
+        "instrument_key": ["INE134E01011", "INE134E07463"],
+        "isin": ["INE134E01011", "INE134E07463"],
+        "symbol": ["PFC", "PFC"],
+        "series": ["EQ", "N8"],
         "status": ["active", "inactive"],
-        "last_seen": pd.to_datetime(["2026-07-02", "2026-06-01"]),
+        "last_seen": pd.to_datetime(["2026-07-02", "2024-05-07"]),
     })
     df.to_parquet(ref_dir / "instruments_all.parquet", compression="zstd", index=False)
     monkeypatch.setattr(config, "REFERENCE_DIR", ref_dir)
 
     isin_map = ds_mod._load_isin_map()
-    assert isin_map == {"RELIANCE": "INE002A01018"}  # inactive DEADCO excluded
+    assert isin_map == {
+        ("PFC", "EQ"): "INE134E01011",
+        ("PFC", "N8"): "INE134E07463",
+    }
 
 
 def test_load_isin_map_drops_empty_isins(tmp_path, monkeypatch):
@@ -425,10 +453,12 @@ def test_load_isin_map_drops_empty_isins(tmp_path, monkeypatch):
     assert isin_map == {}
 
 
-def test_load_isin_map_dedupes_multiple_scd2_rows_by_latest_last_seen(tmp_path, monkeypatch):
-    # Reference may hold multiple SCD2 rows per symbol (e.g. a series change);
-    # the join must not blow up cardinality -- dedupe to the latest by
-    # last_seen when building the map.
+def test_load_isin_map_dedupes_scd2_rows_by_latest_last_seen_per_symbol_series(
+    tmp_path, monkeypatch
+):
+    # NSE reuses a bond series slot as old bonds mature, so reference may hold
+    # multiple SCD2 rows for the SAME (symbol, series); dedupe to the latest by
+    # last_seen -- the ISIN currently occupying that slot.
     from pipeline import datasets as ds_mod
 
     ref_dir = tmp_path / "reference"
@@ -437,15 +467,15 @@ def test_load_isin_map_dedupes_multiple_scd2_rows_by_latest_last_seen(tmp_path, 
         "instrument_key": ["INE001_OLD", "INE001_NEW"],
         "isin": ["INE001_OLD", "INE001_NEW"],
         "symbol": ["SAMESYM", "SAMESYM"],
-        "series": ["BE", "EQ"],
-        "status": ["active", "active"],
-        "last_seen": pd.to_datetime(["2026-06-01", "2026-07-02"]),
+        "series": ["N8", "N8"],  # same slot, reused over time
+        "status": ["inactive", "active"],
+        "last_seen": pd.to_datetime(["2022-06-01", "2026-07-02"]),
     })
     df.to_parquet(ref_dir / "instruments_all.parquet", compression="zstd", index=False)
     monkeypatch.setattr(config, "REFERENCE_DIR", ref_dir)
 
     isin_map = ds_mod._load_isin_map()
-    assert isin_map == {"SAMESYM": "INE001_NEW"}  # latest by last_seen wins
+    assert isin_map == {("SAMESYM", "N8"): "INE001_NEW"}  # latest by last_seen wins
 
 
 def test_load_isin_map_absent_reference_returns_empty_dict(tmp_path, monkeypatch, capsys):

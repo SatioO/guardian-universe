@@ -59,16 +59,23 @@ class DatasetSpec:
     external: bool = False
 
 
-def _load_isin_map() -> dict[str, str]:
-    """symbol -> ISIN, read from the reference/instruments store.
+def _load_isin_map() -> dict[tuple[str, str], str]:
+    """(symbol, series) -> ISIN, read from the reference/instruments store.
 
     secfull has no ISIN column of its own, so the fallback keys its rows via
-    this reference-derived map. The reference dataset is SCD2 (multiple rows
-    per symbol over time, e.g. a series change); this dedupes to the latest
-    row per symbol by `last_seen` before building the map, so the join never
-    blows up cardinality. Absent reference (not yet built, or this is an
-    early-adopter deployment) -> {} + a stderr note; sentinel "NSE:"+symbol
-    keys take over downstream and self-heal once reference lands.
+    this reference-derived map. The key MUST be (symbol, series), not symbol
+    alone: an issuer's bonds/NCDs (series N1-N9/NA-NE etc.) trade under the
+    SAME symbol as its equity but carry their OWN ISINs. A symbol-only map
+    collapsed every series onto the issuer's equity ISIN, so a bond row
+    displaced the equity row at (equity_ISIN, date) -- the equity price for
+    that date then vanished from the dataset entirely.
+
+    The reference dataset is SCD2 (multiple rows per (symbol, series) over
+    time -- NSE reuses a bond series slot as old bonds mature); this dedupes
+    to the latest row per (symbol, series) by `last_seen`, which is the ISIN
+    currently occupying that slot -- the right answer for a current-day
+    fallback. Absent reference (not yet built) -> {} + a stderr note; sentinel
+    "NSE:"+symbol keys take over downstream and self-heal once reference lands.
     """
     path = config.REFERENCE_DIR / "instruments_all.parquet"
     if not path.exists():
@@ -76,10 +83,14 @@ def _load_isin_map() -> dict[str, str]:
         return {}
 
     df = pd.read_parquet(path)
-    df = df[df["status"] == "active"]
-    df = df.sort_values("last_seen").drop_duplicates(subset="symbol", keep="last")
     df = df[df["isin"].fillna("") != ""]
-    return dict(zip(df["symbol"], df["isin"], strict=True))
+    df = df.sort_values("last_seen").drop_duplicates(
+        subset=["symbol", "series"], keep="last"
+    )
+    return {
+        (sym, ser): isin
+        for sym, ser, isin in zip(df["symbol"], df["series"], df["isin"], strict=True)
+    }
 
 
 def _secfull_fallback(d: date) -> pd.DataFrame:
