@@ -16,6 +16,8 @@ from pipeline.sources.classification_registry import (
     ClassificationRegistryRecord,
     apply_observation,
 )
+from pipeline.sources.classification_publication import Provenance
+from pipeline.sources.screener_collector import CollectedClassification
 from pipeline.sources.screener_classification import ClassificationObservation
 
 
@@ -37,6 +39,7 @@ class RegistryEntry:
     symbol: str
     status: RegistryStatus
     last_known_good: ClassificationRegistryRecord | None
+    last_provenance: Provenance | None = None
     consecutive_absences: int = 0
     retry_on: date | None = None
     retry_attempts: int = 0
@@ -92,6 +95,10 @@ _REGISTRY_COLUMNS = [
     "sector",
     "industry",
     "basic_industry",
+    "observed_at",
+    "source_url",
+    "extractor_version",
+    "source_fragment_hash",
     "consecutive_absences",
     "retry_on",
     "retry_attempts",
@@ -134,6 +141,10 @@ def write_registry(
                 "sector": classification.sector if classification else None,
                 "industry": classification.industry if classification else None,
                 "basic_industry": classification.basic_industry if classification else None,
+                "observed_at": provenance.observed_at if (provenance := entry.last_provenance) else None,
+                "source_url": provenance.source_url if provenance else None,
+                "extractor_version": provenance.extractor_version if provenance else None,
+                "source_fragment_hash": provenance.source_fragment_hash if provenance else None,
                 "consecutive_absences": entry.consecutive_absences,
                 "retry_on": entry.retry_on.isoformat() if entry.retry_on else None,
                 "retry_attempts": entry.retry_attempts,
@@ -185,12 +196,23 @@ def load_registry(path: Path) -> dict[str, RegistryEntry]:
             if pd.isna(row.retry_on)
             else pd.Timestamp(cast(Any, row.retry_on)).date()
         )
+        provenance = (
+            None
+            if pd.isna(row.observed_at)
+            else Provenance(
+                observed_at=pd.Timestamp(cast(Any, row.observed_at)).to_pydatetime(),
+                source_url=str(row.source_url),
+                extractor_version=str(row.extractor_version),
+                source_fragment_hash=str(row.source_fragment_hash),
+            )
+        )
         instrument_key = str(row.instrument_key)
         records[instrument_key] = RegistryEntry(
             instrument_key=instrument_key,
             symbol=str(row.symbol),
             status=RegistryStatus(str(row.status)),
             last_known_good=classification,
+            last_provenance=provenance,
             consecutive_absences=int(cast(Any, row.consecutive_absences)),
             retry_on=retry_on,
             retry_attempts=int(cast(Any, row.retry_attempts)),
@@ -215,7 +237,7 @@ def run_incremental_collection(
     snapshot: Iterable[ActiveNseEquity],
     *,
     today: date,
-    collect: Callable[[str], ClassificationObservation | None],
+    collect: Callable[[str], ClassificationObservation | CollectedClassification | None],
 ) -> IncrementalCollectionResult:
     """Reconcile one validated NSE snapshot and collect only eligible symbols."""
     equities = tuple(snapshot)
@@ -261,7 +283,15 @@ def run_incremental_collection(
 
     for instrument_key in candidates:
         entry = reconciled[instrument_key]
-        observation = collect(entry.symbol)
+        collected = collect(entry.symbol)
+        observation: ClassificationObservation | None
+        provenance: Provenance | None
+        if isinstance(collected, CollectedClassification):
+            observation = collected.observation
+            provenance = collected.provenance
+        else:
+            observation = collected
+            provenance = entry.last_provenance
         last_known_good = apply_observation(
             entry.last_known_good,
             instrument_key=instrument_key,
@@ -273,6 +303,7 @@ def run_incremental_collection(
                 entry,
                 status=RegistryStatus.CLASSIFIED,
                 last_known_good=last_known_good,
+                last_provenance=provenance,
                 retry_on=None,
                 retry_attempts=0,
             )

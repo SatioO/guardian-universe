@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
+from pipeline.sources.classification_publication import Provenance
 from pipeline.sources.nse_universe import (
     ActiveNseEquity,
     RegistryEntry,
@@ -21,6 +22,15 @@ def _observation() -> ClassificationObservation:
         sector="Oil, Gas & Consumable Fuels",
         industry="Petroleum Products",
         basic_industry="Refineries & Marketing",
+    )
+
+
+def _provenance() -> Provenance:
+    return Provenance(
+        observed_at=datetime(2026, 7, 24, 10),
+        source_url="https://www.screener.in/company/RELIANCE/consolidated/",
+        extractor_version="screener-peer-titles-v1",
+        source_fragment_hash="abc",
     )
 
 
@@ -134,6 +144,7 @@ def test_registry_state_round_trips_and_exposes_only_active_last_known_good(tmp_
             ).last_known_good,
             retry_on=date(2026, 7, 25),
             retry_attempts=1,
+            last_provenance=_provenance(),
         ),
         "INE111A01011": RegistryEntry.pending("INE111A01011", "INACTIVE"),
     }
@@ -146,6 +157,7 @@ def test_registry_state_round_trips_and_exposes_only_active_last_known_good(tmp_
     restored = load_registry(path)
 
     assert restored == records
+    assert restored["INE009A01021"].last_provenance == _provenance()
     active = active_classification_records(restored)
     assert set(active) == {"INE002A01018", "INE009A01021"}
     assert active["INE009A01021"].symbol == "INFY"
