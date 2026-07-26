@@ -4,6 +4,7 @@ from datetime import date, datetime
 
 from pipeline.sources.classification_baseline import run_approved_baseline
 from pipeline.sources.classification_publication import Provenance
+from pipeline.sources.nse_universe import RegistryEntry, load_registry, write_registry
 from pipeline.sources.screener_classification import ClassificationObservation
 from pipeline.sources.screener_collector import (
     CollectedClassification,
@@ -33,10 +34,41 @@ def test_baseline_stops_requests_and_persists_pending_after_deferral(tmp_path):
             b"BLOCKED,EQ,INE000A00002\nLATER,EQ,INE000A00003\n"
         ),
         tmp_path / "classification_registry_all.parquet",
-        collector, today=date(2026, 7, 26),
+        collector,
+        today=date(2026, 7, 26),
     )
 
     assert collector.calls == ["FIRST", "BLOCKED"]
     assert result.deferred_reason == "rate limit"
     assert result.result.records["INE000A00001"].last_provenance is not None
-    assert result.result.records["INE000A00003"].last_known_good is None
+    later = result.result.records["INE000A00003"]
+    assert later.last_known_good is None
+    assert later.retry_attempts == 0
+    assert later.retry_on is None
+
+
+def test_manual_batch_only_processes_the_bounded_pending_slice(tmp_path):
+    registry_path = tmp_path / "classification_registry_all.parquet"
+    retry_on = date(2026, 8, 2)
+    write_registry(
+        registry_path,
+        {
+            "INE000A00001": RegistryEntry.pending("INE000A00001", "FIRST", retry_on=retry_on),
+            "INE000A00002": RegistryEntry.pending("INE000A00002", "SECOND", retry_on=retry_on),
+        },
+        updated_on=date(2026, 7, 26),
+    )
+    collector = _Collector()
+
+    result = run_approved_baseline(
+        b"SYMBOL,SERIES,ISIN NUMBER\nFIRST,EQ,INE000A00001\nSECOND,EQ,INE000A00002\n",
+        registry_path,
+        collector,
+        today=date(2026, 7, 26),
+        batch_size=1,
+        manual_batch=True,
+    )
+
+    assert collector.calls == ["FIRST"]
+    assert result.result.candidates == ("INE000A00001",)
+    assert load_registry(registry_path)["INE000A00002"].retry_on == retry_on

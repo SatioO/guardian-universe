@@ -1,4 +1,5 @@
 """Bounded, resumable baseline runner for the approved Classification Registry."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -30,14 +31,19 @@ def run_approved_baseline(
     collector: ScreenerClassificationCollector,
     *,
     today: date,
+    batch_size: int = 25,
+    manual_batch: bool = False,
 ) -> BaselineRun:
-    """Collect active NSE EQ/BE symbols sequentially until the collector defers.
+    """Collect a bounded NSE EQ/BE baseline batch until the collector defers.
 
-    All symbols after a cap/block are returned as pending by the reconciler; no
-    further Screener requests are sent during this invocation.
+    A manual batch makes pending records eligible for this invocation only. It
+    never resets retry state for symbols outside the bounded batch.
     """
+    if batch_size < 1 or batch_size > 25:
+        raise ValueError("baseline batch_size must be between 1 and 25")
     deferred_reason: str | None = None
 
+    records = load_registry(registry_path)
 
     def collect(symbol: str):
         nonlocal deferred_reason
@@ -47,14 +53,15 @@ def run_approved_baseline(
             return collector.collect(symbol)
         except CollectionDeferred as error:
             deferred_reason = str(error)
-            return None
-
+            return error
 
     result = run_incremental_collection(
-        load_registry(registry_path),
+        records,
         parse_active_nse_equities(snapshot_csv),
         today=today,
         collect=collect,
+        candidate_limit=batch_size,
+        force_pending=manual_batch,
     )
     if result.valid_snapshot:
         write_registry(registry_path, result.records, updated_on=today)

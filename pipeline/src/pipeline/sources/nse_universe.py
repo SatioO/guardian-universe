@@ -1,4 +1,5 @@
 """Incremental Active NSE Universe reconciliation for the Classification Registry."""
+
 from __future__ import annotations
 
 import csv
@@ -12,13 +13,13 @@ from typing import Any, cast
 
 import pandas as pd
 
+from pipeline.sources.classification_publication import Provenance
 from pipeline.sources.classification_registry import (
     ClassificationRegistryRecord,
     apply_observation,
 )
-from pipeline.sources.classification_publication import Provenance
-from pipeline.sources.screener_collector import CollectedClassification
 from pipeline.sources.screener_classification import ClassificationObservation
+from pipeline.sources.screener_collector import CollectedClassification, CollectionDeferred
 
 
 class RegistryStatus(StrEnum):
@@ -113,8 +114,7 @@ def parse_active_nse_equities(csv_bytes: bytes) -> tuple[ActiveNseEquity, ...]:
     equities: list[ActiveNseEquity] = []
     for row in reader:
         normalized = {
-            (key or "").strip().upper(): (value or "").strip()
-            for key, value in row.items()
+            (key or "").strip().upper(): (value or "").strip() for key, value in row.items()
         }
         if normalized.get("SERIES") not in _EQUITY_SERIES:
             continue
@@ -125,9 +125,7 @@ def parse_active_nse_equities(csv_bytes: bytes) -> tuple[ActiveNseEquity, ...]:
     return tuple(equities)
 
 
-def write_registry(
-    path: Path, records: Mapping[str, RegistryEntry], *, updated_on: date
-) -> None:
+def write_registry(path: Path, records: Mapping[str, RegistryEntry], *, updated_on: date) -> None:
     """Atomically persist all registry state needed by the next daily run."""
     rows: list[dict[str, object]] = []
     for instrument_key, entry in sorted(records.items()):
@@ -141,7 +139,9 @@ def write_registry(
                 "sector": classification.sector if classification else None,
                 "industry": classification.industry if classification else None,
                 "basic_industry": classification.basic_industry if classification else None,
-                "observed_at": provenance.observed_at if (provenance := entry.last_provenance) else None,
+                "observed_at": provenance.observed_at
+                if (provenance := entry.last_provenance)
+                else None,
                 "source_url": provenance.source_url if provenance else None,
                 "extractor_version": provenance.extractor_version if provenance else None,
                 "source_fragment_hash": provenance.source_fragment_hash if provenance else None,
@@ -166,6 +166,7 @@ def load_registry(path: Path) -> dict[str, RegistryEntry]:
     frame = pd.read_parquet(path, columns=_REGISTRY_COLUMNS)
     records: dict[str, RegistryEntry] = {}
     for row in frame.itertuples(index=False):
+
         def label(value: object) -> str:
             if value is None or value is pd.NA:
                 return ""
@@ -191,11 +192,7 @@ def load_registry(path: Path) -> dict[str, RegistryEntry]:
                 basic_industry=label(row.basic_industry),
             )
         )
-        retry_on = (
-            None
-            if pd.isna(row.retry_on)
-            else pd.Timestamp(cast(Any, row.retry_on)).date()
-        )
+        retry_on = None if pd.isna(row.retry_on) else pd.Timestamp(cast(Any, row.retry_on)).date()
         provenance = (
             None
             if pd.isna(row.observed_at)
@@ -237,9 +234,18 @@ def run_incremental_collection(
     snapshot: Iterable[ActiveNseEquity],
     *,
     today: date,
-    collect: Callable[[str], ClassificationObservation | CollectedClassification | None],
+    collect: Callable[
+        [str], ClassificationObservation | CollectedClassification | CollectionDeferred | None
+    ],
+    candidate_limit: int | None = None,
+    force_pending: bool = False,
 ) -> IncrementalCollectionResult:
-    """Reconcile one validated NSE snapshot and collect only eligible symbols."""
+    """Reconcile one validated NSE snapshot and collect only eligible symbols.
+
+    ``force_pending`` is reserved for an operator-approved baseline batch.  It
+    makes pending rows eligible without changing retry state outside the
+    bounded candidate slice.
+    """
     equities = tuple(snapshot)
     if not _valid_snapshot(equities, records):
         return IncrementalCollectionResult(dict(records), False, ())
@@ -255,10 +261,12 @@ def run_incremental_collection(
             candidates.append(instrument_key)
         else:
             renamed = entry.symbol != equity.symbol
-            due_retry = (
-                entry.status is RegistryStatus.PENDING
-                and not entry.deferred_to_full_audit
-                and (entry.retry_on is None or entry.retry_on <= today)
+            due_retry = entry.status is RegistryStatus.PENDING and (
+                force_pending
+                or (
+                    not entry.deferred_to_full_audit
+                    and (entry.retry_on is None or entry.retry_on <= today)
+                )
             )
             status = RegistryStatus.CLASSIFIED if entry.last_known_good else RegistryStatus.PENDING
             entry = replace(
@@ -281,9 +289,14 @@ def run_incremental_collection(
             status=RegistryStatus.INACTIVE if absences >= 2 else entry.status,
         )
 
+    if candidate_limit is not None:
+        candidates = candidates[:candidate_limit]
+
     for instrument_key in candidates:
         entry = reconciled[instrument_key]
         collected = collect(entry.symbol)
+        if isinstance(collected, CollectionDeferred):
+            break
         observation: ClassificationObservation | None
         provenance: Provenance | None
         if isinstance(collected, CollectedClassification):
