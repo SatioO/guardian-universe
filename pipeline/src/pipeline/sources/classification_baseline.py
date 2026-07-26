@@ -18,6 +18,7 @@ from pipeline.sources.nse_universe import (
     run_incremental_collection,
     write_registry,
 )
+from pipeline.sources.screener_classification import ClassificationObservation
 from pipeline.sources.screener_collector import (
     CollectedClassification,
     CollectionDeferred,
@@ -72,7 +73,9 @@ def run_approved_baseline(
             for instrument_key, entry in records.items()
         }
 
-    def collect(symbol: str):
+    def collect(
+        symbol: str,
+    ) -> ClassificationObservation | CollectedClassification | CollectionDeferred | None:
         nonlocal deferred_reason
         if deferred_reason is not None:
             return None
