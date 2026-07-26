@@ -1,32 +1,43 @@
-name: sector-refresh
+name: classification-registry
 
-# Monthly full BSE industry re-harvest. NSE's per-symbol classification API is
-# behind Akamai Bot Manager (unreachable from CI); BSE exposes the identical
-# SEBI 4-tier taxonomy via a plain JSON endpoint, so we harvest from BSE here.
-# This runs OFF the daily critical path (its own 60-min job) because the harvest
-# is ~4900 per-scrip calls. It re-fetches EVERY scrip (--fresh, not resume) so
-# reclassifications of existing stocks are caught, not just new listings, then
-# commits the refreshed seed to main. The next `data-daily` run reads the seed
-# and publishes the updated sector_industry parquet to the release.
-
+# The daily run is intentionally incremental: only new NSE EQ/BE listings,
+# symbol renames, and due retries are eligible. The quarterly run invokes the
+# same safe collector in a resumable campaign (100 x 25-symbol batches) so
+# every active equity is re-audited without making this expensive crawl part of
+# the daily data-ingestion path.
 on:
   schedule:
-    - cron: "0 20 * * 0"   # weekly — Sun 20:00 UTC (01:30 IST Mon): full re-harvest
-    - cron: "0 20 1 * *"   # monthly — 1st of the month, as a guaranteed baseline
+    - cron: "30 1 * * 1-5"          # 07:00 IST: new/renamed/retry only
+    - cron: "0 2 1 1,4,7,10 *"      # quarterly full active-universe audit
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "daily is incremental; baseline advances the initial backlog; quarterly audits all active equities"
+        required: true
+        type: choice
+        default: baseline
+        options: [daily, baseline, quarterly]
+      batch_size:
+        description: "Sequential Screener requests per batch (1-25)"
+        required: true
+        default: "25"
+      max_batches:
+        description: "Optional cap for this dispatch; quarterly defaults to 100"
+        required: false
+        default: ""
 
 permissions:
-  contents: write   # git push the refreshed seed
-  issues: write     # failure alerting
+  contents: write
+  issues: write
 
 concurrency:
-  group: sector-refresh
+  group: data-pipeline-publish
   cancel-in-progress: false
 
 jobs:
-  refresh-seed:
+  collect-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: pipeline
@@ -34,74 +45,62 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
           cache: pip
       - name: Install
         run: pip install -r requirements.lock -e . --no-deps
-
-      - name: Full BSE industry re-harvest (fresh — re-fetches every scrip)
-        run: python scripts/harvest_bse_industry.py --fresh --out /tmp/seed_new.csv
-
-      - name: Retry transient BSE failures once
-        run: python scripts/harvest_bse_industry.py --retry-failed --out /tmp/seed_new.csv || true
-
-      - name: Shrink-guard + stage the refreshed seed
-        id: guard
+      - name: Sync persisted classification state from data-latest
+        run: python -m pipeline sync
+      - name: Collect classifications
+        id: collect
+        env:
+          INPUT_MODE: ${{ github.event.inputs.mode }}
+          INPUT_BATCH_SIZE: ${{ github.event.inputs.batch_size }}
+          INPUT_MAX_BATCHES: ${{ github.event.inputs.max_batches }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
-          new=/tmp/seed_new.csv
-          cur=seeds/sector_industry_seed.csv
-          [ -s "$new" ] || { echo "::error::harvest produced no seed"; exit 1; }
-          nrows=$(($(wc -l < "$new") - 1))
-          crows=0; [ -f "$cur" ] && crows=$(($(wc -l < "$cur") - 1))
-          echo "new rows: $nrows | current committed: $crows"
-          # Fail-closed: never overwrite a good seed with a shrunken one (a flaky
-          # BSE run that lost >2% of rows) — mirrors the pipeline's shrink-guard.
-          if [ "$crows" -gt 0 ] && [ "$nrows" -lt "$((crows * 98 / 100))" ]; then
-            echo "::error::refreshed seed shrank ($nrows < $crows, >2%) — refusing to commit"
-            exit 1
-          fi
-          # Content plausibility: a broad BSE degradation (field rename, stale
-          # cache) can keep the row count stable while collapsing the tiers. There
-          # are ~22 distinct sectors; far fewer means the classification is bad.
-          # csv.reader is quote-aware (sector values contain commas, e.g. "Oil,
-          # Gas & Consumable Fuels"), so column 3 is the true `sector` field.
-          nsec=$(python -c "import csv; r=list(csv.reader(open('$new'))); print(len({x[3] for x in r[1:] if len(x)>3 and x[3]}))")
-          echo "distinct sectors: $nsec"
-          if [ "$nsec" -lt 15 ]; then
-            echo "::error::only $nsec distinct sectors (<15) — suspected BSE degradation; refusing to commit"
-            exit 1
-          fi
-          mkdir -p seeds && cp "$new" "$cur"
-          if git diff --quiet -- "$cur"; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "seed unchanged — nothing to commit"
+          mode="${INPUT_MODE:-daily}"
+          if [ "$SCHEDULE" = "0 2 1 1,4,7,10 *" ]; then mode="quarterly"; fi
+          batch_size="${INPUT_BATCH_SIZE:-25}"
+          set -- classification-collect --mode "$mode" --batch-size "$batch_size"
+          if [ -n "$INPUT_MAX_BATCHES" ]; then set -- "$@" --max-batches "$INPUT_MAX_BATCHES"; fi
+          python -m pipeline "$@"
+          jq . data/meta/classification_collection_status.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish registry state and any coverage-approved scanner artifact
+        run: python -m pipeline publish
+      - name: Alert on controlled Screener deferral or an unexpected publication failure
+        if: always() && steps.collect.outcome == 'success'
+        working-directory: ${{ github.workspace }}
+        run: |
+          report=pipeline/data/meta/classification_collection_status.json
+          [ -f "$report" ] || exit 0
+          deferred=$(jq -r '.deferred_reason // empty' "$report")
+          publication=$(jq -r '.publication.status // empty' "$report")
+          message=$(jq -r '.publication.message // empty' "$report")
+          mode=$(jq -r '.mode // empty' "$report")
+          audit_complete=$(jq -r '.audit_complete // false' "$report")
+          if [ -z "$deferred" ] && { [ "$publication" != "failed" ] || [[ "$message" == *"coverage guard"* ]]; } && { [ "$mode" != "quarterly" ] || [ "$audit_complete" = "true" ]; }; then exit 0; fi
+          gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true
+          body="classification-registry needs attention on $(date -u +%F): deferred=${deferred:-none}; publication=${publication:-unknown}; message=${message:-none}. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number' || true)
+          if [ -z "$n" ]; then
+            gh issue create --title "Data pipeline: classification registry needs attention" --label pipeline-failure --body "$body"
           else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "seed changed — will commit"
+            gh issue comment "$n" --body "$body"
           fi
-
-      - name: Commit + push the refreshed seed
-        if: steps.guard.outputs.changed == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add seeds/sector_industry_seed.csv
-          git commit -m "chore(sector): monthly BSE industry seed refresh"
-          # One rebase-retry in case a human/PR merge landed on main during the
-          # ~45-min harvest, so the whole run isn't discarded on a stale push.
-          git push || { git pull --rebase origin main && git push; }
-
       - name: Alert on failure
         if: failure() || cancelled()
         working-directory: ${{ github.workspace }}
         run: |
           gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true
-          body="sector-refresh FAILED on $(date -u +%F). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          body="classification-registry FAILED on $(date -u +%F). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number' || true)
           if [ -z "$n" ]; then
-            gh issue create --title "Data pipeline: sector-refresh failed" --label pipeline-failure --body "$body"
+            gh issue create --title "Data pipeline: classification-registry failed" --label pipeline-failure --body "$body"
           else
             gh issue comment "$n" --body "$body"
           fi

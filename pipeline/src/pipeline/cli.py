@@ -1,4 +1,5 @@
 """`python -m pipeline {daily,backfill,publish}` — wires real adapters."""
+
 from __future__ import annotations
 
 import argparse
@@ -44,10 +45,52 @@ from pipeline.publish import publish_dataset
 from pipeline.release import GhReleaseClient, ReleaseClient
 from pipeline.restore import restore_from_tag
 from pipeline.snapshot import create_snapshot, prune_snapshots
+from pipeline.sources.classification_baseline import BaselineRun, run_approved_baseline
 from pipeline.sources.nse_secfull import build_secfull_url, secfull_to_udiff_shape
+from pipeline.sources.nse_universe import RegistryStatus, registry_needs_baseline_migration
+from pipeline.sources.screener_collector import CollectionDeferred, ScreenerClassificationCollector
 from pipeline.sync import sync_store
 
 Runner = Callable[[list[str]], int]
+
+_NSE_EQUITY_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+_CLASSIFICATION_STATUS = "classification_collection_status.json"
+
+
+@dataclass(frozen=True)
+class ClassificationCollectionReport:
+    mode: str
+    batches: int
+    snapshot_valid: bool
+    selected: int
+    attempted: int
+    classified: int
+    pending: int
+    baseline_pending: int
+    retry_pending: int
+    audit_pending: int
+    deferred_reason: str | None
+    publication: RunStatus
+
+    def as_dict(self) -> dict[str, Any]:
+        active = self.classified + self.pending
+        return {
+            "mode": self.mode,
+            "batches": self.batches,
+            "snapshot_valid": self.snapshot_valid,
+            "selected": self.selected,
+            "attempted": self.attempted,
+            "classified": self.classified,
+            "pending": self.pending,
+            "baseline_pending": self.baseline_pending,
+            "retry_pending": self.retry_pending,
+            "audit_pending": self.audit_pending,
+            "audit_complete": self.audit_pending == 0,
+            "coverage_pct": round(100 * self.classified / active, 2) if active else 0.0,
+            "deferred_reason": self.deferred_reason,
+            "publication": manifest.status_to_dict(self.publication),
+        }
+
 
 # cli is the allowed name edge (per the derived-dataset mechanism's design):
 # builders.py stays name-free, so the source spec a builder reads from (here,
@@ -78,6 +121,7 @@ builders.BUILDERS["sector_industry"] = builders.build_sector_industry
 
 def _plain_runner(cmd: list[str]) -> int:
     import subprocess
+
     return subprocess.run(cmd, check=False).returncode
 
 
@@ -90,6 +134,18 @@ def build_parser() -> argparse.ArgumentParser:
     b = sub.add_parser("backfill")
     b.add_argument("--days", type=int, required=True)
     b.add_argument("--dataset", choices=[*datasets.DATASETS, "all"], default="all")
+    classification = sub.add_parser("classification-collect")
+    classification.add_argument(
+        "--mode", choices=("daily", "baseline", "quarterly"), default="daily"
+    )
+    classification.add_argument("--batch-size", type=int, default=25)
+    classification.add_argument(
+        "--max-batches",
+        type=int,
+        default=None,
+        help="bounded batches in this run (quarterly defaults to 100)",
+    )
+    classification.add_argument("--date", default=None)
     pub = sub.add_parser("publish")
     # Operator opt-in for a DELIBERATE data-reducing correction (e.g. rebuilding
     # ca_flags after fixing a bug that had inflated it). Off by default so the
@@ -132,6 +188,84 @@ def _run_builder(spec: datasets.DatasetSpec, target: date) -> RunStatus:
         return RunStatus("failed", target, message=f"builder error for '{spec.key}': {e}")
 
 
+def _fetch_nse_equity_list(session: requests.Session) -> bytes:
+    response = session.get(_NSE_EQUITY_LIST_URL, timeout=30)
+    response.raise_for_status()
+    return response.content
+
+
+def cmd_classification_collect(
+    *,
+    mode: str,
+    snapshot_csv: bytes,
+    collector: ScreenerClassificationCollector,
+    registry_path: Path,
+    target: date,
+    batch_size: int,
+    max_batches: int = 1,
+    build: Callable[[datasets.DatasetSpec, date], RunStatus] = _run_builder,
+) -> ClassificationCollectionReport:
+    """Run one persisted classification collection batch and guarded build."""
+    if max_batches < 1:
+        raise ValueError("max_batches must be positive")
+    if mode == "daily" and (
+        not registry_path.exists() or registry_needs_baseline_migration(registry_path)
+    ):
+        raise ValueError("classification baseline is not initialized; run --mode baseline first")
+    batches: list[BaselineRun] = []
+    for batch_index in range(max_batches):
+        baseline = run_approved_baseline(
+            snapshot_csv,
+            registry_path,
+            collector,
+            today=target,
+            batch_size=batch_size,
+            manual_batch=mode == "baseline",
+            full_audit=mode == "quarterly",
+        )
+        batches.append(baseline)
+        if (
+            not baseline.result.valid_snapshot
+            or baseline.deferred_reason is not None
+            or not baseline.result.candidates
+        ):
+            break
+        if batch_index + 1 < max_batches:
+            collector.begin_next_batch()
+
+    latest = batches[-1]
+    entries = latest.result.records.values()
+    active = [entry for entry in entries if entry.status is not RegistryStatus.INACTIVE]
+    classified = sum(entry.last_known_good is not None for entry in active)
+    pending_entries = [entry for entry in active if entry.last_known_good is None]
+    quarter_start = _quarter_start(target)
+    publication = (
+        build(datasets.SECTOR_INDUSTRY, target)
+        if latest.result.valid_snapshot
+        else RunStatus("failed", target, message="invalid NSE equity snapshot")
+    )
+    return ClassificationCollectionReport(
+        mode=mode,
+        batches=len(batches),
+        snapshot_valid=latest.result.valid_snapshot,
+        selected=sum(len(batch.result.candidates) for batch in batches),
+        attempted=sum(len(batch.result.attempted) for batch in batches),
+        classified=classified,
+        pending=len(pending_entries),
+        baseline_pending=sum(entry.baseline_pending for entry in pending_entries),
+        retry_pending=sum(not entry.baseline_pending for entry in pending_entries),
+        audit_pending=sum(
+            entry.last_audit_on is None or entry.last_audit_on < quarter_start for entry in active
+        ),
+        deferred_reason=latest.deferred_reason,
+        publication=publication,
+    )
+
+
+def _quarter_start(target: date) -> date:
+    return date(target.year, 3 * ((target.month - 1) // 3) + 1, 1)
+
+
 class _OneShotFetcher:
     """Wraps an already-built frame as a `Fetcher` so `rebuild-day` can route
     through the NORMAL `run_daily` path (every gate applies: wrong-date guard,
@@ -157,15 +291,16 @@ def _load_rebuild_universe(reference_dir: Path) -> dict[str, tuple[str, str]]:
     df = pd.read_parquet(reference_dir / "instruments_all.parquet")
     df = df[(df["status"] == "active") & (df["series"] != "INDEX")]
     df = df.sort_values("last_seen").drop_duplicates(subset="symbol", keep="last")
-    return {
-        str(row.symbol): (str(row.isin), str(row.series))
-        for row in df.itertuples()
-    }
+    return {str(row.symbol): (str(row.isin), str(row.series)) for row in df.itertuples()}
 
 
-def cmd_rebuild_day(target: date, *, holidays: set[date],
-                     special_sessions: set[date] | None = None,
-                     via: str | None = None) -> int:
+def cmd_rebuild_day(
+    target: date,
+    *,
+    holidays: set[date],
+    special_sessions: set[date] | None = None,
+    via: str | None = None,
+) -> int:
     """Manual last-resort recovery: rebuild one day's equities OHLCV directly
     from a registered broker source (`--via <id>`, or the first available one
     when omitted) when both NSE sources are down or the hole predates either
@@ -207,8 +342,9 @@ def cmd_rebuild_day(target: date, *, holidays: set[date],
     # hardcoded broker name -- a second registered broker gets
     # "<its-id>-rebuild" for free.
     fetcher = _OneShotFetcher(frame, f"{source.id}-rebuild")
-    status = run_daily(spec, target, fetcher=fetcher, holidays=holidays,
-                        special_sessions=special_sessions)
+    status = run_daily(
+        spec, target, fetcher=fetcher, holidays=holidays, special_sessions=special_sessions
+    )
     print(manifest.status_to_dict(status))
     # RebuildSource itself only guarantees id/available/day_frame; a
     # `failures` list is a (currently universal across every registered
@@ -307,27 +443,30 @@ def cmd_cross_check(
         # Explicit CANNOT-RUN marker: this path (stderr, exit 1) must read as
         # unmistakably distinct from the DIVERGENCE/OK summary line (stdout)
         # at a glance, not merely by which stream it landed on.
-        print(f"cross-check: CANNOT-RUN — primary source failed for "
-              f"{target.isoformat()}: {e}", file=sys.stderr)
+        print(
+            f"cross-check: CANNOT-RUN — primary source failed for {target.isoformat()}: {e}",
+            file=sys.stderr,
+        )
         return 1
 
     try:
         secondary_raw = fetch_secondary_raw(target)
         secondary_canon = normalize_equity_bhavcopy(secondary_raw, source="nse-secfull")
     except Exception as e:  # noqa: BLE001 - any secondary failure is alert-worthy
-        print(f"cross-check: CANNOT-RUN — secondary source failed for "
-              f"{target.isoformat()}: {e}", file=sys.stderr)
+        print(
+            f"cross-check: CANNOT-RUN — secondary source failed for {target.isoformat()}: {e}",
+            file=sys.stderr,
+        )
         return 1
 
-    result = compare_sources(
-        primary_canon, secondary_canon, sample_n=sample_n, tolerance=tolerance
-    )
+    result = compare_sources(primary_canon, secondary_canon, sample_n=sample_n, tolerance=tolerance)
     _print_cross_check_table(result)
     return 1 if result.mismatched > 0 else 0
 
 
-def _continuity_window_years(today: date, holidays: set[date],
-                              special_sessions: set[date] | None) -> list[int]:
+def _continuity_window_years(
+    today: date, holidays: set[date], special_sessions: set[date] | None
+) -> list[int]:
     """Which calendar year(s) the continuity window's baseline asset(s) must
     be downloaded from. Same year-selection logic as
     `store.read_trailing_window`: the window is computed exactly as
@@ -337,7 +476,9 @@ def _continuity_window_years(today: date, holidays: set[date],
     one)."""
     window = cal.trading_days_back(
         cal.previous_trading_day(today, holidays, special_sessions),
-        10, holidays, special_sessions,
+        10,
+        holidays,
+        special_sessions,
     )
     years = sorted({d.year for d in window})
     return years
@@ -424,7 +565,9 @@ def _check_dataset_continuity(
         window_size = 10  # mirrors `missing_days`'s own default -- see its docstring
         full_expected = cal.trading_days_back(
             cal.previous_trading_day(today, holidays, special_sessions),
-            window_size, holidays, special_sessions,
+            window_size,
+            holidays,
+            special_sessions,
         )
         floor = min(dates_present)
         if floor > full_expected[0]:
@@ -506,8 +649,21 @@ def cmd_check_freshness(
     entry at all (never published yet) is a WARNING on stderr, not a
     failure -- see `_check_dataset_continuity`'s grace rule."""
     work_dir.mkdir(parents=True, exist_ok=True)
-    rc = runner(["gh", "release", "download", tag, "--repo", repo,
-                 "--pattern", "manifest.json", "--dir", str(work_dir), "--clobber"])
+    rc = runner(
+        [
+            "gh",
+            "release",
+            "download",
+            tag,
+            "--repo",
+            repo,
+            "--pattern",
+            "manifest.json",
+            "--dir",
+            str(work_dir),
+            "--clobber",
+        ]
+    )
     manifest_path = work_dir / "manifest.json"
     if rc != 0 or not manifest_path.exists():
         return 1  # no release / download failed -> stale
@@ -533,8 +689,13 @@ def cmd_check_freshness(
             continue
         try:
             result = _check_dataset_continuity(
-                spec, manifest_obj, client=client, work_dir=work_dir,
-                today=today, holidays=holidays, special_sessions=special_sessions,
+                spec,
+                manifest_obj,
+                client=client,
+                work_dir=work_dir,
+                today=today,
+                holidays=holidays,
+                special_sessions=special_sessions,
             )
         except _DatasetNotYetPublished as e:
             print(
@@ -552,8 +713,7 @@ def cmd_check_freshness(
             # an asset the release itself doesn't actually have.
             ok = False
             print(
-                f"check-freshness: cross-dataset consistency error for "
-                f"'{spec.manifest_name}': {e}",
+                f"check-freshness: cross-dataset consistency error for '{spec.manifest_name}': {e}",
                 file=sys.stderr,
             )
             continue
@@ -562,18 +722,46 @@ def cmd_check_freshness(
         if result.holes:
             ok = False
             days = ", ".join(d.isoformat() for d in result.holes)
-            print(f"check-freshness: dataset '{spec.manifest_name}' missing "
-                  f"trading day(s): {days}")
+            print(f"check-freshness: dataset '{spec.manifest_name}' missing trading day(s): {days}")
     return 0 if ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     ok = ("success", "skipped_holiday", "skipped_idempotent", "not_yet")
+    if args.cmd == "classification-collect":
+        target = date.fromisoformat(args.date) if args.date else datetime.now(UTC).date()
+        session = requests.Session()
+        session.headers.update({"User-Agent": "guardian-universe classification registry/1.0"})
+        try:
+            snapshot_csv = _fetch_nse_equity_list(session)
+            collector = ScreenerClassificationCollector(session)
+            report = cmd_classification_collect(
+                mode=args.mode,
+                snapshot_csv=snapshot_csv,
+                collector=collector,
+                registry_path=config.SECTOR_DIR / "classification_registry_all.parquet",
+                target=target,
+                batch_size=args.batch_size,
+                max_batches=(
+                    args.max_batches
+                    if args.max_batches is not None
+                    else (100 if args.mode == "quarterly" else 1)
+                ),
+            )
+        except (requests.RequestException, CollectionDeferred, ValueError) as error:
+            print(f"classification-collect failed: {error}", file=sys.stderr)
+            return 1
+        report_payload = report.as_dict()
+        manifest.write_json(report_payload, config.META_DIR / _CLASSIFICATION_STATUS)
+        print(json.dumps(report_payload, sort_keys=True))
+        return 0 if report.snapshot_valid else 1
     if args.cmd == "daily":
         if args.dataset != "all" and datasets.DATASETS[args.dataset].derived:
-            print("derived datasets build automatically after a successful "
-                  "`--dataset all` run", file=sys.stderr)
+            print(
+                "derived datasets build automatically after a successful `--dataset all` run",
+                file=sys.stderr,
+            )
             return 2
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
         special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
@@ -655,8 +843,12 @@ def main(argv: list[str] | None = None) -> int:
             st = None
             for d in window:
                 st = run_daily(
-                    spec, d, fetcher=fetcher, holidays=holidays,
-                    special_sessions=special, is_target_day=(d == target),
+                    spec,
+                    d,
+                    fetcher=fetcher,
+                    holidays=holidays,
+                    special_sessions=special,
+                    is_target_day=(d == target),
                     cache=cache,
                 )
                 if d != target and st.status == "failed":
@@ -673,8 +865,11 @@ def main(argv: list[str] | None = None) -> int:
 
         # Phase 2: DERIVED specs -- only for a full `all` run, and only when
         # the primary fetched status is healthy.
-        if args.dataset == "all" and statuses.get(primary_key) is not None \
-                and statuses[primary_key].status in ok:
+        if (
+            args.dataset == "all"
+            and statuses.get(primary_key) is not None
+            and statuses[primary_key].status in ok
+        ):
             for key in datasets.DATASET_ORDER:
                 spec = datasets.DATASETS[key]
                 if not spec.derived:
@@ -717,10 +912,16 @@ def main(argv: list[str] | None = None) -> int:
             spec = datasets.DATASETS[key]
             if spec.derived:
                 continue  # derived datasets are never fetched/backfilled
-            all_results.extend(backfill_mod.backfill(
-                spec, datetime.now(UTC).date(), args.days,
-                fetcher=spec.make_fetcher(), holidays=holidays, special_sessions=special,
-            ))
+            all_results.extend(
+                backfill_mod.backfill(
+                    spec,
+                    datetime.now(UTC).date(),
+                    args.days,
+                    fetcher=spec.make_fetcher(),
+                    holidays=holidays,
+                    special_sessions=special,
+                )
+            )
         return 0 if all(r.status in ok for r in all_results) else 1
     if args.cmd == "sync":
         client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
@@ -741,8 +942,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 created = create_snapshot(
-                    source_client, _dest_client_factory,
-                    work_dir=Path(tmp), now=datetime.now(UTC),
+                    source_client,
+                    _dest_client_factory,
+                    work_dir=Path(tmp),
+                    now=datetime.now(UTC),
                 )
             pruned = prune_snapshots(_dest_client_factory, list_client)
         except (ReleaseError, UnexpectedFailure) as e:
@@ -758,7 +961,8 @@ def main(argv: list[str] | None = None) -> int:
         # that makes a rehearsal drill safe to run against any real
         # release/snapshot tag without risk of clobbering production data.
         target_root = (
-            Path(args.target) if args.target is not None
+            Path(args.target)
+            if args.target is not None
             else config.DATA_DIR / "_restore_drill" / args.tag
         )
         client = GhReleaseClient(repo=config.GITHUB_REPO, tag=args.tag)
@@ -789,8 +993,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"restore-from-snapshot: target {target_root}")
         for ds in restored_manifest.get("datasets", []):
             total_bytes = sum(f.get("bytes", 0) for f in ds.get("baseline", []))
-            print(f"  {ds.get('name')}: latest_date={ds.get('latest_date')} "
-                  f"bytes={total_bytes}")
+            print(f"  {ds.get('name')}: latest_date={ds.get('latest_date')} bytes={total_bytes}")
         return 0
     if args.cmd == "check-freshness":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
@@ -798,9 +1001,14 @@ def main(argv: list[str] | None = None) -> int:
         client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
         with tempfile.TemporaryDirectory() as tmp:
             return cmd_check_freshness(
-                repo=config.GITHUB_REPO, tag=config.RELEASE_TAG, holidays=holidays,
-                today=datetime.now(UTC).date(), runner=_plain_runner,
-                work_dir=Path(tmp), special_sessions=special, client=client,
+                repo=config.GITHUB_REPO,
+                tag=config.RELEASE_TAG,
+                holidays=holidays,
+                today=datetime.now(UTC).date(),
+                runner=_plain_runner,
+                work_dir=Path(tmp),
+                special_sessions=special,
+                client=client,
             )
     if args.cmd == "rebuild-day":
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
@@ -811,7 +1019,8 @@ def main(argv: list[str] | None = None) -> int:
         holidays = cal.load_holidays(config.META_DIR / "holidays.json")
         special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
         target = (
-            date.fromisoformat(args.date) if args.date
+            date.fromisoformat(args.date)
+            if args.date
             else cal.previous_trading_day(_today_for_cli(), holidays, special)
         )
         return cmd_cross_check(
@@ -823,8 +1032,10 @@ def main(argv: list[str] | None = None) -> int:
     client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
     try:
         publish_dataset(
-            specs=datasets.all_specs(), meta_dir=config.META_DIR,
-            stage_dir=config.DATA_DIR / "stage", client=client,
+            specs=datasets.all_specs(),
+            meta_dir=config.META_DIR,
+            stage_dir=config.DATA_DIR / "stage",
+            client=client,
             generated_at=datetime.now(UTC).isoformat(),
             now=datetime.now(UTC),
             allow_shrink=getattr(args, "allow_shrink", False),

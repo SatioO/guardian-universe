@@ -1,4 +1,5 @@
 """Approval-gated, sequential Screener classification collection."""
+
 from __future__ import annotations
 
 import hashlib
@@ -21,11 +22,13 @@ from pipeline.sources.screener_classification import (
 
 _EXTRACTOR_VERSION = "screener-peer-titles-v1"
 _APPROVAL_SCOPE = "Screener company pages for the active NSE EQ/BE Classification Registry"
-_REQUIRED_CONSTRAINTS = frozenset({
-    "sequential requests",
-    "rate limited",
-    "stop and defer on rate-limit or sustained-block responses",
-})
+_REQUIRED_CONSTRAINTS = frozenset(
+    {
+        "sequential requests",
+        "rate limited",
+        "stop and defer on rate-limit or sustained-block responses",
+    }
+)
 _APPROVAL_PATH = config.PROJECT_ROOT / "seeds" / "classification_access_approval.json"
 
 
@@ -71,9 +74,7 @@ class ScreenerClassificationCollector:
         if self._request_count >= self._max_requests:
             raise CollectionDeferred("collector request cap reached")
         if self._last_request_at is not None:
-            remaining = self._min_interval_seconds - (
-                self._monotonic() - self._last_request_at
-            )
+            remaining = self._min_interval_seconds - (self._monotonic() - self._last_request_at)
             if remaining > 0:
                 self._sleep(remaining)
         normalized = symbol.strip().upper()
@@ -102,6 +103,10 @@ class ScreenerClassificationCollector:
                 source_fragment_hash=hashlib.sha256(response.content).hexdigest(),
             ),
         )
+
+    def begin_next_batch(self) -> None:
+        """Reset only the batch cap; preserve cross-batch request pacing."""
+        self._request_count = 0
 
 
 def _require_approval(path: Path) -> None:

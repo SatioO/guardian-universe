@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+import pandas as pd
+
 from pipeline.sources.classification_baseline import run_approved_baseline
 from pipeline.sources.classification_publication import Provenance
 from pipeline.sources.nse_universe import RegistryEntry, load_registry, write_registry
@@ -72,3 +74,28 @@ def test_manual_batch_only_processes_the_bounded_pending_slice(tmp_path):
     assert collector.calls == ["FIRST"]
     assert result.result.candidates == ("INE000A00001",)
     assert load_registry(registry_path)["INE000A00002"].retry_on == retry_on
+
+
+def test_manual_baseline_explicitly_migrates_legacy_unattempted_backlog(tmp_path):
+    registry_path = tmp_path / "classification_registry_all.parquet"
+    write_registry(
+        registry_path,
+        {
+            "INE000A00001": RegistryEntry.pending("INE000A00001", "FIRST"),
+            "INE000A00002": RegistryEntry.pending("INE000A00002", "LATER"),
+        },
+        updated_on=date(2026, 7, 26),
+    )
+    legacy = pd.read_parquet(registry_path).drop(columns="baseline_pending")
+    legacy.to_parquet(registry_path, compression="zstd", index=False)
+
+    run_approved_baseline(
+        b"SYMBOL,SERIES,ISIN NUMBER\nFIRST,EQ,INE000A00001\nLATER,EQ,INE000A00002\n",
+        registry_path,
+        _Collector(),
+        today=date(2026, 7, 26),
+        batch_size=1,
+        manual_batch=True,
+    )
+
+    assert load_registry(registry_path)["INE000A00002"].baseline_pending is True

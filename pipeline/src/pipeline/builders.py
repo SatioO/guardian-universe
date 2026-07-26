@@ -27,6 +27,7 @@ tmp dirs via the registered `BUILDERS` entries must monkeypatch
 `functools.partial(build_x, source_spec=<tmp-scoped spec>)`), not
 `datasets.DATASETS`.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -78,9 +79,7 @@ def _read_all_years(source_spec: DatasetSpec) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def build_reference(
-    spec: DatasetSpec, target: date, *, source_spec: DatasetSpec
-) -> RunStatus:
+def build_reference(spec: DatasetSpec, target: date, *, source_spec: DatasetSpec) -> RunStatus:
     """Build the `reference/instruments` SCD2 symbol master from the source
     (equities) store's own presence -- one row per distinct
     `(instrument_key, symbol, series)` version.
@@ -108,10 +107,8 @@ def build_reference(
     recent_dates = sorted(df["date"].drop_duplicates(), reverse=True)[:_ACTIVE_WINDOW]
     active_dates = set(recent_dates)
 
-    grouped = (
-        df.groupby(["instrument_key", "symbol", "series"], as_index=False)
-        .agg(first_seen=("date", "min"), last_seen=("date", "max"),
-             isin=("isin", "last"))
+    grouped = df.groupby(["instrument_key", "symbol", "series"], as_index=False).agg(
+        first_seen=("date", "min"), last_seen=("date", "max"), isin=("isin", "last")
     )
     grouped["name"] = grouped["symbol"]
     grouped["status"] = grouped["last_seen"].apply(
@@ -121,10 +118,25 @@ def build_reference(
     grouped["valid_to"] = grouped["last_seen"]
     grouped["date"] = grouped["last_seen"]
 
-    out = grouped[[
-        "instrument_key", "isin", "symbol", "name", "series",
-        "first_seen", "last_seen", "status", "valid_from", "valid_to", "date",
-    ]].sort_values(["instrument_key", "first_seen"]).reset_index(drop=True)
+    out = (
+        grouped[
+            [
+                "instrument_key",
+                "isin",
+                "symbol",
+                "name",
+                "series",
+                "first_seen",
+                "last_seen",
+                "status",
+                "valid_from",
+                "valid_to",
+                "date",
+            ]
+        ]
+        .sort_values(["instrument_key", "first_seen"])
+        .reset_index(drop=True)
+    )
 
     _write_atomic(out, out_path)
 
@@ -132,10 +144,21 @@ def build_reference(
 
 
 def _empty_reference_frame() -> pd.DataFrame:
-    return pd.DataFrame(columns=[
-        "instrument_key", "isin", "symbol", "name", "series",
-        "first_seen", "last_seen", "status", "valid_from", "valid_to", "date",
-    ])
+    return pd.DataFrame(
+        columns=[
+            "instrument_key",
+            "isin",
+            "symbol",
+            "name",
+            "series",
+            "first_seen",
+            "last_seen",
+            "status",
+            "valid_from",
+            "valid_to",
+            "date",
+        ]
+    )
 
 
 def _write_atomic(df: pd.DataFrame, target: Path) -> None:
@@ -146,13 +169,15 @@ def _write_atomic(df: pd.DataFrame, target: Path) -> None:
 
 _CA_FLAGS_JOIN_COLUMNS = ["date", "instrument_key", "close", "prevclose"]
 _CA_FLAGS_OUTPUT_COLUMNS = [
-    "date", "instrument_key", "close_prev", "prevclose_today", "implied_ratio",
+    "date",
+    "instrument_key",
+    "close_prev",
+    "prevclose_today",
+    "implied_ratio",
 ]
 
 
-def build_ca_flags(
-    spec: DatasetSpec, target: date, *, source_spec: DatasetSpec
-) -> RunStatus:
+def build_ca_flags(spec: DatasetSpec, target: date, *, source_spec: DatasetSpec) -> RunStatus:
     """Corporate-action ex-date detector: flag instruments whose today's
     prevclose implies a discontinuity vs the previous trading day's close --
     a split, bonus, or other ex-date event, not ordinary price movement.
@@ -202,13 +227,15 @@ def build_ca_flags(
     if flagged.empty:
         return RunStatus("success", target, symbol_count=0, source="derived")
 
-    out = pd.DataFrame({
-        "date": target_ts,
-        "instrument_key": flagged["instrument_key"].to_numpy(),
-        "close_prev": flagged["close"].to_numpy(),
-        "prevclose_today": flagged["prevclose"].to_numpy(),
-        "implied_ratio": flagged["implied_ratio"].to_numpy(),
-    })[_CA_FLAGS_OUTPUT_COLUMNS]
+    out = pd.DataFrame(
+        {
+            "date": target_ts,
+            "instrument_key": flagged["instrument_key"].to_numpy(),
+            "close_prev": flagged["close"].to_numpy(),
+            "prevclose_today": flagged["prevclose"].to_numpy(),
+            "implied_ratio": flagged["implied_ratio"].to_numpy(),
+        }
+    )[_CA_FLAGS_OUTPUT_COLUMNS]
 
     store.append_keyed(out, spec.base_dir, prefix=spec.file_prefix)
 
@@ -241,6 +268,7 @@ def _read_all_years_for_ca_flags(source_spec: DatasetSpec) -> pd.DataFrame:
 # guard -- see build_sector_industry.
 # ---------------------------------------------------------------------------
 
+
 def _read_seed_frame(target: date) -> pd.DataFrame:
     """Read the committed full-universe seed CSV into the normalized sector
     frame -- the DEFAULT source for build_sector_industry.
@@ -271,7 +299,9 @@ def _fetch_sector_frame(target: date) -> pd.DataFrame:
     session = requests.Session()
     session.headers.update({"User-Agent": _BROWSER_UA})
     return _fetch_with_retry(
-        session, nse_sector.SECTOR_CSV_URL, target,
+        session,
+        nse_sector.SECTOR_CSV_URL,
+        target,
         parse=nse_sector.parse_sector_csv,
     )
 
@@ -311,11 +341,16 @@ def _sector_fail_closed(
     prior file at all it is a genuine `failed` (a real first-run alert)."""
     if prior_rows is not None:
         return RunStatus(
-            "skipped_idempotent", target, symbol_count=prior_rows,
-            source="nse-sector", message=f"{reason}; retained prior file",
+            "skipped_idempotent",
+            target,
+            symbol_count=prior_rows,
+            source="nse-sector",
+            message=f"{reason}; retained prior file",
         )
     return RunStatus(
-        "failed", target, source="nse-sector",
+        "failed",
+        target,
+        source="nse-sector",
         message=f"{reason}; no prior file to retain",
     )
 
@@ -379,12 +414,14 @@ def _prior_classification_registry(
     return _classification_registry(previous)
 
 
-
 def _active_registry_or_bootstrap(
     spec: DatasetSpec,
     seed_records: dict[str, ClassificationRegistryRecord],
     target: date,
-) -> dict[str, ClassificationRegistryRecord]:
+) -> tuple[
+    dict[str, ClassificationRegistryRecord],
+    dict[str, classification_publication.Provenance],
+]:
     """Use persisted active state, or bootstrap it once from the legacy seed.
 
     The bootstrap is only a migration bridge. Once the approved NSE/Screener
@@ -394,18 +431,26 @@ def _active_registry_or_bootstrap(
     state_path = spec.base_dir / "classification_registry_all.parquet"
     persisted = load_registry(state_path)
     if persisted:
-        return active_classification_records(persisted)
+        records = active_classification_records(persisted)
+        provenance = {
+            instrument_key: entry.last_provenance
+            for instrument_key, entry in persisted.items()
+            if instrument_key in records and entry.last_provenance is not None
+        }
+        return records, provenance
+    seed_provenance = _seed_provenance(seed_records, target)
     bootstrap = {
         instrument_key: RegistryEntry(
             instrument_key=instrument_key,
             symbol=record.symbol,
             status=RegistryStatus.CLASSIFIED,
             last_known_good=record,
+            last_provenance=seed_provenance[instrument_key],
         )
         for instrument_key, record in seed_records.items()
     }
     write_registry(state_path, bootstrap, updated_on=target)
-    return seed_records
+    return seed_records, seed_provenance
 
 
 def _sector_frame_from_registry(
@@ -426,7 +471,6 @@ def _sector_frame_from_registry(
         for _, record in sorted(records.items())
     ]
     return pd.DataFrame(rows, columns=[*nse_sector.SECTOR_COLUMNS, "date"])
-
 
 
 def build_sector_industry(
@@ -470,8 +514,11 @@ def build_sector_industry(
     # content-guard below to avoid churn.
     if fetch_frame is not _read_seed_frame and _sector_is_fresh(out_path, target, ttl_days):
         return RunStatus(
-            "skipped_idempotent", target, symbol_count=prior_rows or 0,
-            source="nse-sector", message=f"within {ttl_days}-day TTL; not re-fetched",
+            "skipped_idempotent",
+            target,
+            symbol_count=prior_rows or 0,
+            source="nse-sector",
+            message=f"within {ttl_days}-day TTL; not re-fetched",
         )
 
     try:
@@ -480,12 +527,12 @@ def build_sector_industry(
         return _sector_fail_closed(target, out_path, prior_rows, f"fetch failed: {e}")
 
     if df.empty:
-        return _sector_fail_closed(
-            target, out_path, prior_rows, "parsed 0 valid rows"
-        )
+        return _sector_fail_closed(target, out_path, prior_rows, "parsed 0 valid rows")
     if len(df) < min_rows:
         return _sector_fail_closed(
-            target, out_path, prior_rows,
+            target,
+            out_path,
+            prior_rows,
             f"parsed {len(df)} rows < floor {min_rows} (suspected truncation)",
         )
     if prior_rows is not None and len(df) < prior_rows:
@@ -501,7 +548,9 @@ def build_sector_industry(
                 ),
             )
         return _sector_fail_closed(
-            target, out_path, prior_rows,
+            target,
+            out_path,
+            prior_rows,
             f"parsed {len(df)} rows < prior {prior_rows} (shrink-guard)",
         )
 
@@ -511,7 +560,7 @@ def build_sector_industry(
     # changes without churning the release every day when it doesn't. The legacy
     # fetch path keeps its original weekly-TTL write behavior.
     seed_registry = _classification_registry(df)
-    current_registry = _active_registry_or_bootstrap(spec, seed_registry, target)
+    current_registry, provenance = _active_registry_or_bootstrap(spec, seed_registry, target)
     if not current_registry:
         return _sector_fail_closed(
             target, out_path, prior_rows, "active registry has no classified records"
@@ -521,14 +570,10 @@ def build_sector_industry(
     publication = classification_publication.decide_publication(
         current_registry,
         previous_registry,
-        _seed_provenance(current_registry, target),
+        provenance,
     )
     if not publication.publish:
-        status = (
-            "skipped_idempotent"
-            if publication.reason == "fingerprint unchanged"
-            else "failed"
-        )
+        status = "skipped_idempotent" if publication.reason == "fingerprint unchanged" else "failed"
         return RunStatus(
             status,
             target,

@@ -111,7 +111,8 @@ def test_two_valid_absences_inactivate_and_return_reactivates_an_isin():
 
     assert first.records["INE002A01018"].status is RegistryStatus.CLASSIFIED
     assert second.records["INE002A01018"].status is RegistryStatus.INACTIVE
-    assert returned.records["INE002A01018"].status is RegistryStatus.CLASSIFIED
+    assert returned.records["INE002A01018"].status is RegistryStatus.PENDING
+    assert returned.records["INE002A01018"].last_known_good is not None
 
 
 def test_retry_budget_defers_a_failed_record_after_the_third_retry():
@@ -132,9 +133,7 @@ def test_retry_budget_defers_a_failed_record_after_the_third_retry():
 
 def test_registry_state_round_trips_and_exposes_only_active_last_known_good(tmp_path):
     records = {
-        "INE002A01018": RegistryEntry.classified(
-            "INE002A01018", "RELIANCE", _observation()
-        ),
+        "INE002A01018": RegistryEntry.classified("INE002A01018", "RELIANCE", _observation()),
         "INE009A01021": RegistryEntry(
             instrument_key="INE009A01021",
             symbol="INFY",
@@ -187,3 +186,88 @@ def test_renamed_and_due_retry_records_are_the_only_existing_collection_candidat
     assert calls == ["NEWNAME", "RETRYCO"]
     assert result.records["INE111A01011"].symbol == "NEWNAME"
     assert result.records["INE222A01022"].status is RegistryStatus.CLASSIFIED
+
+
+def test_daily_collection_skips_baseline_backlog_but_collects_a_new_listing():
+    records = {
+        "INE111A01011": RegistryEntry.pending("INE111A01011", "BACKLOG", baseline_pending=True),
+    }
+    calls: list[str] = []
+
+    result = run_incremental_collection(
+        records,
+        [
+            ActiveNseEquity("INE111A01011", "BACKLOG"),
+            ActiveNseEquity("INE222A01022", "NEWCO"),
+        ],
+        today=date(2026, 7, 26),
+        collect=lambda symbol: calls.append(symbol) or _observation(),
+    )
+
+    assert calls == ["NEWCO"]
+    assert result.records["INE111A01011"].baseline_pending is True
+    assert result.records["INE222A01022"].status is RegistryStatus.CLASSIFIED
+
+
+def test_manual_baseline_marks_unselected_new_symbols_as_baseline_backlog():
+    result = run_incremental_collection(
+        {},
+        [
+            ActiveNseEquity("INE111A01011", "FIRST"),
+            ActiveNseEquity("INE222A01022", "LATER"),
+        ],
+        today=date(2026, 7, 26),
+        collect=lambda _: _observation(),
+        candidate_limit=1,
+        baseline_batch=True,
+    )
+
+    assert result.records["INE111A01011"].baseline_pending is False
+    assert result.records["INE222A01022"].baseline_pending is True
+
+
+def test_quarterly_audit_recollects_already_classified_active_symbols():
+    records = {
+        "INE111A01011": RegistryEntry.classified("INE111A01011", "FIRST", _observation()),
+        "INE222A01022": RegistryEntry.classified("INE222A01022", "SECOND", _observation()),
+    }
+    calls: list[str] = []
+
+    result = run_incremental_collection(
+        records,
+        [
+            ActiveNseEquity("INE111A01011", "FIRST"),
+            ActiveNseEquity("INE222A01022", "SECOND"),
+        ],
+        today=date(2026, 7, 26),
+        collect=lambda symbol: calls.append(symbol) or _observation(),
+        force_all_active=True,
+    )
+
+    assert calls == ["FIRST", "SECOND"]
+    assert result.candidates == ("INE111A01011", "INE222A01022")
+
+
+def test_daily_collection_recollects_a_reactivated_isin():
+    records = {
+        "INE111A01011": RegistryEntry(
+            instrument_key="INE111A01011",
+            symbol="RETURNED",
+            status=RegistryStatus.INACTIVE,
+            last_known_good=RegistryEntry.classified(
+                "INE111A01011", "RETURNED", _observation()
+            ).last_known_good,
+            consecutive_absences=2,
+        )
+    }
+    calls: list[str] = []
+
+    result = run_incremental_collection(
+        records,
+        [ActiveNseEquity("INE111A01011", "RETURNED")],
+        today=date(2026, 7, 26),
+        collect=lambda symbol: calls.append(symbol) or _observation(),
+    )
+
+    assert calls == ["RETURNED"]
+    assert result.records["INE111A01011"].status is RegistryStatus.CLASSIFIED
