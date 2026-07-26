@@ -1,0 +1,10 @@
+{
+  "approved_at": "2026-07-26T00:00:00+05:30",
+  "approved_by": "repository operator",
+  "scope": "Screener company pages for the active NSE EQ/BE Classification Registry",
+  "constraints": [
+    "sequential requests",
+    "rate limited",
+    "stop and defer on rate-limit or sustained-block responses"
+  ]
+}
