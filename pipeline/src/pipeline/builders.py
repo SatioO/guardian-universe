@@ -40,7 +40,8 @@ from pipeline import config, store
 from pipeline.daily_update import RunStatus
 from pipeline.datasets import DatasetSpec
 from pipeline.fetch import _BROWSER_UA, _fetch_with_retry
-from pipeline.sources import nse_sector
+from pipeline.sources import classification_publication, nse_sector
+from pipeline.sources.classification_registry import ClassificationRegistryRecord
 
 BUILDERS: dict[str, Callable[[DatasetSpec, date], RunStatus]] = {}
 
@@ -312,6 +313,62 @@ def _sector_fail_closed(
     )
 
 
+def _classification_registry(df: pd.DataFrame) -> dict[str, ClassificationRegistryRecord]:
+    """Map a normalized active sector frame to its ISIN-keyed publishable rows."""
+
+    def label(value: object) -> str:
+        return "" if value is None or value is pd.NA else str(value)
+
+    return {
+        str(row.instrument_key): ClassificationRegistryRecord(
+            instrument_key=str(row.instrument_key),
+            symbol=str(row.symbol),
+            macro_sector=label(row.macro_sector),
+            sector=label(row.sector),
+            industry=label(row.industry),
+            basic_industry=label(row.basic_industry),
+        )
+        for row in df[nse_sector.SECTOR_COLUMNS].itertuples(index=False)
+    }
+
+
+def _seed_provenance(
+    records: dict[str, ClassificationRegistryRecord], target: date
+) -> dict[str, classification_publication.Provenance]:
+    """Record the committed seed as the source until the Screener collector lands.
+
+    The same seam will accept real per-page Screener provenance in the baseline
+    collector; this fallback never pretends that historical seed data came from
+    Screener.
+    """
+    observed_at = pd.Timestamp(target).to_pydatetime()
+    source_url = config.SECTOR_SEED_PATH.resolve().as_uri()
+    return {
+        instrument_key: classification_publication.Provenance(
+            observed_at=observed_at,
+            source_url=source_url,
+            extractor_version="sector-seed-v1",
+            source_fragment_hash=classification_publication.classification_fingerprint(
+                {instrument_key: record}
+            ),
+        )
+        for instrument_key, record in records.items()
+    }
+
+
+def _prior_classification_registry(
+    out_path: Path,
+) -> dict[str, ClassificationRegistryRecord]:
+    if not out_path.exists():
+        return {}
+    try:
+        previous = pd.read_parquet(out_path, columns=nse_sector.SECTOR_COLUMNS)
+    except Exception:  # noqa: BLE001 - the write path will replace unreadable prior data
+        return {}
+    return _classification_registry(previous)
+
+
+
 def build_sector_industry(
     spec: DatasetSpec,
     target: date,
@@ -372,6 +429,17 @@ def build_sector_industry(
             f"parsed {len(df)} rows < floor {min_rows} (suspected truncation)",
         )
     if prior_rows is not None and len(df) < prior_rows:
+        if len(df) < prior_rows * 0.99:
+            return RunStatus(
+                "failed",
+                target,
+                symbol_count=prior_rows,
+                source="nse-sector",
+                message=(
+                    f"parsed {len(df)} rows < 99% of prior {prior_rows}; "
+                    "coverage guard rejected publication"
+                ),
+            )
         return _sector_fail_closed(
             target, out_path, prior_rows,
             f"parsed {len(df)} rows < prior {prior_rows} (shrink-guard)",
@@ -386,13 +454,31 @@ def build_sector_industry(
     # ignoring the as-of `date`. Lets the seed path rebuild whenever the seed
     # changes without churning the release every day when it doesn't. The legacy
     # fetch path keeps its original weekly-TTL write behavior.
-    if fetch_frame is _read_seed_frame and _sector_content_unchanged(out_path, df):
+    current_registry = _classification_registry(df)
+    previous_registry = _prior_classification_registry(out_path)
+    publication = classification_publication.decide_publication(
+        current_registry,
+        previous_registry,
+        _seed_provenance(current_registry, target),
+    )
+    if not publication.publish:
+        status = (
+            "skipped_idempotent"
+            if publication.reason == "fingerprint unchanged"
+            else "failed"
+        )
         return RunStatus(
-            "skipped_idempotent", target, symbol_count=prior_rows or len(out),
-            source="nse-sector", message="seed unchanged; classification content identical",
+            status,
+            target,
+            symbol_count=prior_rows or len(out),
+            source="nse-sector",
+            message=publication.reason,
         )
 
     _write_atomic(out, out_path)
+    classification_publication.append_observations(
+        spec.base_dir / "classification_observations.jsonl", publication.observations
+    )
     return RunStatus("success", target, symbol_count=len(out), source="nse-sector")
 
 

@@ -187,7 +187,49 @@ def test_build_ttl_skips_refetch_within_window(tmp_path: Path):
     r3 = builders.build_sector_industry(
         spec, date(2026, 7, 19), fetch_frame=counting_fetch, ttl_days=7, min_rows=1,
     )
-    assert r3.status == "success" and calls["n"] == 2
+    assert r3.status == "skipped_idempotent" and calls["n"] == 2
+    assert "fingerprint unchanged" in r3.message
+
+
+def test_build_records_approved_changes_once_in_the_audit_ledger(tmp_path: Path):
+    spec = _sector_spec(tmp_path / "sector")
+    first = builders.build_sector_industry(
+        spec, date(2026, 7, 11), fetch_frame=lambda _t: _good_frame(), min_rows=1,
+    )
+    audit_path = tmp_path / "sector" / "classification_observations.jsonl"
+
+    assert first.status == "success"
+    first_audit = audit_path.read_text()
+    assert len(first_audit.splitlines()) == 5
+    assert "\"extractor_version\":\"sector-seed-v1\"" in first_audit
+
+    unchanged = builders.build_sector_industry(
+        spec, date(2026, 7, 19), fetch_frame=lambda _t: _good_frame(),
+        ttl_days=7, min_rows=1,
+    )
+
+    assert unchanged.status == "skipped_idempotent"
+    assert audit_path.read_text() == first_audit
+
+
+def test_build_alerts_and_retains_prior_on_suspicious_taxonomy_shift(tmp_path: Path):
+    spec = _sector_spec(tmp_path / "sector")
+    builders.build_sector_industry(
+        spec, date(2026, 7, 11), fetch_frame=lambda _t: _good_frame(), min_rows=1,
+    )
+    out_path = tmp_path / "sector" / "sector_industry_all.parquet"
+    prior_bytes = out_path.read_bytes()
+    shifted = _good_frame()
+    shifted.loc[:, "sector"] = "Energy"
+
+    result = builders.build_sector_industry(
+        spec, date(2026, 7, 19), fetch_frame=lambda _t: shifted,
+        ttl_days=7, min_rows=1,
+    )
+
+    assert result.status == "failed"
+    assert "sector-diversity" in result.message
+    assert out_path.read_bytes() == prior_bytes
 
 
 def test_build_fail_closed_keeps_prior_on_fetch_error(tmp_path: Path):
@@ -262,8 +304,8 @@ def test_build_shrink_guard_holds_smaller_list(tmp_path: Path):
         fetch_frame=lambda _t: _frame(_GOOD_ROWS[0], _GOOD_ROWS[1]),
         ttl_days=7, min_rows=1,
     )
-    assert result.status == "skipped_idempotent"
-    assert "shrink-guard" in result.message
+    assert result.status == "failed"
+    assert "coverage guard" in result.message
     assert out_path.read_bytes() == good_bytes  # 5-row file preserved
 
 
