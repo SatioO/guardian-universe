@@ -50,6 +50,7 @@ def test_ca_flags_spec_fields():
     assert datasets.DATASETS["ca_flags"] is s
     assert datasets.DATASET_ORDER == [
         "equities", "indices", "reference", "ca_flags", "sector_industry",
+        "classification_registry", "classification_observations",
         "fundamentals",
     ]
     with pytest.raises(RuntimeError, match="derived dataset has no fetcher"):

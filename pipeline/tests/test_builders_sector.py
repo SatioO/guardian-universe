@@ -15,6 +15,7 @@ import pandas as pd
 from pipeline import builders, datasets, manifest
 from pipeline.daily_update import RunStatus
 from pipeline.sources import nse_sector
+from pipeline.sources.nse_universe import load_registry, write_registry
 
 _HEADER = "Company Name,Industry,Symbol,Series,ISIN Code"
 
@@ -153,6 +154,7 @@ def test_build_writes_parquet_with_date_and_schema(tmp_path: Path):
 
     out_path = tmp_path / "sector" / "sector_industry_all.parquet"
     assert out_path.exists()
+    assert (tmp_path / "sector" / "classification_registry_all.parquet").exists()
     out = pd.read_parquet(out_path)
     assert list(out.columns) == [*nse_sector.SECTOR_COLUMNS, "date"]
     assert (out["date"] == pd.Timestamp("2026-07-11")).all()  # REQUIRED for manifest
@@ -196,12 +198,12 @@ def test_build_records_approved_changes_once_in_the_audit_ledger(tmp_path: Path)
     first = builders.build_sector_industry(
         spec, date(2026, 7, 11), fetch_frame=lambda _t: _good_frame(), min_rows=1,
     )
-    audit_path = tmp_path / "sector" / "classification_observations.jsonl"
+    audit_path = tmp_path / "sector" / "classification_observations_all.parquet"
 
     assert first.status == "success"
-    first_audit = audit_path.read_text()
-    assert len(first_audit.splitlines()) == 5
-    assert "\"extractor_version\":\"sector-seed-v1\"" in first_audit
+    first_audit = pd.read_parquet(audit_path)
+    assert len(first_audit) == 5
+    assert set(first_audit["extractor_version"]) == {"sector-seed-v1"}
 
     unchanged = builders.build_sector_industry(
         spec, date(2026, 7, 19), fetch_frame=lambda _t: _good_frame(),
@@ -209,7 +211,7 @@ def test_build_records_approved_changes_once_in_the_audit_ledger(tmp_path: Path)
     )
 
     assert unchanged.status == "skipped_idempotent"
-    assert audit_path.read_text() == first_audit
+    assert pd.read_parquet(audit_path).equals(first_audit)
 
 
 def test_build_alerts_and_retains_prior_on_suspicious_taxonomy_shift(tmp_path: Path):
@@ -219,11 +221,21 @@ def test_build_alerts_and_retains_prior_on_suspicious_taxonomy_shift(tmp_path: P
     )
     out_path = tmp_path / "sector" / "sector_industry_all.parquet"
     prior_bytes = out_path.read_bytes()
-    shifted = _good_frame()
-    shifted.loc[:, "sector"] = "Energy"
+    state_path = tmp_path / "sector" / "classification_registry_all.parquet"
+    persisted = load_registry(state_path)
+    shifted = {}
+    for instrument_key, entry in persisted.items():
+        assert entry.last_known_good is not None
+        shifted[instrument_key] = dataclasses.replace(
+            entry,
+            last_known_good=dataclasses.replace(
+                entry.last_known_good, sector="Energy"
+            ),
+        )
+    write_registry(state_path, shifted, updated_on=date(2026, 7, 19))
 
     result = builders.build_sector_industry(
-        spec, date(2026, 7, 19), fetch_frame=lambda _t: shifted,
+        spec, date(2026, 7, 19), fetch_frame=lambda _t: _good_frame(),
         ttl_days=7, min_rows=1,
     )
 
@@ -240,7 +252,7 @@ def test_build_fail_closed_keeps_prior_on_fetch_error(tmp_path: Path):
     out_path = tmp_path / "sector" / "sector_industry_all.parquet"
     good_bytes = out_path.read_bytes()
 
-    def boom(_t: date) -> bytes:
+    def boom(_t: date) -> pd.DataFrame:
         raise RuntimeError("network down")
 
     # 10 days later (past TTL) so it actually attempts a fetch, which fails.

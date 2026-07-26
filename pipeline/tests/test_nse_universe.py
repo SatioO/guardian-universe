@@ -6,8 +6,11 @@ from pipeline.sources.nse_universe import (
     ActiveNseEquity,
     RegistryEntry,
     RegistryStatus,
+    active_classification_records,
+    load_registry,
     parse_active_nse_equities,
     run_incremental_collection,
+    write_registry,
 )
 from pipeline.sources.screener_classification import ClassificationObservation
 
@@ -115,6 +118,37 @@ def test_retry_budget_defers_a_failed_record_after_the_third_retry():
     entry = records["INE222A01022"]
     assert entry.deferred_to_full_audit is True
     assert entry.retry_on is None
+
+
+def test_registry_state_round_trips_and_exposes_only_active_last_known_good(tmp_path):
+    records = {
+        "INE002A01018": RegistryEntry.classified(
+            "INE002A01018", "RELIANCE", _observation()
+        ),
+        "INE009A01021": RegistryEntry(
+            instrument_key="INE009A01021",
+            symbol="INFY",
+            status=RegistryStatus.PENDING,
+            last_known_good=RegistryEntry.classified(
+                "INE009A01021", "INFY", _observation()
+            ).last_known_good,
+            retry_on=date(2026, 7, 25),
+            retry_attempts=1,
+        ),
+        "INE111A01011": RegistryEntry.pending("INE111A01011", "INACTIVE"),
+    }
+    records["INE111A01011"] = RegistryEntry(
+        **{**records["INE111A01011"].__dict__, "status": RegistryStatus.INACTIVE}
+    )
+    path = tmp_path / "classification_registry_all.parquet"
+
+    write_registry(path, records, updated_on=date(2026, 7, 24))
+    restored = load_registry(path)
+
+    assert restored == records
+    active = active_classification_records(restored)
+    assert set(active) == {"INE002A01018", "INE009A01021"}
+    assert active["INE009A01021"].symbol == "INFY"
 
 
 def test_renamed_and_due_retry_records_are_the_only_existing_collection_candidates():

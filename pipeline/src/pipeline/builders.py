@@ -42,6 +42,13 @@ from pipeline.datasets import DatasetSpec
 from pipeline.fetch import _BROWSER_UA, _fetch_with_retry
 from pipeline.sources import classification_publication, nse_sector
 from pipeline.sources.classification_registry import ClassificationRegistryRecord
+from pipeline.sources.nse_universe import (
+    RegistryEntry,
+    RegistryStatus,
+    active_classification_records,
+    load_registry,
+    write_registry,
+)
 
 BUILDERS: dict[str, Callable[[DatasetSpec, date], RunStatus]] = {}
 
@@ -317,7 +324,11 @@ def _classification_registry(df: pd.DataFrame) -> dict[str, ClassificationRegist
     """Map a normalized active sector frame to its ISIN-keyed publishable rows."""
 
     def label(value: object) -> str:
-        return "" if value is None or value is pd.NA else str(value)
+        if value is None or value is pd.NA:
+            return ""
+        if isinstance(value, float) and pd.isna(value):
+            return ""
+        return str(value)
 
     return {
         str(row.instrument_key): ClassificationRegistryRecord(
@@ -366,6 +377,55 @@ def _prior_classification_registry(
     except Exception:  # noqa: BLE001 - the write path will replace unreadable prior data
         return {}
     return _classification_registry(previous)
+
+
+
+def _active_registry_or_bootstrap(
+    spec: DatasetSpec,
+    seed_records: dict[str, ClassificationRegistryRecord],
+    target: date,
+) -> dict[str, ClassificationRegistryRecord]:
+    """Use persisted active state, or bootstrap it once from the legacy seed.
+
+    The bootstrap is only a migration bridge. Once the approved NSE/Screener
+    collector writes state, its active/pending/inactive lifecycle is authoritative
+    and the seed no longer controls which records are publishable.
+    """
+    state_path = spec.base_dir / "classification_registry_all.parquet"
+    persisted = load_registry(state_path)
+    if persisted:
+        return active_classification_records(persisted)
+    bootstrap = {
+        instrument_key: RegistryEntry(
+            instrument_key=instrument_key,
+            symbol=record.symbol,
+            status=RegistryStatus.CLASSIFIED,
+            last_known_good=record,
+        )
+        for instrument_key, record in seed_records.items()
+    }
+    write_registry(state_path, bootstrap, updated_on=target)
+    return seed_records
+
+
+def _sector_frame_from_registry(
+    records: dict[str, ClassificationRegistryRecord], target: date
+) -> pd.DataFrame:
+    rows = [
+        {
+            "instrument_key": record.instrument_key,
+            "symbol": record.symbol,
+            "macro_sector": record.macro_sector or None,
+            "sector": record.sector,
+            "industry": record.industry or None,
+            "basic_industry": record.basic_industry or None,
+            "is_cyclical": nse_sector.is_cyclical_seed(record.sector),
+            "cyclicality_rule_version": nse_sector.CYCLICAL_RULE_VERSION,
+            "date": pd.Timestamp(target),
+        }
+        for _, record in sorted(records.items())
+    ]
+    return pd.DataFrame(rows, columns=[*nse_sector.SECTOR_COLUMNS, "date"])
 
 
 
@@ -445,16 +505,18 @@ def build_sector_industry(
             f"parsed {len(df)} rows < prior {prior_rows} (shrink-guard)",
         )
 
-    out = df.copy()
-    out["date"] = pd.Timestamp(target)
-    out = out[[*nse_sector.SECTOR_COLUMNS, "date"]]
-
     # Content-guard (seed path only): skip the write (and thus the daily
     # re-publish) when the classification is byte-identical to the current file,
     # ignoring the as-of `date`. Lets the seed path rebuild whenever the seed
     # changes without churning the release every day when it doesn't. The legacy
     # fetch path keeps its original weekly-TTL write behavior.
-    current_registry = _classification_registry(df)
+    seed_registry = _classification_registry(df)
+    current_registry = _active_registry_or_bootstrap(spec, seed_registry, target)
+    if not current_registry:
+        return _sector_fail_closed(
+            target, out_path, prior_rows, "active registry has no classified records"
+        )
+    out = _sector_frame_from_registry(current_registry, target)
     previous_registry = _prior_classification_registry(out_path)
     publication = classification_publication.decide_publication(
         current_registry,
@@ -475,10 +537,11 @@ def build_sector_industry(
             message=publication.reason,
         )
 
-    _write_atomic(out, out_path)
     classification_publication.append_observations(
-        spec.base_dir / "classification_observations.jsonl", publication.observations
+        spec.base_dir / "classification_observations_all.parquet",
+        publication.observations,
     )
+    _write_atomic(out, out_path)
     return RunStatus("success", target, symbol_count=len(out), source="nse-sector")
 
 

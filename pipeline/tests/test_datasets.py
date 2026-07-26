@@ -19,6 +19,7 @@ def test_equities_spec_fields():
     assert datasets.DATASETS["equities"] is s
     assert datasets.DATASET_ORDER == [
         "equities", "indices", "reference", "ca_flags", "sector_industry",
+        "classification_registry", "classification_observations",
         "fundamentals",
     ]
 
@@ -64,7 +65,8 @@ def test_manifest_names_are_unique():
 def test_all_specs_follows_dataset_order():
     assert datasets.all_specs() == [
         datasets.EQUITIES, datasets.INDICES, datasets.REFERENCE, datasets.CA_FLAGS,
-        datasets.SECTOR_INDUSTRY, datasets.FUNDAMENTALS,
+        datasets.SECTOR_INDUSTRY, datasets.CLASSIFICATION_REGISTRY,
+        datasets.CLASSIFICATION_OBSERVATIONS, datasets.FUNDAMENTALS,
     ]
 
 
@@ -86,6 +88,17 @@ def test_sector_industry_spec_fields():
 def test_sector_industry_registered_in_builders():
     from pipeline import cli
     assert cli.builders.BUILDERS["sector_industry"] is cli.builders.build_sector_industry
+
+
+def test_classification_state_artifacts_are_external_publishable_datasets():
+    for spec in (
+        datasets.CLASSIFICATION_REGISTRY,
+        datasets.CLASSIFICATION_OBSERVATIONS,
+    ):
+        assert spec.base_dir == config.SECTOR_DIR
+        assert spec.derived is True
+        assert spec.external is True
+        assert datasets.DATASETS[spec.key] is spec
 
 
 def test_fundamentals_spec_fields():

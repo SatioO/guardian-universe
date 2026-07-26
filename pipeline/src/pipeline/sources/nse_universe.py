@@ -7,6 +7,10 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from enum import StrEnum
+from pathlib import Path
+from typing import Any, cast
+
+import pandas as pd
 
 from pipeline.sources.classification_registry import (
     ClassificationRegistryRecord,
@@ -80,6 +84,22 @@ _BOOTSTRAP_SNAPSHOT_SIZE = 20
 _MIN_SNAPSHOT_OVERLAP = 0.95
 
 
+_REGISTRY_COLUMNS = [
+    "instrument_key",
+    "symbol",
+    "status",
+    "macro_sector",
+    "sector",
+    "industry",
+    "basic_industry",
+    "consecutive_absences",
+    "retry_on",
+    "retry_attempts",
+    "deferred_to_full_audit",
+    "date",
+]
+
+
 def parse_active_nse_equities(csv_bytes: bytes) -> tuple[ActiveNseEquity, ...]:
     """Parse the official NSE EQUITY_L snapshot into the active equity universe."""
     reader = csv.DictReader(io.StringIO(csv_bytes.decode("utf-8-sig", errors="replace")))
@@ -96,6 +116,98 @@ def parse_active_nse_equities(csv_bytes: bytes) -> tuple[ActiveNseEquity, ...]:
         if instrument_key and symbol:
             equities.append(ActiveNseEquity(instrument_key, symbol))
     return tuple(equities)
+
+
+def write_registry(
+    path: Path, records: Mapping[str, RegistryEntry], *, updated_on: date
+) -> None:
+    """Atomically persist all registry state needed by the next daily run."""
+    rows: list[dict[str, object]] = []
+    for instrument_key, entry in sorted(records.items()):
+        classification = entry.last_known_good
+        rows.append(
+            {
+                "instrument_key": instrument_key,
+                "symbol": entry.symbol,
+                "status": entry.status.value,
+                "macro_sector": classification.macro_sector if classification else None,
+                "sector": classification.sector if classification else None,
+                "industry": classification.industry if classification else None,
+                "basic_industry": classification.basic_industry if classification else None,
+                "consecutive_absences": entry.consecutive_absences,
+                "retry_on": entry.retry_on.isoformat() if entry.retry_on else None,
+                "retry_attempts": entry.retry_attempts,
+                "deferred_to_full_audit": entry.deferred_to_full_audit,
+                "date": pd.Timestamp(updated_on),
+            }
+        )
+    frame = pd.DataFrame(rows, columns=_REGISTRY_COLUMNS)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    frame.to_parquet(temporary_path, compression="zstd", index=False)
+    temporary_path.replace(path)
+
+
+def load_registry(path: Path) -> dict[str, RegistryEntry]:
+    """Load persisted registry state; an absent state is a valid first run."""
+    if not path.exists():
+        return {}
+    frame = pd.read_parquet(path, columns=_REGISTRY_COLUMNS)
+    records: dict[str, RegistryEntry] = {}
+    for row in frame.itertuples(index=False):
+        def label(value: object) -> str:
+            if value is None or value is pd.NA:
+                return ""
+            if isinstance(value, float) and pd.isna(value):
+                return ""
+            return str(value)
+
+        classification_values = (
+            row.macro_sector,
+            row.sector,
+            row.industry,
+            row.basic_industry,
+        )
+        classification = (
+            None
+            if all(pd.isna(value) for value in classification_values)
+            else ClassificationRegistryRecord(
+                instrument_key=str(row.instrument_key),
+                symbol=str(row.symbol),
+                macro_sector=label(row.macro_sector),
+                sector=label(row.sector),
+                industry=label(row.industry),
+                basic_industry=label(row.basic_industry),
+            )
+        )
+        retry_on = (
+            None
+            if pd.isna(row.retry_on)
+            else pd.Timestamp(cast(Any, row.retry_on)).date()
+        )
+        instrument_key = str(row.instrument_key)
+        records[instrument_key] = RegistryEntry(
+            instrument_key=instrument_key,
+            symbol=str(row.symbol),
+            status=RegistryStatus(str(row.status)),
+            last_known_good=classification,
+            consecutive_absences=int(cast(Any, row.consecutive_absences)),
+            retry_on=retry_on,
+            retry_attempts=int(cast(Any, row.retry_attempts)),
+            deferred_to_full_audit=bool(row.deferred_to_full_audit),
+        )
+    return records
+
+
+def active_classification_records(
+    records: Mapping[str, RegistryEntry],
+) -> dict[str, ClassificationRegistryRecord]:
+    """Return active Last-Known-Good rows, with the current NSE symbol applied."""
+    return {
+        instrument_key: replace(entry.last_known_good, symbol=entry.symbol)
+        for instrument_key, entry in records.items()
+        if entry.status is not RegistryStatus.INACTIVE and entry.last_known_good is not None
+    }
 
 
 def run_incremental_collection(

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime
 
+import pandas as pd
+
+from pipeline import datasets, manifest
 from pipeline.sources.classification_publication import (
     Provenance,
     append_observations,
@@ -104,17 +108,38 @@ def test_suspicious_taxonomy_or_diversity_changes_are_rejected():
     assert "sector-diversity" in decision.reason
 
 
-def test_approved_observations_are_retained_as_a_jsonl_audit_trail(tmp_path):
+def test_approved_observations_are_retained_as_a_parquet_audit_dataset(tmp_path):
     observation = decide_publication(
         {"INE002A01018": _record()}, {}, {"INE002A01018": _provenance()}
     ).observations
-    audit_path = tmp_path / "sector" / "classification_observations.jsonl"
+    audit_path = tmp_path / "sector" / "classification_observations_all.parquet"
 
     append_observations(audit_path, observation)
+    append_observations(audit_path, observation)
 
-    row = audit_path.read_text().strip()
-    assert (
-        "\"source_url\":\"https://www.screener.in/company/RELIANCE/consolidated/\""
-        in row
+    row = pd.read_parquet(audit_path).iloc[0]
+    assert len(pd.read_parquet(audit_path)) == 1
+    assert row["source_url"] == "https://www.screener.in/company/RELIANCE/consolidated/"
+    assert row["observed_at"] == pd.Timestamp("2026-07-24T10:00:00")
+    assert row["date"] == pd.Timestamp("2026-07-24")
+
+
+def test_audit_dataset_is_included_in_the_normal_release_manifest(tmp_path):
+    audit_spec = dataclasses.replace(
+        datasets.CLASSIFICATION_OBSERVATIONS, base_dir=tmp_path / "sector"
     )
-    assert "\"observed_at\":\"2026-07-24T10:00:00\"" in row
+    observation = decide_publication(
+        {"INE002A01018": _record()}, {}, {"INE002A01018": _provenance()}
+    ).observations
+    append_observations(
+        audit_spec.base_dir / "classification_observations_all.parquet", observation
+    )
+
+    release_manifest = manifest.build_manifest(
+        [audit_spec], latest_trading_date=datetime(2026, 7, 24).date(), generated_at="g"
+    )
+
+    assert release_manifest["datasets"][0]["name"] == "classification_observations"
+    assert release_manifest["datasets"][0]["baseline"][0]["name"] == (
+        "classification_observations_all.parquet"
+    )

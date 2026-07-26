@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
+
 from pipeline.sources.classification_registry import ClassificationRegistryRecord
 
 _MIN_COVERAGE_RATIO = 0.99
@@ -116,7 +118,8 @@ def decide_publication(
 def append_observations(
     audit_path: Path, observations: tuple[PublishedClassificationObservation, ...]
 ) -> None:
-    """Atomically append approved observations to the immutable JSONL audit trail.
+
+    """Atomically append approved observations to the Parquet audit dataset.
 
     Call this only after ``decide_publication`` approves the matching artifact.
     Rewriting to a sibling temporary file prevents a half-written ledger if the
@@ -124,9 +127,8 @@ def append_observations(
     """
     if not observations:
         return
-    prior = audit_path.read_text() if audit_path.exists() else ""
-    rows = "".join(
-        json.dumps(
+    rows = pd.DataFrame(
+        [
             {
                 "instrument_key": observation.instrument_key,
                 "symbol": observation.symbol,
@@ -134,20 +136,29 @@ def append_observations(
                 "sector": observation.sector,
                 "industry": observation.industry,
                 "basic_industry": observation.basic_industry,
-                "observed_at": observation.provenance.observed_at.isoformat(),
+                "observed_at": pd.Timestamp(observation.provenance.observed_at),
                 "source_url": observation.provenance.source_url,
                 "extractor_version": observation.provenance.extractor_version,
                 "source_fragment_hash": observation.provenance.source_fragment_hash,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        + "\n"
-        for observation in observations
+                "date": pd.Timestamp(observation.provenance.observed_at).normalize(),
+            }
+            for observation in observations
+        ]
+    )
+    prior = pd.read_parquet(audit_path) if audit_path.exists() else rows.iloc[0:0]
+    out = pd.concat([prior, rows], ignore_index=True).drop_duplicates(
+        subset=[
+            "instrument_key",
+            "observed_at",
+            "source_url",
+            "extractor_version",
+            "source_fragment_hash",
+        ],
+        keep="first",
     )
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = audit_path.with_suffix(f"{audit_path.suffix}.tmp")
-    temporary_path.write_text(prior + rows)
+    out.to_parquet(temporary_path, compression="zstd", index=False)
     temporary_path.replace(audit_path)
 
 

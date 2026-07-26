@@ -156,9 +156,9 @@ def test_read_seed_frame_missing_file_is_empty(tmp_path, monkeypatch):
     assert builders._read_seed_frame(date(2026, 7, 14)).empty
 
 
-def test_build_from_seed_ignores_ttl_and_rebuilds_on_seed_change(tmp_path, monkeypatch):
-    # Regression: a synced, fresh-dated prior parquet must NOT block a refreshed
-    # seed. The weekly TTL only guards the network fetch, never the local seed.
+def test_build_from_seed_bootstraps_once_then_registry_is_authoritative(tmp_path, monkeypatch):
+    # The seed is a one-time migration bridge. New active ISINs must arrive via
+    # the reconciled NSE registry, never by silently trusting a changed seed.
     seed = tmp_path / "sector_industry_seed.csv"
     seed.write_bytes(_good_seed())
     monkeypatch.setattr(config, "SECTOR_SEED_PATH", seed)
@@ -167,13 +167,13 @@ def test_build_from_seed_ignores_ttl_and_rebuilds_on_seed_change(tmp_path, monke
     r1 = builders.build_sector_industry(spec, date(2026, 7, 14), min_rows=1)
     assert r1.status == "success" and r1.symbol_count == 5
 
-    # Seed grows by one; SAME target date (well within any TTL window).
+    # Seed grows by one, but the durable registry remains authoritative.
     seed.write_bytes(_seed(*_GOOD_ROWS, "INE999Z01019,NEWCO,Chemicals,Commodity Chemicals,X"))
     r2 = builders.build_sector_industry(spec, date(2026, 7, 14), min_rows=1)
-    assert r2.status == "success", "must rebuild despite a fresh-dated prior parquet"
-    assert r2.symbol_count == 6
+    assert r2.status == "skipped_idempotent"
+    assert r2.symbol_count == 5
 
-    # Unchanged seed on a later date -> content-guard skips (no daily churn).
+    # Unchanged seed on a later date remains a no-op.
     r3 = builders.build_sector_industry(spec, date(2026, 7, 15), min_rows=1)
     assert r3.status == "skipped_idempotent"
 
