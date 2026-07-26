@@ -208,6 +208,8 @@ def cmd_classification_collect(
     """Run one persisted classification collection batch and guarded build."""
     if max_batches < 1:
         raise ValueError("max_batches must be positive")
+    if mode == "baseline" and max_batches != 1:
+        raise ValueError("baseline mode permits exactly one batch per dispatch")
     if mode == "daily" and (
         not registry_path.exists() or registry_needs_baseline_migration(registry_path)
     ):

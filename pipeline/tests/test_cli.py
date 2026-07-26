@@ -143,6 +143,21 @@ def test_daily_classification_collection_requires_an_initialized_baseline(tmp_pa
         )
 
 
+def test_manual_baseline_rejects_multiple_batches_in_one_dispatch(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="exactly one batch"):
+        cli.cmd_classification_collect(
+            mode="baseline",
+            snapshot_csv=b"SYMBOL,SERIES,ISIN NUMBER\n",
+            collector=_ClassificationCollector(),
+            registry_path=tmp_path / "classification_registry_all.parquet",
+            target=date(2026, 7, 26),
+            batch_size=1,
+            max_batches=2,
+        )
+
+
 def test_quarterly_collection_advances_across_bounded_batches(tmp_path):
     collector = _ClassificationCollector()
     report = cli.cmd_classification_collect(

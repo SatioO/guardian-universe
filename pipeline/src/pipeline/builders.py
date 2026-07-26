@@ -421,6 +421,7 @@ def _active_registry_or_bootstrap(
 ) -> tuple[
     dict[str, ClassificationRegistryRecord],
     dict[str, classification_publication.Provenance],
+    int,
 ]:
     """Use persisted active state, or bootstrap it once from the legacy seed.
 
@@ -437,7 +438,10 @@ def _active_registry_or_bootstrap(
             for instrument_key, entry in persisted.items()
             if instrument_key in records and entry.last_provenance is not None
         }
-        return records, provenance
+        expected_active_count = sum(
+            entry.status is not RegistryStatus.INACTIVE for entry in persisted.values()
+        )
+        return records, provenance, expected_active_count
     seed_provenance = _seed_provenance(seed_records, target)
     bootstrap = {
         instrument_key: RegistryEntry(
@@ -450,7 +454,7 @@ def _active_registry_or_bootstrap(
         for instrument_key, record in seed_records.items()
     }
     write_registry(state_path, bootstrap, updated_on=target)
-    return seed_records, seed_provenance
+    return seed_records, seed_provenance, len(seed_records)
 
 
 def _sector_frame_from_registry(
@@ -560,17 +564,32 @@ def build_sector_industry(
     # changes without churning the release every day when it doesn't. The legacy
     # fetch path keeps its original weekly-TTL write behavior.
     seed_registry = _classification_registry(df)
-    current_registry, provenance = _active_registry_or_bootstrap(spec, seed_registry, target)
+    current_registry, provenance, expected_active_count = _active_registry_or_bootstrap(
+        spec, seed_registry, target
+    )
     if not current_registry:
         return _sector_fail_closed(
             target, out_path, prior_rows, "active registry has no classified records"
         )
     out = _sector_frame_from_registry(current_registry, target)
     previous_registry = _prior_classification_registry(out_path)
+    # The previous legacy artifact includes non-EQ/BE securities. Retain those
+    # untouched compatibility rows while replacing the active EQ/BE subset from
+    # the authoritative registry. Coverage below is measured only against the
+    # active NSE snapshot, never against this historical wider universe.
+    publish_registry = {
+        instrument_key: record
+        for instrument_key, record in previous_registry.items()
+        if instrument_key not in current_registry
+    }
+    publish_registry.update(current_registry)
+    out = _sector_frame_from_registry(publish_registry, target)
     publication = classification_publication.decide_publication(
-        current_registry,
+        publish_registry,
         previous_registry,
         provenance,
+        observed_active_count=len(current_registry),
+        expected_active_count=expected_active_count,
     )
     if not publication.publish:
         status = "skipped_idempotent" if publication.reason == "fingerprint unchanged" else "failed"
@@ -582,11 +601,11 @@ def build_sector_industry(
             message=publication.reason,
         )
 
+    _write_atomic(out, out_path)
     classification_publication.append_observations(
         spec.base_dir / "classification_observations_all.parquet",
         publication.observations,
     )
-    _write_atomic(out, out_path)
     return RunStatus("success", target, symbol_count=len(out), source="nse-sector")
 
 

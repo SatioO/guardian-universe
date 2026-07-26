@@ -43,6 +43,9 @@ def test_baseline_stops_requests_and_persists_pending_after_deferral(tmp_path):
     assert collector.calls == ["FIRST", "BLOCKED"]
     assert result.deferred_reason == "rate limit"
     assert result.result.records["INE000A00001"].last_provenance is not None
+    audit = pd.read_parquet(tmp_path / "classification_observations_all.parquet")
+    assert audit["instrument_key"].tolist() == ["INE000A00001"]
+    assert audit["source_url"].tolist() == ["https://source"]
     later = result.result.records["INE000A00003"]
     assert later.last_known_good is None
     assert later.retry_attempts == 0
@@ -99,3 +102,17 @@ def test_manual_baseline_explicitly_migrates_legacy_unattempted_backlog(tmp_path
     )
 
     assert load_registry(registry_path)["INE000A00002"].baseline_pending is True
+
+
+def test_first_quarterly_audit_marks_any_unselected_symbols_as_baseline_backlog(tmp_path):
+    result = run_approved_baseline(
+        b"SYMBOL,SERIES,ISIN NUMBER\nFIRST,EQ,INE000A00001\nLATER,EQ,INE000A00002\n",
+        tmp_path / "classification_registry_all.parquet",
+        _Collector(),
+        today=date(2026, 7, 26),
+        batch_size=1,
+        full_audit=True,
+    )
+
+    assert result.result.records["INE000A00001"].last_audit_on == date(2026, 7, 26)
+    assert result.result.records["INE000A00002"].baseline_pending is True

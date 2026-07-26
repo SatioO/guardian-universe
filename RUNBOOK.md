@@ -1338,3 +1338,21 @@ history on EVERY producer run (the daily run too) — they carry no state and
 can never go stale. Guard semantics: growth is NULL when the base period is
 missing or ≤ 0 (loss→profit is NULL, never +∞); profit→loss publishes as a
 decline below -100%.
+
+## NSE classification registry
+
+`.github/workflows/sector-refresh.yml` now maintains the Screener-backed
+four-tier Classification Registry. The first production run must be dispatched
+as `mode=baseline` and is intentionally limited to one sequential batch of at
+most 25 active NSE EQ/BE symbols. Re-dispatch that same mode to advance the
+backlog; do not use the daily mode until the first baseline state has been
+published.
+
+The scheduled daily run only handles newly active symbols, renames,
+reactivations, and due retries. The quarterly run performs up to 100 paced
+25-symbol batches and reports `audit_complete` in its persisted release status
+asset. A `false` value, a collector deferral, or an unexpected sector-artifact
+failure opens/appends the standard `pipeline-failure` issue; re-dispatch the
+quarterly mode to resume. Scanner sector data is published only after the
+active-universe coverage and taxonomy gates pass; registry state and raw
+Screener provenance are still retained on every successful collection.

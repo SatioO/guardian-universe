@@ -4,6 +4,7 @@ Invariant delivered to clients: ANY manifest readable from the release
 references only complete, sha-verifiable, still-present assets. Data assets
 are immutable (content-addressed, never clobbered); `manifest.json` is the
 single mutable pointer and is uploaded strictly last."""
+
 from __future__ import annotations
 
 import json
@@ -28,7 +29,12 @@ if TYPE_CHECKING:
 # state (uploaded by fundamentals-daily.yml AFTER a successful publish so
 # state can never claim work the published parquet doesn't have).
 PROTECTED_ASSETS = frozenset(
-    {"manifest.json", "last_run_status.json", "fundamentals_state.json"}
+    {
+        "manifest.json",
+        "last_run_status.json",
+        "classification_collection_status.json",
+        "fundamentals_state.json",
+    }
 )
 GC_GRACE = timedelta(days=7)
 
@@ -161,9 +167,7 @@ def _verify(client: ReleaseClient, new_manifest: dict[str, Any], work: Path) -> 
             "post-publish verification failed: live manifest is not the one just published"
         )
     files = [
-        e
-        for ds in new_manifest["datasets"]
-        for e in [*dataset_files(ds), *ds.get("deltas", [])]
+        e for ds in new_manifest["datasets"] for e in [*dataset_files(ds), *ds.get("deltas", [])]
     ]
     smallest = min(files, key=lambda e: int(e["bytes"]))
     client.download([smallest["asset"]], work)
@@ -198,8 +202,10 @@ def _gc(client: ReleaseClient, new_manifest: dict[str, Any], now: datetime) -> N
                 # Malformed created_at: treat as "too young to GC" rather
                 # than let a bad timestamp fail an otherwise-successful,
                 # already-flipped publish.
-                print(f"gc: skipping {a.name} (unparseable created_at {a.created_at!r})",
-                      file=sys.stderr)
+                print(
+                    f"gc: skipping {a.name} (unparseable created_at {a.created_at!r})",
+                    file=sys.stderr,
+                )
                 continue
             if now - created < GC_GRACE:
                 continue
@@ -229,7 +235,9 @@ def publish_dataset(
         raise UnexpectedFailure("refusing to publish: no data files (empty store)")
 
     new_manifest = build_manifest(
-        specs, latest_trading_date=latest_trading_date(primary), generated_at=generated_at,
+        specs,
+        latest_trading_date=latest_trading_date(primary),
+        generated_at=generated_at,
     )
 
     if not client.exists():
@@ -274,14 +282,18 @@ def publish_dataset(
     # Quarantine extras: diagnostic-only, per spec, current latest_trading_date
     # day only. Not referenced by the manifest, so they self-GC after grace.
     for spec in specs:
-        qfile = (meta_dir / "quarantine"
-                 / f"{spec.file_prefix}_{new_manifest['latest_trading_date']}.parquet")
+        qfile = (
+            meta_dir
+            / "quarantine"
+            / f"{spec.file_prefix}_{new_manifest['latest_trading_date']}.parquet"
+        )
         if qfile.exists():
             client.upload(qfile, clobber=True)
 
-    status_path = meta_dir / "last_run_status.json"
-    if status_path.exists():
-        client.upload(status_path, clobber=True)
+    for status_name in ("last_run_status.json", "classification_collection_status.json"):
+        status_path = meta_dir / status_name
+        if status_path.exists():
+            client.upload(status_path, clobber=True)
 
     manifest_path = meta_dir / "manifest.json"
     write_json(new_manifest, manifest_path)

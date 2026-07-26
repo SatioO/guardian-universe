@@ -6,6 +6,10 @@ from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
+from pipeline.sources.classification_publication import (
+    PublishedClassificationObservation,
+    append_observations,
+)
 from pipeline.sources.nse_universe import (
     IncrementalCollectionResult,
     RegistryStatus,
@@ -15,6 +19,7 @@ from pipeline.sources.nse_universe import (
     write_registry,
 )
 from pipeline.sources.screener_collector import (
+    CollectedClassification,
     CollectionDeferred,
     ScreenerClassificationCollector,
 )
@@ -45,8 +50,10 @@ def run_approved_baseline(
     if batch_size < 1 or batch_size > 25:
         raise ValueError("baseline batch_size must be between 1 and 25")
     deferred_reason: str | None = None
+    observations: list[PublishedClassificationObservation] = []
 
     records = load_registry(registry_path)
+    initial_baseline = not records
     if manual_batch:
         # This is the sole, operator-approved migration path for a v1
         # registry. A daily run never guesses whether an untouched pending row
@@ -70,10 +77,24 @@ def run_approved_baseline(
         if deferred_reason is not None:
             return None
         try:
-            return collector.collect(symbol)
+            collected = collector.collect(symbol)
         except CollectionDeferred as error:
             deferred_reason = str(error)
             return error
+        if isinstance(collected, CollectedClassification):
+            observation = collected.observation
+            observations.append(
+                PublishedClassificationObservation(
+                    instrument_key="",
+                    symbol=symbol,
+                    macro_sector=observation.macro_sector,
+                    sector=observation.sector,
+                    industry=observation.industry,
+                    basic_industry=observation.basic_industry,
+                    provenance=collected.provenance,
+                )
+            )
+        return collected
 
     result = run_incremental_collection(
         records,
@@ -83,8 +104,26 @@ def run_approved_baseline(
         candidate_limit=batch_size,
         force_pending=manual_batch,
         force_all_active=full_audit,
-        baseline_batch=manual_batch,
+        baseline_batch=manual_batch or initial_baseline,
     )
     if result.valid_snapshot:
         write_registry(registry_path, result.records, updated_on=today)
+        by_symbol = {
+            entry.symbol: instrument_key for instrument_key, entry in result.records.items()
+        }
+        append_observations(
+            registry_path.parent / "classification_observations_all.parquet",
+            tuple(
+                PublishedClassificationObservation(
+                    instrument_key=by_symbol[observation.symbol],
+                    symbol=observation.symbol,
+                    macro_sector=observation.macro_sector,
+                    sector=observation.sector,
+                    industry=observation.industry,
+                    basic_industry=observation.basic_industry,
+                    provenance=observation.provenance,
+                )
+                for observation in observations
+            ),
+        )
     return BaselineRun(result, deferred_reason)

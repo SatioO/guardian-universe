@@ -43,6 +43,7 @@ class RegistryEntry:
     last_provenance: Provenance | None = None
     baseline_pending: bool = False
     last_audit_on: date | None = None
+    last_audit_attempt_on: date | None = None
     consecutive_absences: int = 0
     retry_on: date | None = None
     retry_attempts: int = 0
@@ -111,6 +112,7 @@ _REGISTRY_COLUMNS = [
     "source_fragment_hash",
     "baseline_pending",
     "last_audit_on",
+    "last_audit_attempt_on",
     "consecutive_absences",
     "retry_on",
     "retry_attempts",
@@ -158,6 +160,9 @@ def write_registry(path: Path, records: Mapping[str, RegistryEntry], *, updated_
                 "source_fragment_hash": provenance.source_fragment_hash if provenance else None,
                 "baseline_pending": entry.baseline_pending,
                 "last_audit_on": entry.last_audit_on.isoformat() if entry.last_audit_on else None,
+                "last_audit_attempt_on": (
+                    entry.last_audit_attempt_on.isoformat() if entry.last_audit_attempt_on else None
+                ),
                 "consecutive_absences": entry.consecutive_absences,
                 "retry_on": entry.retry_on.isoformat() if entry.retry_on else None,
                 "retry_attempts": entry.retry_attempts,
@@ -214,6 +219,11 @@ def load_registry(path: Path) -> dict[str, RegistryEntry]:
             if pd.isna(row.last_audit_on)
             else pd.Timestamp(cast(Any, row.last_audit_on)).date()
         )
+        last_audit_attempt_on = (
+            None
+            if pd.isna(row.last_audit_attempt_on)
+            else pd.Timestamp(cast(Any, row.last_audit_attempt_on)).date()
+        )
         provenance = (
             None
             if pd.isna(row.observed_at)
@@ -233,6 +243,7 @@ def load_registry(path: Path) -> dict[str, RegistryEntry]:
             last_provenance=provenance,
             baseline_pending=bool(row.baseline_pending),
             last_audit_on=last_audit_on,
+            last_audit_attempt_on=last_audit_attempt_on,
             consecutive_absences=int(cast(Any, row.consecutive_absences)),
             retry_on=retry_on,
             retry_attempts=int(cast(Any, row.retry_attempts)),
@@ -314,7 +325,8 @@ def run_incremental_collection(
                 consecutive_absences=0,
             )
             due_audit = force_all_active and (
-                entry.last_audit_on is None or entry.last_audit_on < _quarter_start(today)
+                entry.last_audit_attempt_on is None
+                or entry.last_audit_attempt_on < _quarter_start(today)
             )
             if reactivated or due_audit or renamed or due_retry:
                 candidates.append(instrument_key)
@@ -361,7 +373,16 @@ def run_incremental_collection(
                 last_known_good=last_known_good,
                 last_provenance=provenance,
                 baseline_pending=False,
-                last_audit_on=today if force_all_active else entry.last_audit_on,
+                last_audit_on=(
+                    today
+                    if force_all_active
+                    or (
+                        entry.last_audit_attempt_on is not None
+                        and entry.last_audit_attempt_on >= _quarter_start(today)
+                    )
+                    else entry.last_audit_on
+                ),
+                last_audit_attempt_on=(today if force_all_active else entry.last_audit_attempt_on),
                 retry_on=None,
                 retry_attempts=0,
             )
@@ -372,7 +393,7 @@ def run_incremental_collection(
             status=RegistryStatus.PENDING,
             last_known_good=last_known_good,
             baseline_pending=False,
-            last_audit_on=today if force_all_active else entry.last_audit_on,
+            last_audit_attempt_on=today if force_all_active else entry.last_audit_attempt_on,
             retry_attempts=attempts,
             retry_on=_retry_on(today, attempts),
             deferred_to_full_audit=attempts > len(_RETRY_DELAYS),

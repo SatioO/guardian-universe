@@ -1,4 +1,5 @@
 """Fail-closed publication decisions for active Classification Registry rows."""
+
 from __future__ import annotations
 
 import hashlib
@@ -50,6 +51,9 @@ def decide_publication(
     current: Mapping[str, ClassificationRegistryRecord],
     previous: Mapping[str, ClassificationRegistryRecord],
     provenance: Mapping[str, Provenance],
+    *,
+    observed_active_count: int | None = None,
+    expected_active_count: int | None = None,
 ) -> PublicationDecision:
     """Return whether a new active classification artifact may be published."""
     fingerprint = classification_fingerprint(current)
@@ -59,6 +63,12 @@ def decide_publication(
         return PublicationDecision(
             False, "empty active registry rejected publication", fingerprint, ()
         )
+    if (
+        observed_active_count is not None
+        and expected_active_count is not None
+        and observed_active_count < expected_active_count * _MIN_COVERAGE_RATIO
+    ):
+        return PublicationDecision(False, "coverage guard rejected publication", fingerprint, ())
     if previous and len(current) < len(previous) * _MIN_COVERAGE_RATIO:
         return PublicationDecision(False, "coverage guard rejected publication", fingerprint, ())
 
@@ -79,8 +89,7 @@ def decide_publication(
     )
     if (
         previous
-        and _sector_diversity(current)
-        < _sector_diversity(previous) * _MIN_SECTOR_DIVERSITY_RATIO
+        and _sector_diversity(current) < _sector_diversity(previous) * _MIN_SECTOR_DIVERSITY_RATIO
     ):
         return PublicationDecision(
             False, "sector-diversity guard rejected publication", fingerprint, ()
@@ -118,12 +127,13 @@ def decide_publication(
 def append_observations(
     audit_path: Path, observations: tuple[PublishedClassificationObservation, ...]
 ) -> None:
+    """Atomically append immutable observations to the Parquet audit dataset.
 
-    """Atomically append approved observations to the Parquet audit dataset.
-
-    Call this only after ``decide_publication`` approves the matching artifact.
     Rewriting to a sibling temporary file prevents a half-written ledger if the
-    process is interrupted while recording the new batch.
+    process is interrupted while recording the new batch. Collection writes its
+    real Screener observations here after registry persistence; publication may
+    append the subset that changed the scanner artifact, and deduplication
+    makes that repeat harmless.
     """
     if not observations:
         return

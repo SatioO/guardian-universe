@@ -271,3 +271,26 @@ def test_daily_collection_recollects_a_reactivated_isin():
 
     assert calls == ["RETURNED"]
     assert result.records["INE111A01011"].status is RegistryStatus.CLASSIFIED
+
+
+def test_failed_quarterly_request_does_not_count_as_a_completed_audit():
+    snapshot = [ActiveNseEquity("INE111A01011", "FIRST")]
+    failed = run_incremental_collection(
+        {"INE111A01011": RegistryEntry.classified("INE111A01011", "FIRST", _observation())},
+        snapshot,
+        today=date(2026, 7, 26),
+        collect=lambda _: None,
+        force_all_active=True,
+    )
+    entry = failed.records["INE111A01011"]
+    resumed = run_incremental_collection(
+        failed.records,
+        snapshot,
+        today=date(2026, 7, 26),
+        collect=lambda _: _observation(),
+        force_all_active=True,
+    )
+
+    assert entry.last_audit_attempt_on == date(2026, 7, 26)
+    assert entry.last_audit_on is None
+    assert resumed.candidates == ()

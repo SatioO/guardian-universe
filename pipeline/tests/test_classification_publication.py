@@ -95,6 +95,19 @@ def test_quality_gate_retains_prior_when_coverage_or_taxonomy_changes_are_suspic
     assert "coverage" in decision.reason
 
 
+def test_quality_gate_rejects_partial_first_publication_against_active_universe():
+    decision = decide_publication(
+        {"INE002A01018": _record()},
+        {},
+        {"INE002A01018": _provenance()},
+        observed_active_count=1,
+        expected_active_count=2,
+    )
+
+    assert decision.publish is False
+    assert "coverage" in decision.reason
+
+
 def test_suspicious_taxonomy_or_diversity_changes_are_rejected():
     previous = _registry()
     changed = {
