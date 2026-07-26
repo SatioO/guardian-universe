@@ -15,7 +15,7 @@ import pandas as pd
 from pipeline import builders, datasets, manifest
 from pipeline.daily_update import RunStatus
 from pipeline.sources import nse_sector
-from pipeline.sources.nse_universe import load_registry, write_registry
+from pipeline.sources.nse_universe import RegistryStatus, load_registry, write_registry
 
 _HEADER = "Company Name,Industry,Symbol,Series,ISIN Code"
 
@@ -162,6 +162,121 @@ def test_build_writes_parquet_with_date_and_schema(tmp_path: Path):
         "INE002A01018", "INE040A01034", "INE081A01020",
         "INE585B01010", "INE009A01021",
     }
+
+
+def test_legacy_schema_cutover_retains_compatibility_rows_and_enriches_active_rows(
+    tmp_path: Path,
+):
+    """A v1 artifact must migrate without dropping its non-active rows."""
+    spec = _sector_spec(tmp_path / "sector")
+    source = _good_frame()
+    extra = pd.concat([source.iloc[[0]].copy() for _ in range(6)], ignore_index=True)
+    extra["instrument_key"] = [f"INE000000{i:02d}A" for i in range(6)]
+    extra["symbol"] = [f"EXTRA{i}" for i in range(6)]
+    source = pd.concat([source, extra], ignore_index=True)
+    builders.build_sector_industry(
+        spec, date(2026, 7, 11), fetch_frame=lambda _t: source, min_rows=1,
+    )
+
+    state_path = spec.base_dir / "classification_registry_all.parquet"
+    records = load_registry(state_path)
+    active_keys = set(sorted(records)[:3])
+    replacement_key = sorted(active_keys)[0]
+    compatibility_key = sorted(set(records) - active_keys)[0]
+    migrated = {}
+    for instrument_key, entry in records.items():
+        status = (
+            RegistryStatus.CLASSIFIED
+            if instrument_key in active_keys
+            else RegistryStatus.INACTIVE
+        )
+        if instrument_key not in active_keys or entry.last_known_good is None:
+            migrated[instrument_key] = dataclasses.replace(entry, status=status)
+            continue
+        taxonomy = {"macro_sector": "Energy"}
+        if instrument_key == replacement_key:
+            taxonomy.update(
+                sector="Screener Sector",
+                industry="Screener Industry",
+                basic_industry="Screener Basic Industry",
+            )
+        migrated[instrument_key] = dataclasses.replace(
+            entry,
+            status=status,
+            last_known_good=dataclasses.replace(entry.last_known_good, **taxonomy),
+        )
+    write_registry(state_path, migrated, updated_on=date(2026, 7, 19))
+
+    out_path = spec.base_dir / "sector_industry_all.parquet"
+    legacy = pd.read_parquet(out_path).drop(
+        columns=["macro_sector", "cyclicality_rule_version"]
+    )
+    taxonomy_columns = ["sector", "industry", "basic_industry"]
+    legacy.loc[legacy["instrument_key"] == replacement_key, taxonomy_columns] = [
+        "Legacy Sector",
+        "Legacy Industry",
+        "Legacy Basic Industry",
+    ]
+    legacy.loc[legacy["instrument_key"] == compatibility_key, taxonomy_columns] = [
+        "Compatibility Sector",
+        "Compatibility Industry",
+        "Compatibility Basic Industry",
+    ]
+    legacy.to_parquet(out_path, compression="zstd", index=False)
+
+    result = builders.build_sector_industry(
+        spec, date(2026, 7, 19), fetch_frame=lambda _t: source, min_rows=1,
+    )
+
+    assert result.status == "success"
+    out = pd.read_parquet(out_path).set_index("instrument_key")
+    assert len(out) == 11
+    assert set(out.index) == set(records)
+    assert out.loc[replacement_key, "macro_sector"] == "Energy"
+    assert out.loc[replacement_key, "sector"] == "Screener Sector"
+    assert out.loc[replacement_key, "industry"] == "Screener Industry"
+    assert out.loc[replacement_key, "basic_industry"] == "Screener Basic Industry"
+    assert out.loc[compatibility_key, "sector"] == "Compatibility Sector"
+    assert out.loc[compatibility_key, "industry"] == "Compatibility Industry"
+    assert out.loc[compatibility_key, "basic_industry"] == "Compatibility Basic Industry"
+
+
+def test_unrecognized_prior_schema_is_retained_fail_closed(tmp_path: Path):
+    spec = _sector_spec(tmp_path / "sector")
+    builders.build_sector_industry(
+        spec, date(2026, 7, 11), fetch_frame=lambda _t: _good_frame(), min_rows=1,
+    )
+    out_path = spec.base_dir / "sector_industry_all.parquet"
+    malformed = pd.read_parquet(out_path).drop(columns=["industry"])
+    malformed.to_parquet(out_path, compression="zstd", index=False)
+    prior_bytes = out_path.read_bytes()
+
+    result = builders.build_sector_industry(
+        spec, date(2026, 7, 19), fetch_frame=lambda _t: _good_frame(), min_rows=1,
+    )
+
+    assert result.status == "skipped_idempotent"
+    assert "unrecognized schema" in result.message
+    assert out_path.read_bytes() == prior_bytes
+
+
+def test_prior_schema_missing_date_is_rejected_fail_closed(tmp_path: Path):
+    spec = _sector_spec(tmp_path / "sector")
+    builders.build_sector_industry(
+        spec, date(2026, 7, 11), fetch_frame=lambda _t: _good_frame(), min_rows=1,
+    )
+    out_path = spec.base_dir / "sector_industry_all.parquet"
+    missing_date = pd.read_parquet(out_path).drop(columns=["date"])
+    missing_date.to_parquet(out_path, compression="zstd", index=False)
+    prior_bytes = out_path.read_bytes()
+
+    result = builders.build_sector_industry(
+        spec, date(2026, 7, 19), fetch_frame=lambda _t: _good_frame(), min_rows=1,
+    )
+
+    assert result.status == "failed"
+    assert "unrecognized schema" in result.message
+    assert out_path.read_bytes() == prior_bytes
 
 
 def test_build_ttl_skips_refetch_within_window(tmp_path: Path):

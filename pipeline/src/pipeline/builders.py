@@ -31,6 +31,7 @@ tmp dirs via the registered `BUILDERS` entries must monkeypatch
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -60,6 +61,26 @@ BUILDERS: dict[str, Callable[[DatasetSpec, date], RunStatus]] = {}
 _ACTIVE_WINDOW = 10
 
 _REFERENCE_COLUMNS = ["date", "instrument_key", "isin", "symbol", "series"]
+
+_LEGACY_V1_SECTOR_COLUMNS = frozenset(
+    {
+        "instrument_key",
+        "symbol",
+        "sector",
+        "industry",
+        "basic_industry",
+        "is_cyclical",
+        "date",
+    }
+)
+_CURRENT_V2_SECTOR_COLUMNS = frozenset([*nse_sector.SECTOR_COLUMNS, "date"])
+
+
+@dataclass(frozen=True)
+class _PriorClassificationArtifact:
+    records: dict[str, ClassificationRegistryRecord]
+    legacy_missing_macro_sector: bool
+    error: str | None = None
 
 
 def _read_all_years(source_spec: DatasetSpec) -> pd.DataFrame:
@@ -404,14 +425,29 @@ def _seed_provenance(
 
 def _prior_classification_registry(
     out_path: Path,
-) -> dict[str, ClassificationRegistryRecord]:
+) -> _PriorClassificationArtifact:
     if not out_path.exists():
-        return {}
+        return _PriorClassificationArtifact({}, False)
     try:
-        previous = pd.read_parquet(out_path, columns=nse_sector.SECTOR_COLUMNS)
-    except Exception:  # noqa: BLE001 - the write path will replace unreadable prior data
-        return {}
-    return _classification_registry(previous)
+        previous = pd.read_parquet(out_path)
+    except Exception as error:  # noqa: BLE001 - retain a prior artifact on unreadable input
+        return _PriorClassificationArtifact(
+            {}, False, f"could not read prior classification artifact: {error}"
+        )
+
+    columns = frozenset(previous.columns)
+    legacy_missing_macro_sector = columns == _LEGACY_V1_SECTOR_COLUMNS
+    if columns not in {_LEGACY_V1_SECTOR_COLUMNS, _CURRENT_V2_SECTOR_COLUMNS}:
+        return _PriorClassificationArtifact(
+            {}, False, "prior classification artifact has an unrecognized schema"
+        )
+
+    records = _classification_registry(previous.reindex(columns=nse_sector.SECTOR_COLUMNS))
+    if len(records) != len(previous):
+        return _PriorClassificationArtifact(
+            {}, False, "prior classification artifact has duplicate instrument keys"
+        )
+    return _PriorClassificationArtifact(records, legacy_missing_macro_sector)
 
 
 def _active_registry_or_bootstrap(
@@ -571,8 +607,10 @@ def build_sector_industry(
         return _sector_fail_closed(
             target, out_path, prior_rows, "active registry has no classified records"
         )
-    out = _sector_frame_from_registry(current_registry, target)
-    previous_registry = _prior_classification_registry(out_path)
+    previous_artifact = _prior_classification_registry(out_path)
+    if previous_artifact.error is not None:
+        return _sector_fail_closed(target, out_path, prior_rows, previous_artifact.error)
+    previous_registry = previous_artifact.records
     # The previous legacy artifact includes non-EQ/BE securities. Retain those
     # untouched compatibility rows while replacing the active EQ/BE subset from
     # the authoritative registry. Coverage below is measured only against the
@@ -583,6 +621,13 @@ def build_sector_industry(
         if instrument_key not in current_registry
     }
     publish_registry.update(current_registry)
+    if prior_rows is not None and len(publish_registry) < prior_rows:
+        return _sector_fail_closed(
+            target,
+            out_path,
+            prior_rows,
+            "classification cutover would shrink the prior compatibility artifact",
+        )
     out = _sector_frame_from_registry(publish_registry, target)
     publication = classification_publication.decide_publication(
         publish_registry,
@@ -590,6 +635,7 @@ def build_sector_industry(
         provenance,
         observed_active_count=len(current_registry),
         expected_active_count=expected_active_count,
+        legacy_missing_macro_sector=previous_artifact.legacy_missing_macro_sector,
     )
     if not publication.publish:
         status = "skipped_idempotent" if publication.reason == "fingerprint unchanged" else "failed"

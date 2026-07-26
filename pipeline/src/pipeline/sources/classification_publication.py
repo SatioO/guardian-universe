@@ -54,8 +54,15 @@ def decide_publication(
     *,
     observed_active_count: int | None = None,
     expected_active_count: int | None = None,
+    legacy_missing_macro_sector: bool = False,
 ) -> PublicationDecision:
-    """Return whether a new active classification artifact may be published."""
+    """Return whether a new active classification artifact may be published.
+
+    ``legacy_missing_macro_sector`` is reserved for the one-time migration of
+    the known v1 artifact, whose otherwise-compatible rows predate the
+    ``macro_sector`` field. It does not relax coverage, provenance, diversity,
+    or non-macro taxonomy-change checks.
+    """
     fingerprint = classification_fingerprint(current)
     if fingerprint == classification_fingerprint(previous):
         return PublicationDecision(False, "fingerprint unchanged", fingerprint, ())
@@ -83,8 +90,14 @@ def decide_publication(
         if (
             instrument_key in current
             and instrument_key in previous
-            and _taxonomy_fields(current[instrument_key])
-            != _taxonomy_fields(previous[instrument_key])
+            and _taxonomy_fields(
+                current[instrument_key],
+                include_macro_sector=not legacy_missing_macro_sector,
+            )
+            != _taxonomy_fields(
+                previous[instrument_key],
+                include_macro_sector=not legacy_missing_macro_sector,
+            )
         )
     )
     if (
@@ -192,11 +205,13 @@ def _sector_diversity(records: Mapping[str, ClassificationRegistryRecord]) -> in
     return len({record.sector for record in records.values()})
 
 
-def _taxonomy_fields(record: ClassificationRegistryRecord) -> tuple[str, str, str, str]:
+def _taxonomy_fields(
+    record: ClassificationRegistryRecord, *, include_macro_sector: bool = True
+) -> tuple[str, ...]:
     """The four tiers whose changes are a classification shift, not a rename."""
-    return (
-        record.macro_sector,
+    fields = (
         record.sector,
         record.industry,
         record.basic_industry,
     )
+    return (record.macro_sector, *fields) if include_macro_sector else fields

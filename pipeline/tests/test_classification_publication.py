@@ -121,6 +121,41 @@ def test_suspicious_taxonomy_or_diversity_changes_are_rejected():
     assert "sector-diversity" in decision.reason
 
 
+def test_legacy_macro_cutover_only_exempts_macro_backfill():
+    previous = {
+        instrument_key: dataclasses.replace(record, macro_sector="")
+        for instrument_key, record in _registry().items()
+    }
+    current = _registry()
+    provenance = {instrument_key: _provenance() for instrument_key in current}
+
+    normal = decide_publication(current, previous, provenance)
+    migrated = decide_publication(
+        current,
+        previous,
+        provenance,
+        legacy_missing_macro_sector=True,
+    )
+
+    assert normal.publish is False
+    assert "taxonomy-change" in normal.reason
+    assert migrated.publish is True
+
+    changed_industry = {
+        instrument_key: dataclasses.replace(record, industry="Changed")
+        for instrument_key, record in current.items()
+    }
+    rejected = decide_publication(
+        changed_industry,
+        previous,
+        provenance,
+        legacy_missing_macro_sector=True,
+    )
+
+    assert rejected.publish is False
+    assert "taxonomy-change" in rejected.reason
+
+
 def test_approved_observations_are_retained_as_a_parquet_audit_dataset(tmp_path):
     observation = decide_publication(
         {"INE002A01018": _record()}, {}, {"INE002A01018": _provenance()}
