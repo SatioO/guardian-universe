@@ -15,6 +15,7 @@ import pandas as pd
 from pipeline import builders, datasets, manifest
 from pipeline.daily_update import RunStatus
 from pipeline.sources import nse_sector
+from pipeline.sources.nse_universe import load_registry, write_registry
 
 _HEADER = "Company Name,Industry,Symbol,Series,ISIN Code"
 
@@ -59,9 +60,10 @@ def test_parse_schema_and_columns():
     assert len(df) == 5
     reliance = df[df["symbol"] == "RELIANCE"].iloc[0]
     assert reliance["instrument_key"] == "INE002A01018"  # ISIN is the join key
-    assert reliance["industry"] == "Oil Gas & Consumable Fuels"
-    # single-column source -> sector/basic_industry are honestly NULL
-    assert df["sector"].isna().all()
+    assert reliance["sector"] == "Oil Gas & Consumable Fuels"
+    # Legacy "Industry" values are sector-tier labels; finer tiers are NULL.
+    assert df["macro_sector"].isna().all()
+    assert df["industry"].isna().all()
     assert df["basic_industry"].isna().all()
     assert df["is_cyclical"].dtype == bool
 
@@ -114,8 +116,8 @@ def test_isin_keying_and_dedupe_keeps_first():
     ))
     assert len(df) == 2
     assert set(df["instrument_key"]) == {"INE002A01018", "INE009A01021"}
-    # first RELIANCE row won -> industry is Oil Gas, not the dup's Chemicals
-    assert df[df["instrument_key"] == "INE002A01018"].iloc[0]["industry"] \
+    # first RELIANCE row won -> sector is Oil Gas, not the dup's Chemicals
+    assert df[df["instrument_key"] == "INE002A01018"].iloc[0]["sector"] \
         == "Oil Gas & Consumable Fuels"
 
 
@@ -126,7 +128,7 @@ def test_parse_handles_quoted_comma_in_company_name():
         '"Acme, Incorporated Ltd.",Chemicals,ACME,EQ,INE111A01011',
     ))
     assert len(df) == 1
-    assert df.iloc[0]["industry"] == "Chemicals"
+    assert df.iloc[0]["sector"] == "Chemicals"
     assert df.iloc[0]["symbol"] == "ACME"
     assert df.iloc[0]["instrument_key"] == "INE111A01011"
 
@@ -152,6 +154,7 @@ def test_build_writes_parquet_with_date_and_schema(tmp_path: Path):
 
     out_path = tmp_path / "sector" / "sector_industry_all.parquet"
     assert out_path.exists()
+    assert (tmp_path / "sector" / "classification_registry_all.parquet").exists()
     out = pd.read_parquet(out_path)
     assert list(out.columns) == [*nse_sector.SECTOR_COLUMNS, "date"]
     assert (out["date"] == pd.Timestamp("2026-07-11")).all()  # REQUIRED for manifest
@@ -186,7 +189,59 @@ def test_build_ttl_skips_refetch_within_window(tmp_path: Path):
     r3 = builders.build_sector_industry(
         spec, date(2026, 7, 19), fetch_frame=counting_fetch, ttl_days=7, min_rows=1,
     )
-    assert r3.status == "success" and calls["n"] == 2
+    assert r3.status == "skipped_idempotent" and calls["n"] == 2
+    assert "fingerprint unchanged" in r3.message
+
+
+def test_build_records_approved_changes_once_in_the_audit_ledger(tmp_path: Path):
+    spec = _sector_spec(tmp_path / "sector")
+    first = builders.build_sector_industry(
+        spec, date(2026, 7, 11), fetch_frame=lambda _t: _good_frame(), min_rows=1,
+    )
+    audit_path = tmp_path / "sector" / "classification_observations_all.parquet"
+
+    assert first.status == "success"
+    first_audit = pd.read_parquet(audit_path)
+    assert len(first_audit) == 5
+    assert set(first_audit["extractor_version"]) == {"sector-seed-v1"}
+
+    unchanged = builders.build_sector_industry(
+        spec, date(2026, 7, 19), fetch_frame=lambda _t: _good_frame(),
+        ttl_days=7, min_rows=1,
+    )
+
+    assert unchanged.status == "skipped_idempotent"
+    assert pd.read_parquet(audit_path).equals(first_audit)
+
+
+def test_build_alerts_and_retains_prior_on_suspicious_taxonomy_shift(tmp_path: Path):
+    spec = _sector_spec(tmp_path / "sector")
+    builders.build_sector_industry(
+        spec, date(2026, 7, 11), fetch_frame=lambda _t: _good_frame(), min_rows=1,
+    )
+    out_path = tmp_path / "sector" / "sector_industry_all.parquet"
+    prior_bytes = out_path.read_bytes()
+    state_path = tmp_path / "sector" / "classification_registry_all.parquet"
+    persisted = load_registry(state_path)
+    shifted = {}
+    for instrument_key, entry in persisted.items():
+        assert entry.last_known_good is not None
+        shifted[instrument_key] = dataclasses.replace(
+            entry,
+            last_known_good=dataclasses.replace(
+                entry.last_known_good, sector="Energy"
+            ),
+        )
+    write_registry(state_path, shifted, updated_on=date(2026, 7, 19))
+
+    result = builders.build_sector_industry(
+        spec, date(2026, 7, 19), fetch_frame=lambda _t: _good_frame(),
+        ttl_days=7, min_rows=1,
+    )
+
+    assert result.status == "failed"
+    assert "sector-diversity" in result.message
+    assert out_path.read_bytes() == prior_bytes
 
 
 def test_build_fail_closed_keeps_prior_on_fetch_error(tmp_path: Path):
@@ -197,7 +252,7 @@ def test_build_fail_closed_keeps_prior_on_fetch_error(tmp_path: Path):
     out_path = tmp_path / "sector" / "sector_industry_all.parquet"
     good_bytes = out_path.read_bytes()
 
-    def boom(_t: date) -> bytes:
+    def boom(_t: date) -> pd.DataFrame:
         raise RuntimeError("network down")
 
     # 10 days later (past TTL) so it actually attempts a fetch, which fails.
@@ -261,8 +316,8 @@ def test_build_shrink_guard_holds_smaller_list(tmp_path: Path):
         fetch_frame=lambda _t: _frame(_GOOD_ROWS[0], _GOOD_ROWS[1]),
         ttl_days=7, min_rows=1,
     )
-    assert result.status == "skipped_idempotent"
-    assert "shrink-guard" in result.message
+    assert result.status == "failed"
+    assert "coverage guard" in result.message
     assert out_path.read_bytes() == good_bytes  # 5-row file preserved
 
 

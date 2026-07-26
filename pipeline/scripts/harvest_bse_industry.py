@@ -10,11 +10,11 @@ via a plain JSON endpoint that is NOT JS-gated. BSE and NSE share the taxonomy,
 so the data is equivalent to what NSE would give — just fetchable.
 
 Tier mapping (BSE field -> our seed column; name-to-name with NSE's tiers):
+    Sector      -> `macro_sector`   (NSE 'macro' tier)
     IndustryNew -> `sector`         (NSE 'sector' tier; drives is_cyclical)
     IGroup      -> `industry`       (NSE 'industry' tier)
     ISubGroup   -> `basic_industry` (NSE 'basicIndustry' tier)
-BSE `Sector` (e.g. "Energy") is NSE's coarsest 'macro' tier and is dropped, exactly
-as the NSE mapping drops macro. Keyed by ISIN (`instrument_key`).
+Keyed by ISIN (`instrument_key`).
 
 WHAT IT DOES
 ------------
@@ -88,7 +88,7 @@ def fetch_scrips(session: requests.Session) -> list[tuple[str, str, str]]:
 
 
 def fetch_tiers(session: requests.Session, code: str) -> dict[str, str] | None:
-    """Return {sector, industry, basic_industry} for one BSE scrip, or None.
+    """Return {macro_sector, sector, industry, basic_industry} for one BSE scrip, or None.
 
     Maps BSE IndustryNew/IGroup/ISubGroup -> sector/industry/basic_industry."""
     for attempt in range(_MAX_RETRIES):
@@ -98,6 +98,7 @@ def fetch_tiers(session: requests.Session, code: str) -> dict[str, str] | None:
                 h = resp.json()
                 if isinstance(h, dict):
                     return {
+                        "macro_sector": (h.get("Sector") or "").strip(),
                         "sector": (h.get("IndustryNew") or "").strip(),
                         "industry": (h.get("IGroup") or "").strip(),
                         "basic_industry": (h.get("ISubGroup") or "").strip(),
@@ -177,7 +178,7 @@ def run(args: argparse.Namespace) -> int:
                           "(systemic outage) — fail-closed")
                     return 1
             else:
-                writer.writerow([isin, symbol, tiers["sector"],
+                writer.writerow([isin, symbol, tiers["macro_sector"], tiers["sector"],
                                  tiers["industry"], tiers["basic_industry"]])
                 f.flush()
                 ok += 1

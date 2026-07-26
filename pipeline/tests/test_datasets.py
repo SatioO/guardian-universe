@@ -19,6 +19,7 @@ def test_equities_spec_fields():
     assert datasets.DATASETS["equities"] is s
     assert datasets.DATASET_ORDER == [
         "equities", "indices", "reference", "ca_flags", "sector_industry",
+        "classification_registry", "classification_observations",
         "fundamentals",
     ]
 
@@ -45,6 +46,11 @@ def test_indices_spec_fields():
     assert datasets.DATASETS["indices"] is s
 
 
+def test_sector_industry_schema_version_tracks_four_tier_contract():
+    s = datasets.SECTOR_INDUSTRY
+    assert s.manifest_name == "sector_industry" and s.schema_version == 2
+
+
 def test_by_manifest_name():
     assert datasets.by_manifest_name("ohlc") is datasets.EQUITIES
     assert datasets.by_manifest_name("indices") is datasets.INDICES
@@ -59,7 +65,8 @@ def test_manifest_names_are_unique():
 def test_all_specs_follows_dataset_order():
     assert datasets.all_specs() == [
         datasets.EQUITIES, datasets.INDICES, datasets.REFERENCE, datasets.CA_FLAGS,
-        datasets.SECTOR_INDUSTRY, datasets.FUNDAMENTALS,
+        datasets.SECTOR_INDUSTRY, datasets.CLASSIFICATION_REGISTRY,
+        datasets.CLASSIFICATION_OBSERVATIONS, datasets.FUNDAMENTALS,
     ]
 
 
@@ -70,7 +77,7 @@ def test_sector_industry_spec_fields():
     assert s.base_dir == config.SECTOR_DIR
     assert s.source_label == "nse-sector"
     assert s.manifest_name == "sector_industry"
-    assert s.schema_version == 1
+    assert s.schema_version == 2
     assert s.derived is True  # kept out of the OHLC fetch loop + continuity check
     assert datasets.DATASETS["sector_industry"] is s
     # fetched inside the builder, never via the run_daily Fetcher path
@@ -81,6 +88,17 @@ def test_sector_industry_spec_fields():
 def test_sector_industry_registered_in_builders():
     from pipeline import cli
     assert cli.builders.BUILDERS["sector_industry"] is cli.builders.build_sector_industry
+
+
+def test_classification_state_artifacts_are_external_publishable_datasets():
+    for spec in (
+        datasets.CLASSIFICATION_REGISTRY,
+        datasets.CLASSIFICATION_OBSERVATIONS,
+    ):
+        assert spec.base_dir == config.SECTOR_DIR
+        assert spec.derived is True
+        assert spec.external is True
+        assert datasets.DATASETS[spec.key] is spec
 
 
 def test_fundamentals_spec_fields():

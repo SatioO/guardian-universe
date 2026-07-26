@@ -241,7 +241,7 @@ def test_shape_adapter_bond_series_does_not_displace_equity():
     )
     isin_map = {("PFC", "EQ"): "INE134E01011", ("PFC", "N8"): "INE134E07463"}
     out = secfull_to_udiff_shape(raw, isin_map=isin_map)
-    by_series = dict(zip(out["SctySrs"], out["ISIN"]))
+    by_series = dict(zip(out["SctySrs"], out["ISIN"], strict=True))
     assert by_series["EQ"] == "INE134E01011"
     assert by_series["N8"] == "INE134E07463"  # its OWN ISIN, not the equity's
     canonical = normalize_equity_bhavcopy(out, source="nse-secfull")

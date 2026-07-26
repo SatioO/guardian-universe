@@ -50,12 +50,12 @@ class DatasetSpec:
     # normalizer/make_fetcher are never invoked by the CLI for these specs —
     # additive field, default False preserves all existing constructions.
     derived: bool = False
-    # External datasets are produced OUTSIDE this Python pipeline (e.g. the
-    # Rust fundamentals producer writing into base_dir before `publish` runs).
+    # External datasets have no standalone Phase-2 builder. They may be
+    # produced by another runtime (e.g. Rust fundamentals) or emitted as a
+    # companion artifact by another builder (e.g. classification audit state).
     # Always paired with derived=True (kept out of the fetch loop and the
     # continuity check), and additionally skipped by the daily Phase-2
-    # builders loop — there is no BUILDERS entry to run. sync/publish handle
-    # them exactly like any other dataset.
+    # builders loop. sync/publish handle them exactly like any other dataset.
     external: bool = False
 
 
@@ -173,13 +173,47 @@ SECTOR_INDUSTRY = DatasetSpec(
     normalizer=lambda df: df,  # identity: builders.build_sector_industry shapes rows itself
     make_fetcher=_no_fetcher,  # fetched inside the builder, not via the run_daily Fetcher path
     abs_rowcount_range=(0, 10**9),
-    manifest_name="sector_industry", schema_version=1,
+    # v2 adds macro_sector and cyclicality_rule_version to the published
+    # classification contract while retaining every v1 column.
+    manifest_name="sector_industry", schema_version=2,
     # `derived` here means "not run through the Phase-1 fetch loop / run_daily":
     # the CSV is fetched INSIDE the builder (build_sector_industry). This keeps
     # it out of the OHLC-shaped fetched path and out of the daily continuity
     # freshness check (it refreshes weekly, not per trading day), while still
     # running each daily `all` cycle via the Phase-2 BUILDERS loop.
     derived=True,
+)
+
+
+
+CLASSIFICATION_REGISTRY = DatasetSpec(
+    key="classification_registry",
+    file_prefix="classification_registry",
+    base_dir=config.SECTOR_DIR,
+    source_label="nse-classification-registry",
+    normalizer=lambda df: df,
+    make_fetcher=_no_fetcher,
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="classification_registry",
+    schema_version=1,
+    derived=True,
+    external=True,
+)
+
+
+
+CLASSIFICATION_OBSERVATIONS = DatasetSpec(
+    key="classification_observations",
+    file_prefix="classification_observations",
+    base_dir=config.SECTOR_DIR,
+    source_label="nse-classification-audit",
+    normalizer=lambda df: df,
+    make_fetcher=_no_fetcher,
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="classification_observations",
+    schema_version=1,
+    derived=True,
+    external=True,
 )
 
 FUNDAMENTALS = DatasetSpec(
@@ -204,10 +238,13 @@ FUNDAMENTALS = DatasetSpec(
 DATASETS: dict[str, DatasetSpec] = {
     "equities": EQUITIES, "indices": INDICES, "reference": REFERENCE,
     "ca_flags": CA_FLAGS, "sector_industry": SECTOR_INDUSTRY,
+    "classification_registry": CLASSIFICATION_REGISTRY,
+    "classification_observations": CLASSIFICATION_OBSERVATIONS,
     "fundamentals": FUNDAMENTALS,
 }
 DATASET_ORDER: list[str] = [
     "equities", "indices", "reference", "ca_flags", "sector_industry",
+    "classification_registry", "classification_observations",
     "fundamentals",
 ]
 
