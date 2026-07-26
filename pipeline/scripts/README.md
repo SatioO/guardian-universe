@@ -23,12 +23,12 @@ JS-gated.** So we harvest from BSE and key by **ISIN**, which is exchange-neutra
 ### Tier mapping (BSE field → our column; identical to NSE's tiers)
 | our column       | BSE field (`ComHeadernew`) | NSE tier      | example (RELIANCE)          |
 |------------------|----------------------------|---------------|-----------------------------|
+| `macro_sector`   | `Sector`                   | macro         | Energy                      |
 | `sector`         | `IndustryNew`              | sector        | Oil, Gas & Consumable Fuels |
 | `industry`       | `IGroup`                   | industry      | Petroleum Products          |
 | `basic_industry` | `ISubGroup`                | basicIndustry | Refineries & Marketing      |
 
-BSE `Sector` ("Energy") is NSE's coarsest `macro` tier and is dropped, exactly as
-the NSE mapping drops macro. `is_cyclical` is derived from `sector`
+BSE `Sector` ("Energy") is retained as `macro_sector`. `is_cyclical` is derived from `sector`
 (punctuation-tolerantly, so BSE's `"Oil, Gas & …"` matches the cyclical set).
 
 ### Run it

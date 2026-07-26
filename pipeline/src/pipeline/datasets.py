@@ -173,7 +173,9 @@ SECTOR_INDUSTRY = DatasetSpec(
     normalizer=lambda df: df,  # identity: builders.build_sector_industry shapes rows itself
     make_fetcher=_no_fetcher,  # fetched inside the builder, not via the run_daily Fetcher path
     abs_rowcount_range=(0, 10**9),
-    manifest_name="sector_industry", schema_version=1,
+    # v2 adds macro_sector and cyclicality_rule_version to the published
+    # classification contract while retaining every v1 column.
+    manifest_name="sector_industry", schema_version=2,
     # `derived` here means "not run through the Phase-1 fetch loop / run_daily":
     # the CSV is fetched INSIDE the builder (build_sector_industry). This keeps
     # it out of the OHLC-shaped fetched path and out of the daily continuity

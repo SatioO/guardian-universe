@@ -45,6 +45,11 @@ def test_indices_spec_fields():
     assert datasets.DATASETS["indices"] is s
 
 
+def test_sector_industry_schema_version_tracks_four_tier_contract():
+    s = datasets.SECTOR_INDUSTRY
+    assert s.manifest_name == "sector_industry" and s.schema_version == 2
+
+
 def test_by_manifest_name():
     assert datasets.by_manifest_name("ohlc") is datasets.EQUITIES
     assert datasets.by_manifest_name("indices") is datasets.INDICES
@@ -70,7 +75,7 @@ def test_sector_industry_spec_fields():
     assert s.base_dir == config.SECTOR_DIR
     assert s.source_label == "nse-sector"
     assert s.manifest_name == "sector_industry"
-    assert s.schema_version == 1
+    assert s.schema_version == 2
     assert s.derived is True  # kept out of the OHLC fetch loop + continuity check
     assert datasets.DATASETS["sector_industry"] is s
     # fetched inside the builder, never via the run_daily Fetcher path

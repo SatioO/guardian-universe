@@ -59,9 +59,10 @@ def test_parse_schema_and_columns():
     assert len(df) == 5
     reliance = df[df["symbol"] == "RELIANCE"].iloc[0]
     assert reliance["instrument_key"] == "INE002A01018"  # ISIN is the join key
-    assert reliance["industry"] == "Oil Gas & Consumable Fuels"
-    # single-column source -> sector/basic_industry are honestly NULL
-    assert df["sector"].isna().all()
+    assert reliance["sector"] == "Oil Gas & Consumable Fuels"
+    # Legacy "Industry" values are sector-tier labels; finer tiers are NULL.
+    assert df["macro_sector"].isna().all()
+    assert df["industry"].isna().all()
     assert df["basic_industry"].isna().all()
     assert df["is_cyclical"].dtype == bool
 
@@ -114,8 +115,8 @@ def test_isin_keying_and_dedupe_keeps_first():
     ))
     assert len(df) == 2
     assert set(df["instrument_key"]) == {"INE002A01018", "INE009A01021"}
-    # first RELIANCE row won -> industry is Oil Gas, not the dup's Chemicals
-    assert df[df["instrument_key"] == "INE002A01018"].iloc[0]["industry"] \
+    # first RELIANCE row won -> sector is Oil Gas, not the dup's Chemicals
+    assert df[df["instrument_key"] == "INE002A01018"].iloc[0]["sector"] \
         == "Oil Gas & Consumable Fuels"
 
 
@@ -126,7 +127,7 @@ def test_parse_handles_quoted_comma_in_company_name():
         '"Acme, Incorporated Ltd.",Chemicals,ACME,EQ,INE111A01011',
     ))
     assert len(df) == 1
-    assert df.iloc[0]["industry"] == "Chemicals"
+    assert df.iloc[0]["sector"] == "Chemicals"
     assert df.iloc[0]["symbol"] == "ACME"
     assert df.iloc[0]["instrument_key"] == "INE111A01011"
 

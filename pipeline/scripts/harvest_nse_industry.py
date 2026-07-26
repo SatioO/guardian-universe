@@ -23,10 +23,10 @@ WHAT IT DOES
 2. For each symbol, GETs quote-equity `industryInfo` behind a warm anti-bot
    session, extracting the four tiers.
 3. Writes rows to the seed CSV (SEED_HEADER), mapping tiers name-to-name:
+       macro_sector   <- NSE macro
        sector         <- NSE sector          (drives is_cyclical)
        industry       <- NSE industry
        basic_industry <- NSE basicIndustry
-   NSE's coarsest `macro` tier is dropped.
 4. Resumable: re-running skips symbols already in the output; failures are
    logged to a sidecar so you can retry just those.
 5. Prints a coverage + distinct-`sector` summary at the end, including which
@@ -356,10 +356,11 @@ def run(args: argparse.Namespace) -> int:
                 failed.append(symbol)
             else:
                 # Tier mapping (see nse_sector.parse_sector_seed): name-to-name.
-                #   sector col <- NSE sector ; industry col <- NSE industry ;
-                #   basic_industry col <- NSE basicIndustry. NSE macro dropped.
+                #   macro_sector <- NSE macro; sector <- NSE sector;
+                #   industry <- NSE industry; basic_industry <- NSE basicIndustry.
                 writerow_cols = [
-                    isin, symbol, info["sector"], info["industry"], info["basic_industry"],
+                    isin, symbol, info["macro"], info["sector"], info["industry"],
+                    info["basic_industry"],
                 ]
                 writer.writerow(writerow_cols)
                 f.flush()

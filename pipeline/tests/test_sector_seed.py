@@ -16,16 +16,20 @@ import pandas as pd
 from pipeline import builders, config, datasets
 from pipeline.sources import nse_sector
 
-# instrument_key(ISIN), symbol, sector, industry, basic_industry.
+# instrument_key(ISIN), symbol, macro_sector, sector, industry, basic_industry.
 # RELIANCE/TATASTEEL/MARUTI cyclical (by SECTOR tier); HDFCBANK/INFY not.
 _HEADER = ",".join(nse_sector.SEED_HEADER)
 _GOOD_ROWS = [
-    'INE002A01018,RELIANCE,"Oil, Gas & Consumable Fuels",Petroleum Products,Refineries & Marketing',
-    "INE040A01034,HDFCBANK,Financial Services,Banks,Private Sector Bank",
-    "INE081A01020,TATASTEEL,Metals & Mining,Ferrous Metals,Iron & Steel",
-    "INE585B01010,MARUTI,Automobile and Auto Components,Automobiles,Passenger Cars",
-    "INE009A01021,INFY,Information Technology,IT - Software,Computers - Software",
+    'INE002A01018,RELIANCE,Energy,"Oil, Gas & Consumable Fuels",'
+    "Petroleum Products,Refineries & Marketing",
+    "INE040A01034,HDFCBANK,Financial Services,Financial Services,Banks,Private Sector Bank",
+    "INE081A01020,TATASTEEL,Materials,Metals & Mining,Ferrous Metals,Iron & Steel",
+    "INE585B01010,MARUTI,Consumer Discretionary,"
+    "Automobile and Auto Components,Automobiles,Passenger Cars",
+    "INE009A01021,INFY,Information Technology,Information Technology,"
+    "IT - Software,Computers - Software",
 ]
+_LEGACY_HEADER = "instrument_key,symbol,sector,industry,basic_industry"
 
 
 def _seed(*rows: str) -> bytes:
@@ -34,6 +38,10 @@ def _seed(*rows: str) -> bytes:
 
 def _good_seed() -> bytes:
     return _seed(*_GOOD_ROWS)
+
+
+def _legacy_seed(*rows: str) -> bytes:
+    return ("\n".join([_LEGACY_HEADER, *rows]) + "\n").encode("utf-8")
 
 
 def _sector_spec(base_dir: Path) -> datasets.DatasetSpec:
@@ -48,12 +56,30 @@ def test_seed_schema_and_tier_mapping():
     assert len(df) == 5
     rel = df[df["symbol"] == "RELIANCE"].iloc[0]
     assert rel["instrument_key"] == "INE002A01018"
+    assert rel["macro_sector"] == "Energy"
     assert rel["sector"] == "Oil, Gas & Consumable Fuels"   # <- NSE sector
     assert rel["industry"] == "Petroleum Products"          # <- NSE industry
     assert rel["basic_industry"] == "Refineries & Marketing"  # <- NSE basicIndustry
     assert df["sector"].notna().all()
     assert df["basic_industry"].notna().all()
     assert df["is_cyclical"].dtype == bool
+
+
+def test_complete_registry_seed_retains_macro_sector_and_rule_version():
+    seed = (
+        b"instrument_key,symbol,macro_sector,sector,industry,basic_industry\n"
+        b'INE002A01018,RELIANCE,Energy,"Oil, Gas & Consumable Fuels",'
+        b"Petroleum Products,Refineries & Marketing\n"
+    )
+
+    df = nse_sector.parse_sector_seed(seed)
+
+    row = df.iloc[0]
+    assert row["macro_sector"] == "Energy"
+    assert row["sector"] == "Oil, Gas & Consumable Fuels"
+    assert row["industry"] == "Petroleum Products"
+    assert row["basic_industry"] == "Refineries & Marketing"
+    assert row["cyclicality_rule_version"] == nse_sector.CYCLICAL_RULE_VERSION
 
 
 def test_seed_is_cyclical_from_sector_tier():
@@ -73,11 +99,12 @@ def test_is_cyclical_seed_normalizes_case_and_punctuation():
     assert not nse_sector.is_cyclical_seed("Information Technology")
 
 
-def test_seed_missing_optional_finer_tiers_become_null_but_row_kept():
+def test_legacy_seed_without_macro_sector_remains_compatible():
     # sector present (the required key); industry + basic_industry empty -> NULL.
-    df = nse_sector.parse_sector_seed(_seed("INE111A01011,ACME,Chemicals,,"))
+    df = nse_sector.parse_sector_seed(_legacy_seed("INE111A01011,ACME,Chemicals,,"))
     assert len(df) == 1
     row = df.iloc[0]
+    assert pd.isna(row["macro_sector"])
     assert row["sector"] == "Chemicals"
     assert pd.isna(row["industry"])
     assert pd.isna(row["basic_industry"])
@@ -85,7 +112,7 @@ def test_seed_missing_optional_finer_tiers_become_null_but_row_kept():
 
 
 def test_seed_skips_rows_missing_required_fields():
-    df = nse_sector.parse_sector_seed(_seed(
+    df = nse_sector.parse_sector_seed(_legacy_seed(
         "OnlyOne",
         "INE1,SYM1,,Petroleum Products,Basic",   # empty sector -> skip
         ",SYM2,Chemicals,Chemicals,Basic",       # empty ISIN -> skip
@@ -97,7 +124,7 @@ def test_seed_skips_rows_missing_required_fields():
 
 
 def test_seed_dedupes_by_isin_keeping_first():
-    df = nse_sector.parse_sector_seed(_seed(
+    df = nse_sector.parse_sector_seed(_legacy_seed(
         "INE002A01018,RELIANCE,Energy,Oil Gas & Consumable Fuels,Refineries & Marketing",
         "INE002A01018,RELIANCE2,Commodities,Chemicals,Commodity Chemicals",  # dup ISIN
         "INE009A01021,INFY,Information Technology,Information Technology,Software",
@@ -165,6 +192,8 @@ def test_build_from_seed_writes_full_coverage_parquet(tmp_path, monkeypatch):
     out = pd.read_parquet(tmp_path / "sector" / "sector_industry_all.parquet")
     assert list(out.columns) == [*nse_sector.SECTOR_COLUMNS, "date"]
     # sector + basic_industry populated for the whole file (the coverage win).
+    assert out["macro_sector"].notna().all()
     assert out["sector"].notna().all()
     assert out["basic_industry"].notna().all()
+    assert (out["cyclicality_rule_version"] == nse_sector.CYCLICAL_RULE_VERSION).all()
     assert (out["date"] == pd.Timestamp("2026-07-14")).all()

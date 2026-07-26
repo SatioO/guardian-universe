@@ -5,27 +5,30 @@ the fetch + atomic write + TTL/fail-closed policy live in `builders.py`
 (`build_sector_industry`), mirroring how `sources.nse_secfull` keeps its
 shape-adapter pure while `datasets._secfull_fallback` owns the HTTP.
 
-Source CSV header (row 0, skipped):
+Legacy source CSV header (row 0, skipped):
     `Company Name,Industry,Symbol,Series,ISIN Code`
 ~752 rows. Keyed to the OHLC/universe data by ISIN (`instrument_key`).
 
 Robustness mirrors the app's `src-tauri/src/fundamentals/industry.rs`: malformed
 / short rows are silently skipped (never crash), symbols upper-cased, and the
 `is_cyclical` vocabulary is matched case-sensitively against the exact CSV
-industry strings. `is_cyclical` is derived from `industry`.
+sector-tier labels. `is_cyclical` is derived from `sector`.
 
-The CSV exposes a single classification column ("Industry"); it carries no
-separate finer/coarser tier, so `sector` and `basic_industry` are emitted as
-NULL (coverage honesty -- never a fabricated value; §3.1 of the P4/P5 design)
-and can be populated later if a richer source lands, without a schema change.
+The legacy CSV exposes a single classification column ("Industry"); it carries
+no separate taxonomy tiers, so `macro_sector`, `sector`, and
+`basic_industry` are emitted as NULL. The Classification Registry seed provides
+all four tiers when available.
 """
 from __future__ import annotations
 
 import csv
 import io
 import re
+from dataclasses import dataclass
 
 import pandas as pd
+
+from pipeline.sources.screener_classification import canonicalize_label
 
 # The unblocked NSE-archives CDN CSV (same host the bhavcopy fallback fetches
 # from). Reachable from CI datacenter IPs, unlike the Akamai-blocked NSE API.
@@ -40,16 +43,28 @@ SECTOR_CSV_URL = (
 SECTOR_COLUMNS: list[str] = [
     "instrument_key",
     "symbol",
+    "macro_sector",
     "sector",
     "industry",
     "basic_industry",
     "is_cyclical",
+    "cyclicality_rule_version",
 ]
 
-# Cyclical industry set -- copied verbatim (case-sensitive) from the app's
-# `industry.rs::is_cyclical`, matched exactly against the CSV's Industry
+_STRING_COLUMNS = [
+    "instrument_key",
+    "symbol",
+    "macro_sector",
+    "sector",
+    "industry",
+    "basic_industry",
+    "cyclicality_rule_version",
+]
+
+# Cyclical sector set -- copied verbatim (case-sensitive) from the app's
+# `industry.rs::is_cyclical`, matched exactly against the legacy CSV's Industry
 # vocabulary. Keep in lockstep with that Rust source.
-CYCLICAL_INDUSTRIES: frozenset[str] = frozenset({
+CYCLICAL_SECTORS: frozenset[str] = frozenset({
     "Metals & Mining",
     "Automobile and Auto Components",
     "Oil Gas & Consumable Fuels",
@@ -62,12 +77,24 @@ CYCLICAL_INDUSTRIES: frozenset[str] = frozenset({
 })
 
 
-def is_cyclical(industry: str) -> bool:
-    """True for industries considered cyclical in the NSE taxonomy.
+@dataclass(frozen=True)
+class CyclicalityPolicy:
+    """The versioned classification policy published beside every result row."""
+
+    version: str
+    cyclical_sectors: frozenset[str]
+
+
+CYCLICAL_POLICY = CyclicalityPolicy("nse-sector-v1", CYCLICAL_SECTORS)
+CYCLICAL_RULE_VERSION = CYCLICAL_POLICY.version
+
+
+def is_cyclical(sector: str) -> bool:
+    """True for sectors considered cyclical in the NSE taxonomy.
 
     Case-sensitive, matched exactly to the CSV vocabulary -- mirrors
     `industry.rs::is_cyclical` so the producer and the app agree bit-for-bit."""
-    return industry in CYCLICAL_INDUSTRIES
+    return sector in CYCLICAL_SECTORS
 
 
 def parse_sector_csv(csv_bytes: bytes) -> pd.DataFrame:
@@ -94,10 +121,10 @@ def parse_sector_csv(csv_bytes: bytes) -> pd.DataFrame:
             continue  # header
         if len(parts) < 5:
             continue  # malformed / short row -- skip
-        industry = parts[1].strip()
+        sector = parts[1].strip()
         symbol = parts[2].strip().upper()
         instrument_key = parts[4].strip().upper()
-        if not instrument_key or not symbol or not industry:
+        if not instrument_key or not symbol or not sector:
             continue  # missing a required field -- skip
         if instrument_key in seen_isin:
             continue  # dedupe by ISIN, keep first
@@ -105,10 +132,12 @@ def parse_sector_csv(csv_bytes: bytes) -> pd.DataFrame:
         rows.append({
             "instrument_key": instrument_key,
             "symbol": symbol,
-            "sector": None,          # not provided by this single-column CSV
-            "industry": industry,
+            "macro_sector": None,
+            "sector": sector,
+            "industry": None,        # not provided by this single-column CSV
             "basic_industry": None,  # not provided by this single-column CSV
-            "is_cyclical": is_cyclical(industry),
+            "is_cyclical": is_cyclical(sector),
+            "cyclicality_rule_version": CYCLICAL_RULE_VERSION,
         })
 
     if not rows:
@@ -118,7 +147,7 @@ def parse_sector_csv(csv_bytes: bytes) -> pd.DataFrame:
     # Nullable string dtype keeps the all-null sector/basic_industry columns
     # typed as strings (not float64) so the parquet schema is stable whether
     # or not any value is ever present.
-    for col in ("instrument_key", "symbol", "sector", "industry", "basic_industry"):
+    for col in _STRING_COLUMNS:
         df[col] = df[col].astype("string")
     df["is_cyclical"] = df["is_cyclical"].astype(bool)
     return df.reset_index(drop=True)
@@ -126,7 +155,7 @@ def parse_sector_csv(csv_bytes: bytes) -> pd.DataFrame:
 
 def _empty_sector_frame() -> pd.DataFrame:
     df = pd.DataFrame({c: [] for c in SECTOR_COLUMNS})
-    for col in ("instrument_key", "symbol", "sector", "industry", "basic_industry"):
+    for col in _STRING_COLUMNS:
         df[col] = df[col].astype("string")
     df["is_cyclical"] = df["is_cyclical"].astype(bool)
     return df
@@ -145,19 +174,26 @@ def _empty_sector_frame() -> pd.DataFrame:
 # non-NULL sector/basic_industry -- so the builder, manifest, and Rust client
 # are all unchanged.
 #
-# Tier mapping (NSE's 4 tiers -> our 3 columns, name-to-name):
+# Tier mapping (NSE's 4 tiers -> our 4 columns, name-to-name):
+#   NSE macro         -> `macro_sector`   (e.g. "Energy")
 #   NSE sector        -> `sector`         (e.g. "Metals & Mining"; drives is_cyclical)
 #   NSE industry      -> `industry`       (e.g. "Ferrous Metals")
 #   NSE basicIndustry -> `basic_industry` (e.g. "Iron & Steel")
-# NSE's coarsest `macro` tier is dropped (three columns, name-to-name).
 
 # Canonical header the harvest writes and this parser expects (is_cyclical is
 # DERIVED here, never stored, so there is one source of truth for it).
-SEED_HEADER: list[str] = ["instrument_key", "symbol", "sector", "industry", "basic_industry"]
+SEED_HEADER: list[str] = [
+    "instrument_key",
+    "symbol",
+    "macro_sector",
+    "sector",
+    "industry",
+    "basic_industry",
+]
 
 
-def _norm_industry(s: str) -> str:
-    """Normalize an industry label for cyclical matching: lower-case, drop
+def _norm_sector(s: str) -> str:
+    """Normalize a sector label for cyclical matching: lower-case, drop
     punctuation (commas/hyphens), collapse whitespace. This absorbs the
     punctuation drift between NSE sources -- the Total-Market CSV emits
     "Oil Gas & Consumable Fuels" while the per-symbol API emits
@@ -165,15 +201,17 @@ def _norm_industry(s: str) -> str:
     return re.sub(r"[^a-z0-9&]+", " ", s.lower()).strip()
 
 
-_CYCLICAL_NORMALIZED: frozenset[str] = frozenset(_norm_industry(x) for x in CYCLICAL_INDUSTRIES)
+_CYCLICAL_NORMALIZED: frozenset[str] = frozenset(
+    _norm_sector(x) for x in CYCLICAL_POLICY.cyclical_sectors
+)
 
 
-def is_cyclical_seed(industry: str) -> bool:
+def is_cyclical_seed(sector: str) -> bool:
     """Cyclical test for SEED-sourced rows: punctuation/case-insensitive match
     against `CYCLICAL_INDUSTRIES`. Distinct from the exact `is_cyclical` used by
     the Total-Market path (and mirrored in `industry.rs`) precisely so the
     per-symbol API's slightly different punctuation still classifies correctly."""
-    return _norm_industry(industry) in _CYCLICAL_NORMALIZED
+    return _norm_sector(sector) in _CYCLICAL_NORMALIZED
 
 
 def parse_sector_seed(csv_bytes: bytes) -> pd.DataFrame:
@@ -202,9 +240,16 @@ def parse_sector_seed(csv_bytes: bytes) -> pd.DataFrame:
             continue  # malformed / short row -- skip
         instrument_key = parts[0].strip().upper()
         symbol = parts[1].strip().upper()
-        sector = parts[2].strip()
-        industry = parts[3].strip()
-        basic_industry = parts[4].strip()
+        if len(parts) >= 6:
+            macro_sector = canonicalize_label(parts[2]) or None
+            sector = canonicalize_label(parts[3])
+            industry = canonicalize_label(parts[4])
+            basic_industry = canonicalize_label(parts[5])
+        else:
+            macro_sector = None
+            sector = canonicalize_label(parts[2])
+            industry = canonicalize_label(parts[3])
+            basic_industry = canonicalize_label(parts[4])
         # `sector` (NSE sector tier) is the required key -- the primary filter
         # tier and the cyclical source. Finer tiers may be empty -> NULL.
         if not instrument_key or not symbol or not sector:
@@ -215,17 +260,19 @@ def parse_sector_seed(csv_bytes: bytes) -> pd.DataFrame:
         rows.append({
             "instrument_key": instrument_key,
             "symbol": symbol,
+            "macro_sector": macro_sector,
             "sector": sector,
             "industry": industry or None,
             "basic_industry": basic_industry or None,
             "is_cyclical": is_cyclical_seed(sector),   # <- from SECTOR
+            "cyclicality_rule_version": CYCLICAL_RULE_VERSION,
         })
 
     if not rows:
         return _empty_sector_frame()
 
     df = pd.DataFrame(rows)[SECTOR_COLUMNS]
-    for col in ("instrument_key", "symbol", "sector", "industry", "basic_industry"):
+    for col in _STRING_COLUMNS:
         df[col] = df[col].astype("string")
     df["is_cyclical"] = df["is_cyclical"].astype(bool)
     return df.reset_index(drop=True)

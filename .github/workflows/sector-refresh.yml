@@ -66,8 +66,8 @@ jobs:
           # cache) can keep the row count stable while collapsing the tiers. There
           # are ~22 distinct sectors; far fewer means the classification is bad.
           # csv.reader is quote-aware (sector values contain commas, e.g. "Oil,
-          # Gas & Consumable Fuels"), so column 2 is the true `sector` field.
-          nsec=$(python -c "import csv; r=list(csv.reader(open('$new'))); print(len({x[2] for x in r[1:] if len(x)>2 and x[2]}))")
+          # Gas & Consumable Fuels"), so column 3 is the true `sector` field.
+          nsec=$(python -c "import csv; r=list(csv.reader(open('$new'))); print(len({x[3] for x in r[1:] if len(x)>3 and x[3]}))")
           echo "distinct sectors: $nsec"
           if [ "$nsec" -lt 15 ]; then
             echo "::error::only $nsec distinct sectors (<15) — suspected BSE degradation; refusing to commit"
