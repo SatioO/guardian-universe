@@ -43,6 +43,12 @@ pub struct IntegratedMeta {
     pub sector_kind: SectorKind,
     /// Whether this filing is Consolidated or Standalone.
     pub basis: StatementBasis,
+    /// Face value per share in ₹ from the exchange scrip master, used ONLY
+    /// when the filing itself publishes none. The insurance taxonomy has no
+    /// face-value element at all, so without this insurers can never yield a
+    /// share count. `None` when the caller has no exchange data (tests, or an
+    /// instrument missing from both masters).
+    pub exchange_face_value: Option<f64>,
 }
 
 /// Raw valuation data extracted from a single (annual) integrated filing.
@@ -51,9 +57,12 @@ pub struct IntegratedMeta {
 #[derive(Debug, Clone, Default)]
 pub struct ValuationRaw {
     /// Face value per share in ₹ (unscaled, e.g. 10.0 for Rs 10 face value).
+    /// Falls back to `IntegratedMeta::exchange_face_value` when the filing
+    /// publishes none (always the case for insurers).
     pub face_value: Option<f64>,
     /// Total equity shares outstanding (raw count, NOT crore).
-    /// Derived as EquityShareCapital(OneI) ÷ FaceValue(OneD).
+    /// Derived as paid-up equity capital ÷ FaceValue — see
+    /// `extract_valuation_raw` for the per-sector element spellings.
     pub shares_outstanding: Option<f64>,
     /// Equity attributable to owners in ₹ crore (balance sheet, OneI context).
     pub equity_cr: Option<f64>,
@@ -218,7 +227,15 @@ pub fn select_integrated_filings(
         .iter()
         .take(n_quarters)
         .filter_map(|c| {
-            let meta = build_integrated_meta(&c.qe_date_str, c.is_audited, c.sector_kind, c.basis)?;
+            let meta = build_integrated_meta(
+                &c.qe_date_str,
+                c.is_audited,
+                c.sector_kind,
+                c.basis,
+                // Selection runs before any universe join — the exchange
+                // face value is attached later, on the parse path.
+                None,
+            )?;
             Some((meta, c.xbrl_url.clone()))
         })
         .collect();
@@ -229,7 +246,15 @@ pub fn select_integrated_filings(
         .filter(|c| c.qe_date_str.starts_with("31-MAR-"))
         .take(5)
         .filter_map(|c| {
-            let meta = build_integrated_meta(&c.qe_date_str, c.is_audited, c.sector_kind, c.basis)?;
+            let meta = build_integrated_meta(
+                &c.qe_date_str,
+                c.is_audited,
+                c.sector_kind,
+                c.basis,
+                // Selection runs before any universe join — the exchange
+                // face value is attached later, on the parse path.
+                None,
+            )?;
             Some((meta, c.xbrl_url.clone()))
         })
         .collect();
@@ -275,6 +300,7 @@ pub fn build_integrated_meta(
     is_audited: bool,
     sector_kind: SectorKind,
     basis: StatementBasis,
+    exchange_face_value: Option<f64>,
 ) -> Option<IntegratedMeta> {
     // period_end: "31-MAR-2026" → "2026-03-31"
     let parts: Vec<&str> = qe_date_str.split('-').collect();
@@ -288,7 +314,13 @@ pub fn build_integrated_meta(
     let mm = month_abbr_to_num_integrated(mon)?;
     let period_end = format!("{yyyy}-{mm:02}-{dd:0>2}");
 
-    Some(meta_from_iso_period_end(&period_end, is_audited, sector_kind, basis))
+    Some(meta_from_iso_period_end(
+        &period_end,
+        is_audited,
+        sector_kind,
+        basis,
+        exchange_face_value,
+    ))
 }
 
 /// Build `IntegratedMeta` from an ISO `period_end` ("2026-03-31").
@@ -299,6 +331,7 @@ pub fn meta_from_iso_period_end(
     is_audited: bool,
     sector_kind: SectorKind,
     basis: StatementBasis,
+    exchange_face_value: Option<f64>,
 ) -> IntegratedMeta {
     let mm: u32 = period_end
         .split('-')
@@ -336,6 +369,7 @@ pub fn meta_from_iso_period_end(
         is_audited,
         sector_kind,
         basis,
+        exchange_face_value,
     }
 }
 
@@ -397,7 +431,8 @@ pub fn parse_integrated_xbrl(
     }
 
     // ── Extract valuation raw fields (balance sheet from OneI, EBITDA from FourD) ───
-    let val_raw = extract_valuation_raw(&fact, &cr, meta.sector_kind);
+    let val_raw =
+        extract_valuation_raw(&fact, &cr, meta.sector_kind, meta.exchange_face_value);
 
     Ok((quarter, annual, val_raw))
 }
@@ -411,6 +446,7 @@ fn extract_valuation_raw<F, C>(
     fact: &F,
     cr: &C,
     sector_kind: SectorKind,
+    exchange_face_value: Option<f64>,
 ) -> ValuationRaw
 where
     F: Fn(&str, &str) -> Option<f64>,
@@ -418,14 +454,46 @@ where
 {
     // FaceValue: stored in OneD (duration) context in the in-capmkt taxonomy.
     // Try OneD first, fall back to FourD.
+    //
+    // The INSURANCE taxonomy has no face-value element in ANY context, so the
+    // exchange scrip master fills in — the filing always wins where it speaks.
+    // A constant would NOT be safe here: most listed insurers are ₹10 but
+    // NIACL is ₹5, so assuming ₹10 would report double its true share count.
     let face_value = fact("FaceValueOfEquityShareCapital", "OneD")
-        .or_else(|| fact("FaceValueOfEquityShareCapital", "FourD"));
+        .or_else(|| fact("FaceValueOfEquityShareCapital", "FourD"))
+        .filter(|&v| v > 0.0)
+        .or(exchange_face_value.filter(|&v| v > 0.0));
 
-    // EquityShareCapital: available in OneI (instant balance sheet).
-    let equity_share_capital = fact("EquityShareCapital", "OneI");
+    // Paid-up equity capital in rupees. The element name and context differ by
+    // sector — the SAME balance-sheet quantity is tagged three different ways:
+    //
+    //   General   `EquityShareCapital` @ OneI  (also PaidUpValue… @ OneD)
+    //   Bank      `PaidUpValueOfEquityShareCapital` @ OneD/FourD — the banking
+    //             taxonomy has NO `EquityShareCapital` instant fact at all
+    //   Insurance `PaidUpEquityShareCapital` / `PaidUpEquityCapital` /
+    //             `ShareCapital` @ OneI
+    //
+    // Reading only the general spelling is what left `shares_outstanding` NULL
+    // for 100% of banks and insurers (0 of 41 banks, 0 of 11 insurers across
+    // every row ever published), which in turn drops the entire banking sector
+    // out of any consumer's market-cap ranking or screen.
+    let equity_share_capital = fact("EquityShareCapital", "OneI")
+        .or_else(|| fact("PaidUpValueOfEquityShareCapital", "OneD"))
+        .or_else(|| fact("PaidUpValueOfEquityShareCapital", "FourD"))
+        .or_else(|| fact("PaidUpEquityShareCapital", "OneI"))
+        .or_else(|| fact("PaidUpEquityCapital", "OneI"))
+        .or_else(|| fact("ShareCapital", "OneI"))
+        .filter(|&v| v > 0.0);
 
-    // Shares outstanding = EquityShareCapital(rupees) ÷ face_value.
+    // Shares outstanding = paid-up equity capital(rupees) ÷ face_value.
     // Guard: face_value must be > 0; result is a raw count (NOT crore-scaled).
+    //
+    // NOTE (insurance): the insurance taxonomy publishes the capital but NO
+    // face-value element, so this still yields None for insurers. Face value
+    // is NOT a safe constant to assume — most listed insurers are ₹10 but
+    // NIACL is ₹5, and guessing would halve or double the count. The fix is to
+    // carry face value in from the exchange scrip master (NSE `EQUITY_L.csv`
+    // has a `FACE VALUE` column); until then insurers stay honestly NULL.
     let shares_outstanding = match (equity_share_capital, face_value) {
         (Some(esc), Some(fv)) if fv > 0.0 => Some(esc / fv),
         _ => None,
@@ -989,6 +1057,8 @@ mod tests {
             is_audited:    true,
             sector_kind:   SectorKind::General,
             basis:         StatementBasis::Consolidated,
+            // No exchange join in unit tests — assertions measure the XBRL alone.
+            exchange_face_value: None,
         }
     }
 
@@ -1000,6 +1070,8 @@ mod tests {
             is_audited:    true,
             sector_kind:   SectorKind::Bank,
             basis:         StatementBasis::Consolidated,
+            // No exchange join in unit tests — assertions measure the XBRL alone.
+            exchange_face_value: None,
         }
     }
 
@@ -1011,6 +1083,8 @@ mod tests {
             is_audited:    true,
             sector_kind:   SectorKind::Nbfc,
             basis:         StatementBasis::Consolidated,
+            // No exchange join in unit tests — assertions measure the XBRL alone.
+            exchange_face_value: None,
         }
     }
 
@@ -1203,6 +1277,92 @@ mod tests {
         }
     }
 
+    /// The banking-taxonomy share-count gap. HDFCBANK publishes no
+    /// `EquityShareCapital` instant fact at all — only
+    /// `PaidUpValueOfEquityShareCapital` (OneD/FourD) — so reading just the
+    /// general spelling left `shares_outstanding` NULL for every bank ever
+    /// published, and consumers computing `close × shares` silently lost the
+    /// whole banking sector.
+    #[test]
+    fn hdfc_bank_shares_outstanding_from_paid_up_value() {
+        let (_, _, val) = parse_integrated_xbrl(HDFC, &hdfc_meta()).unwrap();
+        let shares = val.shares_outstanding.expect("HDFCBANK shares_outstanding must be Some");
+        // PaidUpValueOfEquityShareCapital = 15_393_400_000 ÷ FaceValue 1.
+        assert!(
+            (shares - 15_393_400_000.0).abs() < 1.0,
+            "expected paid-up ÷ face value, got {shares:.0}"
+        );
+        assert_eq!(val.face_value, Some(1.0), "HDFCBANK face value is Rs 1");
+    }
+
+    /// The general path must be unaffected: RELIANCE publishes BOTH
+    /// `EquityShareCapital` @ OneI and `PaidUpValueOfEquityShareCapital` @
+    /// OneD, and the instant fact stays the preferred source.
+    #[test]
+    fn general_filers_still_prefer_the_equity_share_capital_instant() {
+        let (_, _, val) = parse_integrated_xbrl(RIL, &reliance_meta()).unwrap();
+        // EquityShareCapital = 135_320_000_000 ÷ FaceValue 10 = 13.532B.
+        let shares = val.shares_outstanding.expect("RELIANCE shares_outstanding must be Some");
+        assert!((shares - 13_532_000_000.0).abs() < 1.0, "got {shares:.0}");
+    }
+
+    /// Insurers publish the capital but NO face-value element anywhere in the
+    /// taxonomy, so with no exchange join there is nothing to divide by — and
+    /// the count stays None rather than assuming one. (₹10 fits most listed
+    /// insurers, but NIACL is ₹5, so a constant would double its count.)
+    #[test]
+    fn insurance_shares_outstanding_is_none_without_a_face_value() {
+        for (name, xml, meta) in
+            [("SBILIFE", SBILIFE, sbilife_meta()), ("ICICIGI", ICICIGI, icicigi_meta())]
+        {
+            let (_, _, val) = parse_integrated_xbrl(xml, &meta).unwrap();
+            assert!(
+                val.face_value.is_none(),
+                "{name}: the insurance taxonomy publishes no face value"
+            );
+            assert!(
+                val.shares_outstanding.is_none(),
+                "{name}: no face value ⇒ no fabricated share count"
+            );
+        }
+    }
+
+    /// …and WITH the exchange scrip master's face value joined in, the SAME
+    /// filings yield a share count. Both expectations are cross-checked
+    /// against an independent source: each insurer's published market cap
+    /// divided by its traded price implies ~the same count (SBILIFE
+    /// 1,002,748,251; ICICIGI 499,164,609 — both within 0.2%).
+    #[test]
+    fn insurance_shares_outstanding_uses_exchange_face_value() {
+        // Both are ₹10 face value per the BSE/NSE scrip masters.
+        for (name, xml, base, expected) in [
+            ("SBILIFE", SBILIFE, sbilife_meta(), 1_003_092_100.0),
+            ("ICICIGI", ICICIGI, icicigi_meta(), 498_490_000.0),
+        ] {
+            let meta = IntegratedMeta { exchange_face_value: Some(10.0), ..base };
+            let (_, _, val) = parse_integrated_xbrl(xml, &meta).unwrap();
+            assert_eq!(val.face_value, Some(10.0), "{name}: exchange face value fills the gap");
+            let shares =
+                val.shares_outstanding.unwrap_or_else(|| panic!("{name} must yield a count"));
+            assert!(
+                (shares - expected).abs() < 1.0,
+                "{name}: expected {expected:.0} shares, got {shares:.0}"
+            );
+        }
+    }
+
+    /// The exchange value is a FALLBACK, never an override: HDFCBANK publishes
+    /// face value ₹1, so a ₹10 from a scrip master (stale after a split, or
+    /// simply wrong) must not displace it and divide the count by ten.
+    #[test]
+    fn filing_face_value_beats_the_exchange_master() {
+        let meta = IntegratedMeta { exchange_face_value: Some(10.0), ..hdfc_meta() };
+        let (_, _, val) = parse_integrated_xbrl(HDFC, &meta).unwrap();
+        assert_eq!(val.face_value, Some(1.0), "the filing's own face value wins");
+        let shares = val.shares_outstanding.unwrap();
+        assert!((shares - 15_393_400_000.0).abs() < 1.0, "got {shares:.0}");
+    }
+
     #[test]
     fn bank_nonzero_npa_fractions_scale_to_percent() {
         // Real-world shape (SBI standalone Q4 FY26): XBRL percentItemType
@@ -1345,6 +1505,8 @@ mod tests {
             is_audited:    true,
             sector_kind:   SectorKind::Insurance,
             basis:         StatementBasis::Standalone,
+            // No exchange join in unit tests — assertions measure the XBRL alone.
+            exchange_face_value: None,
         }
     }
 
@@ -1356,6 +1518,8 @@ mod tests {
             is_audited:    true,
             sector_kind:   SectorKind::Insurance,
             basis:         StatementBasis::Standalone,
+            // No exchange join in unit tests — assertions measure the XBRL alone.
+            exchange_face_value: None,
         }
     }
 

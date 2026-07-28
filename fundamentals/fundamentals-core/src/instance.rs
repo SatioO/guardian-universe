@@ -252,6 +252,7 @@ mod tests {
             info.is_audited,
             info.sector_kind.unwrap(),
             info.basis.unwrap(),
+            None,
         );
         let (q, fy, val) = crate::xbrl_integrated::parse_integrated_xbrl(BSE_TTK, &meta).unwrap();
         let q = q.expect("OneD quarter must parse");
@@ -300,6 +301,7 @@ mod tests {
             info.is_audited,
             SectorKind::General,
             StatementBasis::Standalone,
+            None,
         );
         let (q, fy, _val) = crate::xbrl_integrated::parse_integrated_xbrl(xml, &meta).unwrap();
         let q = q.expect("OneD quarter must parse");

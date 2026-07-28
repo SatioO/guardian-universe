@@ -327,6 +327,12 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
         .iter()
         .filter_map(|e| e.mktcap_cr.map(|m| (e.instrument_key.as_str(), m)))
         .collect();
+    // Exchange-published face value, used only where a filing publishes none
+    // (the insurance taxonomy never does) — see `IntegratedMeta`.
+    let face_value_by_key: HashMap<&str, f64> = covered
+        .iter()
+        .filter_map(|e| e.face_value.map(|f| (e.instrument_key.as_str(), f)))
+        .collect();
     let symbol_by_key: HashMap<&str, String> = covered
         .iter()
         .map(|e| {
@@ -401,6 +407,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
             let env = ProcessEnv {
                 registry: &registry,
                 mcap_by_key: &mcap_by_key,
+                face_value_by_key: &face_value_by_key,
                 symbol_by_key: &symbol_by_key,
                 today: &today,
                 permanent_404: false,
@@ -447,6 +454,7 @@ pub fn run(cfg: &RunConfig) -> Result<RunSummary, String> {
             let env = ProcessEnv {
                 registry: &registry,
                 mcap_by_key: &mcap_by_key,
+                face_value_by_key: &face_value_by_key,
                 symbol_by_key: &symbol_by_key,
                 today: &today,
                 // A historical locator that 404s has had months to appear —
@@ -661,6 +669,7 @@ fn select_documents(
 struct ProcessEnv<'a> {
     registry: &'a SourceRegistry,
     mcap_by_key: &'a HashMap<&'a str, f64>,
+    face_value_by_key: &'a HashMap<&'a str, f64>,
     symbol_by_key: &'a HashMap<&'a str, String>,
     today: &'a str,
     /// Backfill: treat an HTTP 404 on the instance as PERMANENT (recorded as
@@ -759,7 +768,13 @@ fn process_filing(
         return Ok(());
     };
     let basis = info.basis.or(r.basis_hint).unwrap_or_default();
-    let meta = meta_from_iso_period_end(&period_end, info.is_audited, sector, basis);
+    let meta = meta_from_iso_period_end(
+        &period_end,
+        info.is_audited,
+        sector,
+        basis,
+        env.face_value_by_key.get(key.as_str()).copied(),
+    );
 
     let (quarter, annual, val) = match parse_integrated_xbrl(&xml, &meta) {
         Ok(v) => v,
