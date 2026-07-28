@@ -81,6 +81,10 @@ pub struct FundRow {
     pub total_debt: Option<f64>,
     pub cash: Option<f64>,
     pub shares_outstanding: Option<f64>,
+    /// Face value per share (₹). Normally the filing's own
+    /// `FaceValueOfEquityShareCapital`; for INSURERS — whose taxonomy carries
+    /// no such element — it comes from the BSE/NSE scrip master instead, which
+    /// is what makes their `shares_outstanding` derivable at all.
     pub face_value: Option<f64>,
     /// BSE full market cap (₹ crore) at row-creation time, paired with as_of;
     /// NULL when the universe seed had no BSE mktcap. Not a filing fact — a

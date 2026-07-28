@@ -211,8 +211,14 @@ Record status + content-type + first bytes of each into the job log; paste resul
 
 ## 10. ISIN-union universe seed plan
 
-- **BSE side:** `ListofScripData` → (`SCRIP_CD`, `scrip_id`, `ISIN_NUMBER`, `Mktcap`), filtered to `Status=Active`, `Segment=Equity`, ISIN prefix `INE` → **4,656 scrips**.
-- **NSE side:** `EQUITY_L.csv` → (`SYMBOL`, `ISIN NUMBER`) → **2,384 symbols**.
+- **BSE side:** `ListofScripData` → (`SCRIP_CD`, `scrip_id`, `ISIN_NUMBER`, `Mktcap`, `FACE_VALUE`), filtered to `Status=Active`, `Segment=Equity`, ISIN prefix `INE` → **4,656 scrips**.
+- **NSE side:** `EQUITY_L.csv` → (`SYMBOL`, `ISIN NUMBER`, `FACE VALUE`) → **2,384 symbols**.
+- **Face value** rides on the union entry (BSE first, NSE backfilling NSE-only
+  listings) and reaches the parser as a FALLBACK only — a filing's own
+  `FaceValueOfEquityShareCapital` always wins. It exists because the INSURANCE
+  taxonomy publishes paid-up capital but no face-value element, so without it
+  no insurer can ever yield a `shares_outstanding`. Absent or `0` → NULL, never
+  a zero divisor.
 - **Union keyed by ISIN** (`instrument_key`): BSE list is the superset (~2× NSE); NSE-only edge cases caught by the union as designed. Per-row provenance: `on_bse`, `on_nse`, `bse_scrip_cd`, `nse_symbol`, `bse_symbol` (`scrip_id`).
 - Expect a small set of ISINs on NSE but not in the BSE active list (suspensions, new listings mid-sync) — count and disclose, never drop silently.
 - Refresh weekly alongside the sector build; both endpoints are single-request bulk.

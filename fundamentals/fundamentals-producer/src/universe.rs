@@ -27,6 +27,13 @@ pub struct UniverseEntry {
     pub nse_symbol: Option<String>,
     /// From the BSE scrip master, ₹ crore. None for NSE-only entries.
     pub mktcap_cr: Option<f64>,
+    /// Face value per share in ₹, from BSE `FACE_VALUE` or NSE `FACE VALUE`.
+    ///
+    /// Carried because the INSURANCE XBRL taxonomy publishes paid-up capital
+    /// but no face-value element, so a share count can't be derived from the
+    /// filing alone. Both exchanges publish it for free in the master lists
+    /// already fetched here, and they agree where they overlap.
+    pub face_value: Option<f64>,
     pub on_bse: bool,
     pub on_nse: bool,
 }
@@ -145,6 +152,7 @@ pub fn build_universe(bse_json: &str, nse_csv: &str) -> Result<Universe, String>
         entry.bse_scrip_cd = Some(s("SCRIP_CD"));
         entry.bse_symbol = Some(s("scrip_id")).filter(|v| !v.is_empty());
         entry.mktcap_cr = mktcap_cr;
+        entry.face_value = s("FACE_VALUE").parse::<f64>().ok().filter(|v| *v > 0.0);
         entry.on_bse = true;
     }
 
@@ -164,6 +172,8 @@ pub fn build_universe(bse_json: &str, nse_csv: &str) -> Result<Universe, String>
     let isin_i = idx("ISIN NUMBER")?;
     let name_i = idx("NAME OF COMPANY").unwrap_or(sym_i);
     let series_i = idx("SERIES").ok();
+    // Optional — NSE only backfills face value for entries BSE didn't cover.
+    let face_i = idx("FACE VALUE").ok();
 
     let mut nse_count = 0usize;
     for line in lines {
@@ -189,6 +199,14 @@ pub fn build_universe(bse_json: &str, nse_csv: &str) -> Result<Universe, String>
             entry.name = fields.get(name_i).unwrap_or(&"").to_string();
         }
         entry.nse_symbol = Some(fields[sym_i].to_string()).filter(|v| !v.is_empty());
+        // BSE is the superset and already ran, so only fill the gap it left
+        // (NSE-only listings); never overwrite a value the other exchange gave.
+        if entry.face_value.is_none() {
+            entry.face_value = face_i
+                .and_then(|i| fields.get(i))
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| *v > 0.0);
+        }
         entry.on_nse = true;
     }
 
@@ -233,6 +251,37 @@ mod tests {
         assert_eq!(abb.nse_symbol.as_deref(), Some("ABB"));
         assert_eq!(abb.mktcap_cr, Some(144808.65));
         assert_eq!(u.nse_only_count, 1);
+    }
+
+    /// Face value rides along from whichever master carries the entry. It is
+    /// the only route to a share count for INSURERS, whose XBRL publishes
+    /// paid-up capital but no face-value element at all.
+    #[test]
+    fn face_value_comes_from_bse_and_nse_backfills_the_rest() {
+        let u = build_universe(BSE, NSE).unwrap();
+        let by_key = |k: &str| u.entries.iter().find(|e| e.instrument_key == k).unwrap().face_value;
+        // On both masters: BSE `FACE_VALUE` "2.00" (NSE agrees at 2).
+        assert_eq!(by_key("INE117A01022"), Some(2.0), "BSE face value");
+        // BSE-only listing still gets one.
+        assert_eq!(by_key("INE690A01028"), Some(1.0), "BSE-only face value");
+        // NSE-only listing — BSE left the gap, the CSV column fills it.
+        assert_eq!(by_key("INE555Y01019"), Some(10.0), "NSE backfills NSE-only");
+    }
+
+    /// A master that omits the field (or writes 0) must yield None, not a
+    /// zero that would later divide the capital into an infinite share count.
+    #[test]
+    fn missing_or_zero_face_value_is_none() {
+        const BSE_NO_FV: &str = r#"[
+          {"SCRIP_CD":"500002","Scrip_Name":"NoFV Ltd","Status":"Active","GROUP":"A",
+           "ISIN_NUMBER":"INE117A01022","scrip_id":"NOFV","Segment":"Equity",
+           "Issuer_Name":"NoFV Ltd","Mktcap":"1000.00"},
+          {"SCRIP_CD":"500003","Scrip_Name":"ZeroFV Ltd","Status":"Active","GROUP":"A",
+           "FACE_VALUE":"0.00","ISIN_NUMBER":"INE690A01028","scrip_id":"ZEROFV",
+           "Segment":"Equity","Issuer_Name":"ZeroFV Ltd","Mktcap":"1000.00"}
+        ]"#;
+        let u = build_universe(BSE_NO_FV, "SYMBOL,ISIN NUMBER\n").unwrap();
+        assert!(u.entries.iter().all(|e| e.face_value.is_none()), "absent/zero ⇒ None");
     }
 
     #[test]
