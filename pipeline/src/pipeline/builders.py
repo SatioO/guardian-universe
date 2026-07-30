@@ -853,8 +853,11 @@ def build_index_constituents(
     out["date"] = pd.Timestamp(target)
     out = out[[*nse_constituents.CONSTITUENT_COLUMNS, "date"]]
     _write_atomic(out, out_path)
+    # "success", not "ok": data-daily's secondary-status allowlist is
+    # success|skipped_holiday|skipped_idempotent|not_yet, and an invented word
+    # here failed the publish gate on a build that had actually WORKED.
     return RunStatus(
-        "ok",
+        "success",
         target,
         symbol_count=len(out),
         source=spec.source_label,
@@ -868,7 +871,7 @@ def _constituents_fail_closed(
     """Keep the prior file when there is one; fail loudly when there is not."""
     if out_path.exists() and prior_rows:
         return RunStatus(
-            "skipped", target, symbol_count=prior_rows, source=spec.source_label,
+            "skipped_idempotent", target, symbol_count=prior_rows, source=spec.source_label,
             message=f"{why}; retained prior file",
         )
     return RunStatus("failed", target, source=spec.source_label, message=why)

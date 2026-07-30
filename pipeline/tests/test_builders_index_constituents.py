@@ -149,7 +149,7 @@ def test_a_healthy_run_writes_the_parquet_with_a_date_column(spec):
     st = builders.build_index_constituents(
         spec, TARGET, fetch_lists=lambda _d: _frame({"IDX:A": 30, "IDX:B": 20}), min_rows=10
     )
-    assert st.status == "ok"
+    assert st.status == "success"
     out = pd.read_parquet(spec.base_dir / "index_constituents_all.parquet")
     # REQUIRED: build_manifest reads columns=["date"]; a missing column raises
     # ArrowInvalid and aborts the publish for EVERY dataset, not just this one.
@@ -169,7 +169,7 @@ def test_a_failed_fetch_keeps_the_prior_file_rather_than_emptying_it(spec):
     st = builders.build_index_constituents(
         spec, date(2026, 8, 20), fetch_lists=_boom, min_rows=10
     )
-    assert st.status == "skipped"
+    assert st.status == "skipped_idempotent"
     assert "retained prior" in st.message
     assert len(pd.read_parquet(spec.base_dir / "index_constituents_all.parquet")) == 30
 
@@ -191,7 +191,7 @@ def test_an_index_missing_from_this_run_carries_its_prior_rows_forward(spec):
     st = builders.build_index_constituents(
         spec, date(2026, 8, 20), fetch_lists=lambda _d: _frame({"IDX:A": 30}), min_rows=10
     )
-    assert st.status == "ok"
+    assert st.status == "success"
     out = pd.read_parquet(spec.base_dir / "index_constituents_all.parquet")
     assert set(out["index_key"]) == {"IDX:A", "IDX:B"}
 
@@ -205,7 +205,7 @@ def test_a_shrink_is_held_back(spec):
     st = builders.build_index_constituents(
         spec, date(2026, 8, 20), fetch_lists=lambda _d: _frame({"IDX:A": 20}), min_rows=10
     )
-    assert st.status == "skipped"
+    assert st.status == "skipped_idempotent"
     assert "shrink-guard" in st.message
 
 
