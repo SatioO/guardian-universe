@@ -260,3 +260,22 @@ def test_index_keys_are_resolved_from_the_indices_dataset_not_the_catalog(tmp_pa
     keys = builders._index_key_map(idx)
     assert keys["NIFTYINDIAINTERNET"] == "IDX:NIFTYINDIAINTERNET"
     assert keys["NIFTYBANK"] == "IDX:NIFTYBANK"
+
+
+def test_every_catalog_row_carries_nse_s_own_family_label():
+    # The family filter is what the Rotation tool scopes its list by
+    # (sectoral + thematic), so an unlabelled row silently disappears from the
+    # tool rather than erroring. Harvested from NSE's own page URLs
+    # (/indices/equity/<family>-indices/...), never inferred from the name:
+    # NSE files Nifty Energy as THEMATIC, which no name-based rule would guess.
+    catalog = builders._read_constituents_catalog()
+    families = {r["family"] for r in catalog}
+    assert families == {"sectoral", "thematic", "strategy", "broad"}
+    by_name = {r["index_name"]: r["family"] for r in catalog}
+    assert by_name["Nifty Energy"] == "thematic"
+    assert by_name["Nifty Bank"] == "sectoral"
+    assert by_name["Nifty MNC"] == "thematic"
+    assert by_name["Nifty High Beta 50"] == "strategy"
+    assert by_name["Nifty 50"] == "broad"
+    keep = [r for r in catalog if r["family"] in ("sectoral", "thematic")]
+    assert len(keep) > 60

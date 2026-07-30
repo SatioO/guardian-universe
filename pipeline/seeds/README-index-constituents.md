@@ -43,6 +43,7 @@ Nifty500 Ahimsa is published — see the file).
 | `csv_path` | Path under `https://niftyindices.com/`. Usually a bare filename appended to `/IndexConstituent/`, but **Nifty EV & New Age Automotive is a full path** (`/Index_Statistics/...`). |
 | `mirror_file` | The basename, which is how `nsearchives.nseindia.com/content/indices/` serves it — that host flattens directories. |
 | `on_mirror` | Whether the CI-safe mirror actually serves this file. **23 of 134 are `no`.** |
+| `family` | NSE's OWN category, read off the index's page URL (`/indices/equity/<family>-indices/`): `sectoral` 34, `thematic` 42, `strategy` 36, `broad` 22. The Rotation tool scopes its list to sectoral + thematic. **Never infer this from the name** — NSE files *Nifty Energy* as thematic, and *Nifty High Beta 50* as strategy despite reading like a theme. |
 | `members_at_harvest` | Member count observed on 2026-07-30, keyed to ISINs starting `INE`. Seeds the per-index shrink guard; it is a reference point, not a contract — NSE genuinely reshuffles (Nifty Energy went 10 → 40). |
 
 ## Two things that will bite you
@@ -71,5 +72,6 @@ locally dispatched run.
 
 ## Adding an index
 
-Append a row. If NSE's page does not link a CSV, the index has no published
+Append a row, and take `family` from the index's own page URL rather than
+judging it by name — the classification is NSE's to make, not ours. If NSE's page does not link a CSV, the index has no published
 basket and does not belong here — do not invent a filename.

@@ -1,135 +1,135 @@
-index_name,index_key,csv_path,mirror_file,on_mirror,members_at_harvest
-Nifty 100,IDX:NIFTY100,ind_nifty100list.csv,ind_nifty100list.csv,yes,100
-Nifty 200,IDX:NIFTY200,ind_nifty200list.csv,ind_nifty200list.csv,yes,200
-Nifty 50,IDX:NIFTY50,ind_nifty50list.csv,ind_nifty50list.csv,yes,50
-Nifty 500,IDX:NIFTY500,ind_nifty500list.csv,ind_nifty500list.csv,yes,500
-Nifty Alpha 50,IDX:NIFTYALPHA50,ind_nifty_Alpha_Index.csv,ind_nifty_Alpha_Index.csv,yes,50
-NIFTY Alpha Low-Volatility 30,IDX:NIFTYALPHALOW-VOLATILITY30,ind_nifty_alpha_lowvol30list.csv,ind_nifty_alpha_lowvol30list.csv,yes,30
-NIFTY Alpha Quality Low-Volatility 30,IDX:NIFTYALPHAQUALITYLOW-VOLATILITY30,ind_nifty_alpha_quality_lowvol30list.csv,ind_nifty_alpha_quality_lowvol30list.csv,yes,30
-NIFTY Alpha Quality Value Low-Volatility 30,IDX:NIFTYALPHAQUALITYVALUELOW-VOLATILITY30,ind_nifty_alpha_quality_value_lowvol30list.csv,ind_nifty_alpha_quality_value_lowvol30list.csv,yes,30
-Nifty Auto,IDX:NIFTYAUTO,ind_niftyautolist.csv,ind_niftyautolist.csv,yes,15
-Nifty Bank,IDX:NIFTYBANK,ind_niftybanklist.csv,ind_niftybanklist.csv,yes,14
-Nifty Capital Goods,IDX:NIFTYCAPITALGOODS,ind_niftyCapitalGoods_list.csv,ind_niftyCapitalGoods_list.csv,no,50
-Nifty Capital Markets,IDX:NIFTYCAPITALMARKETS,ind_niftyCapitalMarkets_list.csv,ind_niftyCapitalMarkets_list.csv,yes,17
-Nifty Cement,IDX:NIFTYCEMENT,ind_NiftyCement_list.csv,ind_NiftyCement_list.csv,no,16
-Nifty Chemicals,IDX:NIFTYCHEMICALS,ind_niftyChemicals_list.csv,ind_niftyChemicals_list.csv,no,20
-Nifty Commercial & Transport Services,IDX:NIFTYCOMMERCIAL&TRANSPORTSERVICES,ind_niftyCommercialTransportServices_list.csv,ind_niftyCommercialTransportServices_list.csv,no,26
-Nifty Commodities,IDX:NIFTYCOMMODITIES,ind_niftycommoditieslist.csv,ind_niftycommoditieslist.csv,yes,30
-Nifty Conglomerate 50,IDX:NIFTYCONGLOMERATE50,ind_niftyConglomerate50_list.csv,ind_niftyConglomerate50_list.csv,yes,50
-Nifty Construction,IDX:NIFTYCONSTRUCTION,ind_niftyConstruction_list.csv,ind_niftyConstruction_list.csv,no,23
-Nifty Consumer Durables,IDX:NIFTYCONSUMERDURABLES,ind_niftyconsumerdurableslist.csv,ind_niftyconsumerdurableslist.csv,yes,13
-Nifty Consumer Services,IDX:NIFTYCONSUMERSERVICES,ind_niftyConsumerServices_list.csv,ind_niftyConsumerServices_list.csv,no,46
-Nifty Core Housing,IDX:NIFTYCOREHOUSING,ind_niftyCoreHousing_list.csv,ind_niftyCoreHousing_list.csv,yes,30
-Nifty CPSE,IDX:NIFTYCPSE,ind_niftycpselist.csv,ind_niftycpselist.csv,yes,11
-Nifty Dividend Opportunities 50,IDX:NIFTYDIVIDENDOPPORTUNITIES50,ind_niftydivopp50list.csv,ind_niftydivopp50list.csv,yes,50
-Nifty Energy,IDX:NIFTYENERGY,ind_niftyenergylist.csv,ind_niftyenergylist.csv,yes,40
-Nifty EV & New Age Automotive,IDX:NIFTYEV&NEWAGEAUTOMOTIVE,/Index_Statistics/ind_niftyEv_NewAgeAutomotive_list.csv,ind_niftyEv_NewAgeAutomotive_list.csv,yes,33
-Nifty Financial Services,IDX:NIFTYFINANCIALSERVICES,ind_niftyfinancelist.csv,ind_niftyfinancelist.csv,yes,20
-Nifty Financial Services 25/50,IDX:NIFTYFINANCIALSERVICES25/50,ind_niftyfinancialservices25-50list.csv,ind_niftyfinancialservices25-50list.csv,yes,20
-Nifty Financial Services Ex-Bank,IDX:NIFTYFINANCIALSERVICESEX-BANK,ind_niftyfinancialservicesexbank_list.csv,ind_niftyfinancialservicesexbank_list.csv,yes,30
-Nifty FMCG,IDX:NIFTYFMCG,ind_niftyfmcglist.csv,ind_niftyfmcglist.csv,yes,15
-Nifty Growth Sectors 15,IDX:NIFTYGROWTHSECTORS15,ind_NiftyGrowth_Sectors15_Index.csv,ind_NiftyGrowth_Sectors15_Index.csv,yes,15
-Nifty Healthcare Index,IDX:NIFTYHEALTHCAREINDEX,ind_niftyhealthcarelist.csv,ind_niftyhealthcarelist.csv,yes,20
-Nifty High Beta 50,IDX:NIFTYHIGHBETA50,nifty_High_Beta50_Index.csv,nifty_High_Beta50_Index.csv,yes,50
-Nifty Hospitals,IDX:NIFTYHOSPITALS,ind_niftyHospitals_list.csv,ind_niftyHospitals_list.csv,no,13
-Nifty Housing,IDX:NIFTYHOUSING,ind_niftyhousing_list.csv,ind_niftyhousing_list.csv,no,50
-Nifty Housing Finance,IDX:NIFTYHOUSINGFINANCE,ind_niftyHousingFinance_list.csv,ind_niftyHousingFinance_list.csv,no,10
-Nifty India Consumption,IDX:NIFTYINDIACONSUMPTION,ind_niftyconsumptionlist.csv,ind_niftyconsumptionlist.csv,yes,30
-Nifty India Corporate Group Index - Aditya Birla Group,IDX:NIFTYINDIACORPORATEGROUPINDEX-ADITYABIRLAGROUP,ind_nifty_adityabirlalist.csv,ind_nifty_adityabirlalist.csv,yes,13
-Nifty India Corporate Group Index - Mahindra Group,IDX:NIFTYINDIACORPORATEGROUPINDEX-MAHINDRAGROUP,ind_nifty_mahindralist.csv,ind_nifty_mahindralist.csv,yes,9
-Nifty India Corporate Group Index - Tata Group,IDX:NIFTYINDIACORPORATEGROUPINDEX-TATAGROUP,ind_nifty_tatalist.csv,ind_nifty_tatalist.csv,yes,23
-Nifty India Corporate Group Index - Tata Group 25% Cap,IDX:NIFTYINDIACORPORATEGROUPINDEX-TATAGROUP25%CAP,ind_nifty_tata25caplist.csv,ind_nifty_tata25caplist.csv,yes,10
-Nifty India Defence,IDX:NIFTYINDIADEFENCE,ind_niftyindiadefence_list.csv,ind_niftyindiadefence_list.csv,yes,19
-Nifty India Digital,IDX:NIFTYINDIADIGITAL,ind_niftyindiadigital_list.csv,ind_niftyindiadigital_list.csv,yes,51
-Nifty India FPI 150,IDX:NIFTYINDIAFPI150,ind_niftyIndiaFPI150_list.csv,ind_niftyIndiaFPI150_list.csv,yes,150
-Nifty India Infrastructure & Logistics,IDX:NIFTYINDIAINFRASTRUCTURE&LOGISTICS,ind_niftyIndiaInfrastructure_Logistics_list.csv,ind_niftyIndiaInfrastructure_Logistics_list.csv,yes,100
-Nifty India Internet,IDX:NIFTYINDIAINTERNET,ind_niftyIndiaInternet_list.csv,ind_niftyIndiaInternet_list.csv,yes,27
-Nifty India Manufacturing,IDX:NIFTYINDIAMANUFACTURING,ind_niftyindiamanufacturing_list.csv,ind_niftyindiamanufacturing_list.csv,yes,76
-Nifty India New Age Consumption,IDX:NIFTYINDIANEWAGECONSUMPTION,ind_niftyIndiaNewAgeConsumption_list.csv,ind_niftyIndiaNewAgeConsumption_list.csv,yes,75
-Nifty India Railways PSU,IDX:NIFTYINDIARAILWAYSPSU,ind_niftyIndiaRailwaysPSU_list.csv,ind_niftyIndiaRailwaysPSU_list.csv,yes,17
-Nifty India Select 5 Corporate Groups (MAATR),IDX:NIFTYINDIASELECT5CORPORATEGROUPS(MAATR),ind_niftyIndiaSelect5CorporateGroupsMAATR_list.csv,ind_niftyIndiaSelect5CorporateGroupsMAATR_list.csv,yes,42
-Nifty India Tourism,IDX:NIFTYINDIATOURISM,ind_niftyindiatourism_list.csv,ind_niftyindiatourism_list.csv,yes,15
-Nifty Infrastructure,IDX:NIFTYINFRASTRUCTURE,ind_niftyinfralist.csv,ind_niftyinfralist.csv,yes,30
-Nifty Insurance,IDX:NIFTYINSURANCE,ind_niftyInsurance_list.csv,ind_niftyInsurance_list.csv,no,12
-Nifty IPO,IDX:NIFTYIPO,ind_niftyIPO_list.csv,ind_niftyIPO_list.csv,yes,109
-Nifty IT,IDX:NIFTYIT,ind_niftyitlist.csv,ind_niftyitlist.csv,yes,10
-NIFTY LargeMidcap 250,IDX:NIFTYLARGEMIDCAP250,ind_niftylargemidcap250list.csv,ind_niftylargemidcap250list.csv,yes,250
-Nifty Low Volatility 50,IDX:NIFTYLOWVOLATILITY50,nifty_low_Volatility50_Index.csv,nifty_low_Volatility50_Index.csv,no,50
-Nifty Media,IDX:NIFTYMEDIA,ind_niftymedialist.csv,ind_niftymedialist.csv,yes,10
-Nifty Metal,IDX:NIFTYMETAL,ind_niftymetallist.csv,ind_niftymetallist.csv,yes,15
-Nifty Microcap 250,IDX:NIFTYMICROCAP250,ind_niftymicrocap250_list.csv,ind_niftymicrocap250_list.csv,yes,250
-NIFTY Midcap 100,IDX:NIFTYMIDCAP100,ind_niftymidcap100list.csv,ind_niftymidcap100list.csv,yes,100
-Nifty Midcap 150,IDX:NIFTYMIDCAP150,ind_niftymidcap150list.csv,ind_niftymidcap150list.csv,yes,150
-Nifty Midcap 50,IDX:NIFTYMIDCAP50,ind_niftymidcap50list.csv,ind_niftymidcap50list.csv,yes,50
-Nifty Midcap Liquid 15,IDX:NIFTYMIDCAPLIQUID15,ind_Nifty_Midcap_Liquid15.csv,ind_Nifty_Midcap_Liquid15.csv,yes,15
-Nifty Midcap Select,IDX:NIFTYMIDCAPSELECT,ind_niftymidcapselect_list.csv,ind_niftymidcapselect_list.csv,yes,25
-Nifty Midcap150 Momentum 50,IDX:NIFTYMIDCAP150MOMENTUM50,ind_niftymidcap150momentum50_list.csv,ind_niftymidcap150momentum50_list.csv,yes,50
-NIFTY Midcap150 Quality 50,IDX:NIFTYMIDCAP150QUALITY50,ind_niftymidcap150quality50list.csv,ind_niftymidcap150quality50list.csv,yes,50
-Nifty MidSmall Financial Services,IDX:NIFTYMIDSMALLFINANCIALSERVICES,ind_niftymidsmallfinancailservice_list.csv,ind_niftymidsmallfinancailservice_list.csv,yes,30
-Nifty MidSmall Healthcare,IDX:NIFTYMIDSMALLHEALTHCARE,ind_niftymidsmallhealthcare_list.csv,ind_niftymidsmallhealthcare_list.csv,yes,30
-Nifty MidSmall India Consumption,IDX:NIFTYMIDSMALLINDIACONSUMPTION,ind_niftymidsmallindiaconsumption_list.csv,ind_niftymidsmallindiaconsumption_list.csv,yes,30
-Nifty MidSmall IT & Telecom,IDX:NIFTYMIDSMALLIT&TELECOM,ind_niftymidsmallitAndtelecom_list.csv,ind_niftymidsmallitAndtelecom_list.csv,yes,20
-Nifty MidSmallcap 400,IDX:NIFTYMIDSMALLCAP400,ind_niftymidsmallcap400list.csv,ind_niftymidsmallcap400list.csv,yes,400
-Nifty MidSmallcap400 50:50,IDX:NIFTYMIDSMALLCAP40050:50,ind_niftyMidSmallcap4005050_list.csv,ind_niftyMidSmallcap4005050_list.csv,yes,400
-Nifty MidSmallcap400 Momentum Quality 100,IDX:NIFTYMIDSMALLCAP400MOMENTUMQUALITY100,ind_niftyMidSmallcap400MomentumQuality100_list.csv,ind_niftyMidSmallcap400MomentumQuality100_list.csv,yes,100
-Nifty MNC,IDX:NIFTYMNC,ind_niftymnclist.csv,ind_niftymnclist.csv,yes,30
-Nifty Mobility,IDX:NIFTYMOBILITY,ind_niftymobility_list.csv,ind_niftymobility_list.csv,yes,30
-Nifty NBFC,IDX:NIFTYNBFC,ind_niftyNBFC_list.csv,ind_niftyNBFC_list.csv,no,19
-Nifty Next 50,IDX:NIFTYNEXT50,ind_niftynext50list.csv,ind_niftynext50list.csv,yes,50
-Nifty Non-Cyclical Consumer,IDX:NIFTYNON-CYCLICALCONSUMER,ind_niftynon-cyclicalconsumer_list.csv,ind_niftynon-cyclicalconsumer_list.csv,yes,30
-Nifty Oil & Gas,IDX:NIFTYOIL&GAS,ind_niftyoilgaslist.csv,ind_niftyoilgaslist.csv,yes,15
-Nifty Pharma,IDX:NIFTYPHARMA,ind_niftypharmalist.csv,ind_niftypharmalist.csv,yes,20
-Nifty Power,IDX:NIFTYPOWER,ind_niftyPower_list.csv,ind_niftyPower_list.csv,no,21
-Nifty Private Bank,IDX:NIFTYPRIVATEBANK,ind_nifty_privatebanklist.csv,ind_nifty_privatebanklist.csv,yes,10
-Nifty PSE,IDX:NIFTYPSE,ind_niftypselist.csv,ind_niftypselist.csv,yes,20
-Nifty PSU Bank,IDX:NIFTYPSUBANK,ind_niftypsubanklist.csv,ind_niftypsubanklist.csv,yes,12
-NIFTY Quality Low-Volatility 30,IDX:NIFTYQUALITYLOW-VOLATILITY30,ind_nifty_quality_lowvol30list.csv,ind_nifty_quality_lowvol30list.csv,yes,30
-Nifty Realty,IDX:NIFTYREALTY,ind_niftyrealtylist.csv,ind_niftyrealtylist.csv,yes,10
-Nifty REITs & InvITs,IDX:NIFTYREITS&INVITS,ind_niftyREITs_InvITs_list.csv,ind_niftyREITs_InvITs_list.csv,yes,13
-Nifty REITs & InvITs 90:10,IDX:NIFTYREITS&INVITS90:10,ind_niftyREITsInvITs9010list.csv,ind_niftyREITsInvITs9010list.csv,no,13
-Nifty REITs & Realty,IDX:NIFTYREITS&REALTY,ind_niftyREITsRealty_list.csv,ind_niftyREITsRealty_list.csv,yes,15
-Nifty Retail,IDX:NIFTYRETAIL,ind_niftyRetail_list.csv,ind_niftyRetail_list.csv,no,26
-Nifty Rural,IDX:NIFTYRURAL,ind_niftyRural_list.csv,ind_niftyRural_list.csv,yes,75
-Nifty Services Sector,IDX:NIFTYSERVICESSECTOR,ind_niftyservicelist.csv,ind_niftyservicelist.csv,yes,30
-Nifty Small Finance Banks & Microfinance Institutions,IDX:NIFTYSMALLFINANCEBANKS&MICROFINANCEINSTITUTIONS,ind_niftySFBsMfis_list.csv,ind_niftySFBsMfis_list.csv,no,10
-NIFTY Smallcap 100,IDX:NIFTYSMALLCAP100,ind_niftysmallcap100list.csv,ind_niftysmallcap100list.csv,yes,100
-Nifty Smallcap 250,IDX:NIFTYSMALLCAP250,ind_niftysmallcap250list.csv,ind_niftysmallcap250list.csv,yes,250
-Nifty Smallcap 50,IDX:NIFTYSMALLCAP50,ind_niftysmallcap50list.csv,ind_niftysmallcap50list.csv,yes,50
-Nifty Smallcap 500,IDX:NIFTYSMALLCAP500,ind_NiftySmallcap500_list.csv,ind_NiftySmallcap500_list.csv,no,500
-Nifty Smallcap250 Momentum Quality 100,IDX:NIFTYSMALLCAP250MOMENTUMQUALITY100,ind_niftySmallcap250MomentumQuality100_list.csv,ind_niftySmallcap250MomentumQuality100_list.csv,yes,100
-Nifty Smallcap250 Quality 50,IDX:NIFTYSMALLCAP250QUALITY50,ind_niftySmallcap250_Quality50_list.csv,ind_niftySmallcap250_Quality50_list.csv,yes,50
-NIFTY SME EMERGE,IDX:NIFTYSMEEMERGE,ind_niftysmelist.csv,ind_niftysmelist.csv,yes,532
-Nifty Sugar & Ethanol,IDX:NIFTYSUGAR&ETHANOL,ind_niftySugarEthanol_list.csv,ind_niftySugarEthanol_list.csv,no,15
-Nifty Telecommunications,IDX:NIFTYTELECOMMUNICATIONS,ind_niftyTelecommunications_list.csv,ind_niftyTelecommunications_list.csv,no,13
-Nifty Top 10 Equal Weight,IDX:NIFTYTOP10EQUALWEIGHT,ind_niftytop10EqualWeight_list.csv,ind_niftytop10EqualWeight_list.csv,yes,10
-Nifty Top 15 Equal Weight,IDX:NIFTYTOP15EQUALWEIGHT,ind_niftytop15EqualWeight_list.csv,ind_niftytop15EqualWeight_list.csv,yes,15
-Nifty Top 20 Equal Weight,IDX:NIFTYTOP20EQUALWEIGHT,ind_niftyTop20EqualWeight_list.csv,ind_niftyTop20EqualWeight_list.csv,yes,20
-Nifty Total Market,IDX:NIFTYTOTALMARKET,ind_niftytotalmarket_list.csv,ind_niftytotalmarket_list.csv,yes,750
-Nifty Total Market Momentum Quality 50,IDX:NIFTYTOTALMARKETMOMENTUMQUALITY50,ind_niftyTotalMarketMomentumQuality50_list.csv,ind_niftyTotalMarketMomentumQuality50_list.csv,yes,50
-Nifty Transportation & Logistics,IDX:NIFTYTRANSPORTATION&LOGISTICS,ind_niftyTransportationandLogistics_list.csv,ind_niftyTransportationandLogistics_list.csv,no,30
-Nifty Waves,IDX:NIFTYWAVES,ind_niftyWaves_list.csv,ind_niftyWaves_list.csv,no,43
-NIFTY100 Alpha 30,IDX:NIFTY100ALPHA30,ind_nifty100Alpha30list.csv,ind_nifty100Alpha30list.csv,yes,30
-Nifty100 Equal Weight,IDX:NIFTY100EQUALWEIGHT,ind_nifty100list.csv,ind_nifty100list.csv,yes,100
-Nifty100 Liquid 15,IDX:NIFTY100LIQUID15,ind_Nifty100_Liquid15.csv,ind_Nifty100_Liquid15.csv,yes,15
-Nifty100 Low Volatility 30,IDX:NIFTY100LOWVOLATILITY30,ind_Nifty100LowVolatility30list.csv,ind_Nifty100LowVolatility30list.csv,yes,30
-NIFTY100 Quality 30,IDX:NIFTY100QUALITY30,ind_nifty100Quality30list.csv,ind_nifty100Quality30list.csv,yes,30
-Nifty200 Alpha 30,IDX:NIFTY200ALPHA30,ind_nifty200alpha30_list.csv,ind_nifty200alpha30_list.csv,yes,30
-Nifty200 Momentum 30,IDX:NIFTY200MOMENTUM30,ind_nifty200Momentum30_list.csv,ind_nifty200Momentum30_list.csv,yes,30
-NIFTY200 Quality 30,IDX:NIFTY200QUALITY30,ind_nifty200Quality30_list.csv,ind_nifty200Quality30_list.csv,yes,30
-Nifty200 Value 30,IDX:NIFTY200VALUE30,ind_nifty200Value30_list.csv,ind_nifty200Value30_list.csv,yes,30
-NIFTY50 Equal Weight,IDX:NIFTY50EQUALWEIGHT,ind_Nifty50EqualWeight.csv,ind_Nifty50EqualWeight.csv,yes,50
-Nifty50 Value 20,IDX:NIFTY50VALUE20,ind_Nifty50_Value20.csv,ind_Nifty50_Value20.csv,yes,20
-Nifty500 Ahimsa,IDX:NIFTY500AHIMSA,ind_nifty500Ahimsa_list.csv,ind_nifty500Ahimsa_list.csv,no,326
-Nifty500 Equal Weight,IDX:NIFTY500EQUALWEIGHT,ind_nifty500EqualWeight_list.csv,ind_nifty500EqualWeight_list.csv,yes,500
-Nifty500 Flexicap Quality 30,IDX:NIFTY500FLEXICAPQUALITY30,ind_nifty500FlexicapQuality30_list.csv,ind_nifty500FlexicapQuality30_list.csv,yes,30
-Nifty500 Healthcare,IDX:NIFTY500HEALTHCARE,ind_nifty500Healthcare_list.csv,ind_nifty500Healthcare_list.csv,no,48
-Nifty500 LargeMidSmall Equal-Cap Weighted,IDX:NIFTY500LARGEMIDSMALLEQUAL-CAPWEIGHTED,ind_nifty500LargeMidSmallEqualCapWeighted_list.csv,ind_nifty500LargeMidSmallEqualCapWeighted_list.csv,yes,500
-Nifty500 Low Volatility 50,IDX:NIFTY500LOWVOLATILITY50,ind_nifty500LowVolatility50_list.csv,ind_nifty500LowVolatility50_list.csv,yes,50
-Nifty500 Momentum 50,IDX:NIFTY500MOMENTUM50,ind_nifty500Momentum50_list.csv,ind_nifty500Momentum50_list.csv,yes,50
-Nifty500 Multicap 50:25:25,IDX:NIFTY500MULTICAP50:25:25,ind_nifty500Multicap502525_list.csv,ind_nifty500Multicap502525_list.csv,yes,500
-Nifty500 Multicap India Manufacturing 50:30:20,IDX:NIFTY500MULTICAPINDIAMANUFACTURING50:30:20,ind_nifty500MulticapIndiaManufacturing503020_list.csv,ind_nifty500MulticapIndiaManufacturing503020_list.csv,yes,75
-Nifty500 Multicap Infrastructure 50:30:20,IDX:NIFTY500MULTICAPINFRASTRUCTURE50:30:20,ind_nifty500MulticapInfrastructure503020_list.csv,ind_nifty500MulticapInfrastructure503020_list.csv,yes,75
-Nifty500 Multicap Momentum Quality 50,IDX:NIFTY500MULTICAPMOMENTUMQUALITY50,ind_nifty500MulticapMomentumQuality50_list.csv,ind_nifty500MulticapMomentumQuality50_list.csv,yes,50
-Nifty500 Multifactor MQVLv 50,IDX:NIFTY500MULTIFACTORMQVLV50,ind_nifty500MultifactorMQVLv50_list.csv,ind_nifty500MultifactorMQVLv50_list.csv,yes,50
-Nifty500 Quality 50,IDX:NIFTY500QUALITY50,ind_nifty500Quality50_list.csv,ind_nifty500Quality50_list.csv,yes,50
-NIFTY500 Value 50,IDX:NIFTY500VALUE50,ind_nifty500Value50_list.csv,ind_nifty500Value50_list.csv,yes,50
+index_name,index_key,csv_path,mirror_file,on_mirror,family,members_at_harvest
+Nifty 100,IDX:NIFTY100,ind_nifty100list.csv,ind_nifty100list.csv,yes,broad,100
+Nifty 200,IDX:NIFTY200,ind_nifty200list.csv,ind_nifty200list.csv,yes,broad,200
+Nifty 50,IDX:NIFTY50,ind_nifty50list.csv,ind_nifty50list.csv,yes,broad,50
+Nifty 500,IDX:NIFTY500,ind_nifty500list.csv,ind_nifty500list.csv,yes,broad,500
+Nifty Alpha 50,IDX:NIFTYALPHA50,ind_nifty_Alpha_Index.csv,ind_nifty_Alpha_Index.csv,yes,strategy,50
+NIFTY Alpha Low-Volatility 30,IDX:NIFTYALPHALOW-VOLATILITY30,ind_nifty_alpha_lowvol30list.csv,ind_nifty_alpha_lowvol30list.csv,yes,strategy,30
+NIFTY Alpha Quality Low-Volatility 30,IDX:NIFTYALPHAQUALITYLOW-VOLATILITY30,ind_nifty_alpha_quality_lowvol30list.csv,ind_nifty_alpha_quality_lowvol30list.csv,yes,strategy,30
+NIFTY Alpha Quality Value Low-Volatility 30,IDX:NIFTYALPHAQUALITYVALUELOW-VOLATILITY30,ind_nifty_alpha_quality_value_lowvol30list.csv,ind_nifty_alpha_quality_value_lowvol30list.csv,yes,strategy,30
+Nifty Auto,IDX:NIFTYAUTO,ind_niftyautolist.csv,ind_niftyautolist.csv,yes,sectoral,15
+Nifty Bank,IDX:NIFTYBANK,ind_niftybanklist.csv,ind_niftybanklist.csv,yes,sectoral,14
+Nifty Capital Goods,IDX:NIFTYCAPITALGOODS,ind_niftyCapitalGoods_list.csv,ind_niftyCapitalGoods_list.csv,no,sectoral,50
+Nifty Capital Markets,IDX:NIFTYCAPITALMARKETS,ind_niftyCapitalMarkets_list.csv,ind_niftyCapitalMarkets_list.csv,yes,thematic,17
+Nifty Cement,IDX:NIFTYCEMENT,ind_NiftyCement_list.csv,ind_NiftyCement_list.csv,no,sectoral,16
+Nifty Chemicals,IDX:NIFTYCHEMICALS,ind_niftyChemicals_list.csv,ind_niftyChemicals_list.csv,no,sectoral,20
+Nifty Commercial & Transport Services,IDX:NIFTYCOMMERCIAL&TRANSPORTSERVICES,ind_niftyCommercialTransportServices_list.csv,ind_niftyCommercialTransportServices_list.csv,no,sectoral,26
+Nifty Commodities,IDX:NIFTYCOMMODITIES,ind_niftycommoditieslist.csv,ind_niftycommoditieslist.csv,yes,thematic,30
+Nifty Conglomerate 50,IDX:NIFTYCONGLOMERATE50,ind_niftyConglomerate50_list.csv,ind_niftyConglomerate50_list.csv,yes,thematic,50
+Nifty Construction,IDX:NIFTYCONSTRUCTION,ind_niftyConstruction_list.csv,ind_niftyConstruction_list.csv,no,sectoral,23
+Nifty Consumer Durables,IDX:NIFTYCONSUMERDURABLES,ind_niftyconsumerdurableslist.csv,ind_niftyconsumerdurableslist.csv,yes,sectoral,13
+Nifty Consumer Services,IDX:NIFTYCONSUMERSERVICES,ind_niftyConsumerServices_list.csv,ind_niftyConsumerServices_list.csv,no,sectoral,46
+Nifty Core Housing,IDX:NIFTYCOREHOUSING,ind_niftyCoreHousing_list.csv,ind_niftyCoreHousing_list.csv,yes,thematic,30
+Nifty CPSE,IDX:NIFTYCPSE,ind_niftycpselist.csv,ind_niftycpselist.csv,yes,thematic,11
+Nifty Dividend Opportunities 50,IDX:NIFTYDIVIDENDOPPORTUNITIES50,ind_niftydivopp50list.csv,ind_niftydivopp50list.csv,yes,strategy,50
+Nifty Energy,IDX:NIFTYENERGY,ind_niftyenergylist.csv,ind_niftyenergylist.csv,yes,thematic,40
+Nifty EV & New Age Automotive,IDX:NIFTYEV&NEWAGEAUTOMOTIVE,/Index_Statistics/ind_niftyEv_NewAgeAutomotive_list.csv,ind_niftyEv_NewAgeAutomotive_list.csv,yes,thematic,33
+Nifty Financial Services,IDX:NIFTYFINANCIALSERVICES,ind_niftyfinancelist.csv,ind_niftyfinancelist.csv,yes,sectoral,20
+Nifty Financial Services 25/50,IDX:NIFTYFINANCIALSERVICES25/50,ind_niftyfinancialservices25-50list.csv,ind_niftyfinancialservices25-50list.csv,yes,sectoral,20
+Nifty Financial Services Ex-Bank,IDX:NIFTYFINANCIALSERVICESEX-BANK,ind_niftyfinancialservicesexbank_list.csv,ind_niftyfinancialservicesexbank_list.csv,yes,sectoral,30
+Nifty FMCG,IDX:NIFTYFMCG,ind_niftyfmcglist.csv,ind_niftyfmcglist.csv,yes,sectoral,15
+Nifty Growth Sectors 15,IDX:NIFTYGROWTHSECTORS15,ind_NiftyGrowth_Sectors15_Index.csv,ind_NiftyGrowth_Sectors15_Index.csv,yes,strategy,15
+Nifty Healthcare Index,IDX:NIFTYHEALTHCAREINDEX,ind_niftyhealthcarelist.csv,ind_niftyhealthcarelist.csv,yes,sectoral,20
+Nifty High Beta 50,IDX:NIFTYHIGHBETA50,nifty_High_Beta50_Index.csv,nifty_High_Beta50_Index.csv,yes,strategy,50
+Nifty Hospitals,IDX:NIFTYHOSPITALS,ind_niftyHospitals_list.csv,ind_niftyHospitals_list.csv,no,sectoral,13
+Nifty Housing,IDX:NIFTYHOUSING,ind_niftyhousing_list.csv,ind_niftyhousing_list.csv,no,thematic,50
+Nifty Housing Finance,IDX:NIFTYHOUSINGFINANCE,ind_niftyHousingFinance_list.csv,ind_niftyHousingFinance_list.csv,no,sectoral,10
+Nifty India Consumption,IDX:NIFTYINDIACONSUMPTION,ind_niftyconsumptionlist.csv,ind_niftyconsumptionlist.csv,yes,thematic,30
+Nifty India Corporate Group Index - Aditya Birla Group,IDX:NIFTYINDIACORPORATEGROUPINDEX-ADITYABIRLAGROUP,ind_nifty_adityabirlalist.csv,ind_nifty_adityabirlalist.csv,yes,thematic,13
+Nifty India Corporate Group Index - Mahindra Group,IDX:NIFTYINDIACORPORATEGROUPINDEX-MAHINDRAGROUP,ind_nifty_mahindralist.csv,ind_nifty_mahindralist.csv,yes,thematic,9
+Nifty India Corporate Group Index - Tata Group,IDX:NIFTYINDIACORPORATEGROUPINDEX-TATAGROUP,ind_nifty_tatalist.csv,ind_nifty_tatalist.csv,yes,thematic,23
+Nifty India Corporate Group Index - Tata Group 25% Cap,IDX:NIFTYINDIACORPORATEGROUPINDEX-TATAGROUP25%CAP,ind_nifty_tata25caplist.csv,ind_nifty_tata25caplist.csv,yes,thematic,10
+Nifty India Defence,IDX:NIFTYINDIADEFENCE,ind_niftyindiadefence_list.csv,ind_niftyindiadefence_list.csv,yes,thematic,19
+Nifty India Digital,IDX:NIFTYINDIADIGITAL,ind_niftyindiadigital_list.csv,ind_niftyindiadigital_list.csv,yes,thematic,51
+Nifty India FPI 150,IDX:NIFTYINDIAFPI150,ind_niftyIndiaFPI150_list.csv,ind_niftyIndiaFPI150_list.csv,yes,broad,150
+Nifty India Infrastructure & Logistics,IDX:NIFTYINDIAINFRASTRUCTURE&LOGISTICS,ind_niftyIndiaInfrastructure_Logistics_list.csv,ind_niftyIndiaInfrastructure_Logistics_list.csv,yes,thematic,100
+Nifty India Internet,IDX:NIFTYINDIAINTERNET,ind_niftyIndiaInternet_list.csv,ind_niftyIndiaInternet_list.csv,yes,thematic,27
+Nifty India Manufacturing,IDX:NIFTYINDIAMANUFACTURING,ind_niftyindiamanufacturing_list.csv,ind_niftyindiamanufacturing_list.csv,yes,thematic,76
+Nifty India New Age Consumption,IDX:NIFTYINDIANEWAGECONSUMPTION,ind_niftyIndiaNewAgeConsumption_list.csv,ind_niftyIndiaNewAgeConsumption_list.csv,yes,thematic,75
+Nifty India Railways PSU,IDX:NIFTYINDIARAILWAYSPSU,ind_niftyIndiaRailwaysPSU_list.csv,ind_niftyIndiaRailwaysPSU_list.csv,yes,thematic,17
+Nifty India Select 5 Corporate Groups (MAATR),IDX:NIFTYINDIASELECT5CORPORATEGROUPS(MAATR),ind_niftyIndiaSelect5CorporateGroupsMAATR_list.csv,ind_niftyIndiaSelect5CorporateGroupsMAATR_list.csv,yes,thematic,42
+Nifty India Tourism,IDX:NIFTYINDIATOURISM,ind_niftyindiatourism_list.csv,ind_niftyindiatourism_list.csv,yes,thematic,15
+Nifty Infrastructure,IDX:NIFTYINFRASTRUCTURE,ind_niftyinfralist.csv,ind_niftyinfralist.csv,yes,thematic,30
+Nifty Insurance,IDX:NIFTYINSURANCE,ind_niftyInsurance_list.csv,ind_niftyInsurance_list.csv,no,sectoral,12
+Nifty IPO,IDX:NIFTYIPO,ind_niftyIPO_list.csv,ind_niftyIPO_list.csv,yes,thematic,109
+Nifty IT,IDX:NIFTYIT,ind_niftyitlist.csv,ind_niftyitlist.csv,yes,sectoral,10
+NIFTY LargeMidcap 250,IDX:NIFTYLARGEMIDCAP250,ind_niftylargemidcap250list.csv,ind_niftylargemidcap250list.csv,yes,broad,250
+Nifty Low Volatility 50,IDX:NIFTYLOWVOLATILITY50,nifty_low_Volatility50_Index.csv,nifty_low_Volatility50_Index.csv,no,strategy,50
+Nifty Media,IDX:NIFTYMEDIA,ind_niftymedialist.csv,ind_niftymedialist.csv,yes,sectoral,10
+Nifty Metal,IDX:NIFTYMETAL,ind_niftymetallist.csv,ind_niftymetallist.csv,yes,sectoral,15
+Nifty Microcap 250,IDX:NIFTYMICROCAP250,ind_niftymicrocap250_list.csv,ind_niftymicrocap250_list.csv,yes,broad,250
+NIFTY Midcap 100,IDX:NIFTYMIDCAP100,ind_niftymidcap100list.csv,ind_niftymidcap100list.csv,yes,broad,100
+Nifty Midcap 150,IDX:NIFTYMIDCAP150,ind_niftymidcap150list.csv,ind_niftymidcap150list.csv,yes,broad,150
+Nifty Midcap 50,IDX:NIFTYMIDCAP50,ind_niftymidcap50list.csv,ind_niftymidcap50list.csv,yes,broad,50
+Nifty Midcap Liquid 15,IDX:NIFTYMIDCAPLIQUID15,ind_Nifty_Midcap_Liquid15.csv,ind_Nifty_Midcap_Liquid15.csv,yes,thematic,15
+Nifty Midcap Select,IDX:NIFTYMIDCAPSELECT,ind_niftymidcapselect_list.csv,ind_niftymidcapselect_list.csv,yes,broad,25
+Nifty Midcap150 Momentum 50,IDX:NIFTYMIDCAP150MOMENTUM50,ind_niftymidcap150momentum50_list.csv,ind_niftymidcap150momentum50_list.csv,yes,strategy,50
+NIFTY Midcap150 Quality 50,IDX:NIFTYMIDCAP150QUALITY50,ind_niftymidcap150quality50list.csv,ind_niftymidcap150quality50list.csv,yes,strategy,50
+Nifty MidSmall Financial Services,IDX:NIFTYMIDSMALLFINANCIALSERVICES,ind_niftymidsmallfinancailservice_list.csv,ind_niftymidsmallfinancailservice_list.csv,yes,sectoral,30
+Nifty MidSmall Healthcare,IDX:NIFTYMIDSMALLHEALTHCARE,ind_niftymidsmallhealthcare_list.csv,ind_niftymidsmallhealthcare_list.csv,yes,sectoral,30
+Nifty MidSmall India Consumption,IDX:NIFTYMIDSMALLINDIACONSUMPTION,ind_niftymidsmallindiaconsumption_list.csv,ind_niftymidsmallindiaconsumption_list.csv,yes,thematic,30
+Nifty MidSmall IT & Telecom,IDX:NIFTYMIDSMALLIT&TELECOM,ind_niftymidsmallitAndtelecom_list.csv,ind_niftymidsmallitAndtelecom_list.csv,yes,sectoral,20
+Nifty MidSmallcap 400,IDX:NIFTYMIDSMALLCAP400,ind_niftymidsmallcap400list.csv,ind_niftymidsmallcap400list.csv,yes,broad,400
+Nifty MidSmallcap400 50:50,IDX:NIFTYMIDSMALLCAP40050:50,ind_niftyMidSmallcap4005050_list.csv,ind_niftyMidSmallcap4005050_list.csv,yes,broad,400
+Nifty MidSmallcap400 Momentum Quality 100,IDX:NIFTYMIDSMALLCAP400MOMENTUMQUALITY100,ind_niftyMidSmallcap400MomentumQuality100_list.csv,ind_niftyMidSmallcap400MomentumQuality100_list.csv,yes,strategy,100
+Nifty MNC,IDX:NIFTYMNC,ind_niftymnclist.csv,ind_niftymnclist.csv,yes,thematic,30
+Nifty Mobility,IDX:NIFTYMOBILITY,ind_niftymobility_list.csv,ind_niftymobility_list.csv,yes,strategy,30
+Nifty NBFC,IDX:NIFTYNBFC,ind_niftyNBFC_list.csv,ind_niftyNBFC_list.csv,no,sectoral,19
+Nifty Next 50,IDX:NIFTYNEXT50,ind_niftynext50list.csv,ind_niftynext50list.csv,yes,broad,50
+Nifty Non-Cyclical Consumer,IDX:NIFTYNON-CYCLICALCONSUMER,ind_niftynon-cyclicalconsumer_list.csv,ind_niftynon-cyclicalconsumer_list.csv,yes,thematic,30
+Nifty Oil & Gas,IDX:NIFTYOIL&GAS,ind_niftyoilgaslist.csv,ind_niftyoilgaslist.csv,yes,sectoral,15
+Nifty Pharma,IDX:NIFTYPHARMA,ind_niftypharmalist.csv,ind_niftypharmalist.csv,yes,sectoral,20
+Nifty Power,IDX:NIFTYPOWER,ind_niftyPower_list.csv,ind_niftyPower_list.csv,no,sectoral,21
+Nifty Private Bank,IDX:NIFTYPRIVATEBANK,ind_nifty_privatebanklist.csv,ind_nifty_privatebanklist.csv,yes,sectoral,10
+Nifty PSE,IDX:NIFTYPSE,ind_niftypselist.csv,ind_niftypselist.csv,yes,thematic,20
+Nifty PSU Bank,IDX:NIFTYPSUBANK,ind_niftypsubanklist.csv,ind_niftypsubanklist.csv,yes,sectoral,12
+NIFTY Quality Low-Volatility 30,IDX:NIFTYQUALITYLOW-VOLATILITY30,ind_nifty_quality_lowvol30list.csv,ind_nifty_quality_lowvol30list.csv,yes,strategy,30
+Nifty Realty,IDX:NIFTYREALTY,ind_niftyrealtylist.csv,ind_niftyrealtylist.csv,yes,sectoral,10
+Nifty REITs & InvITs,IDX:NIFTYREITS&INVITS,ind_niftyREITs_InvITs_list.csv,ind_niftyREITs_InvITs_list.csv,yes,thematic,13
+Nifty REITs & InvITs 90:10,IDX:NIFTYREITS&INVITS90:10,ind_niftyREITsInvITs9010list.csv,ind_niftyREITsInvITs9010list.csv,no,thematic,13
+Nifty REITs & Realty,IDX:NIFTYREITS&REALTY,ind_niftyREITsRealty_list.csv,ind_niftyREITsRealty_list.csv,yes,sectoral,15
+Nifty Retail,IDX:NIFTYRETAIL,ind_niftyRetail_list.csv,ind_niftyRetail_list.csv,no,sectoral,26
+Nifty Rural,IDX:NIFTYRURAL,ind_niftyRural_list.csv,ind_niftyRural_list.csv,yes,thematic,75
+Nifty Services Sector,IDX:NIFTYSERVICESSECTOR,ind_niftyservicelist.csv,ind_niftyservicelist.csv,yes,thematic,30
+Nifty Small Finance Banks & Microfinance Institutions,IDX:NIFTYSMALLFINANCEBANKS&MICROFINANCEINSTITUTIONS,ind_niftySFBsMfis_list.csv,ind_niftySFBsMfis_list.csv,no,thematic,10
+NIFTY Smallcap 100,IDX:NIFTYSMALLCAP100,ind_niftysmallcap100list.csv,ind_niftysmallcap100list.csv,yes,broad,100
+Nifty Smallcap 250,IDX:NIFTYSMALLCAP250,ind_niftysmallcap250list.csv,ind_niftysmallcap250list.csv,yes,broad,250
+Nifty Smallcap 50,IDX:NIFTYSMALLCAP50,ind_niftysmallcap50list.csv,ind_niftysmallcap50list.csv,yes,broad,50
+Nifty Smallcap 500,IDX:NIFTYSMALLCAP500,ind_NiftySmallcap500_list.csv,ind_NiftySmallcap500_list.csv,no,broad,500
+Nifty Smallcap250 Momentum Quality 100,IDX:NIFTYSMALLCAP250MOMENTUMQUALITY100,ind_niftySmallcap250MomentumQuality100_list.csv,ind_niftySmallcap250MomentumQuality100_list.csv,yes,strategy,100
+Nifty Smallcap250 Quality 50,IDX:NIFTYSMALLCAP250QUALITY50,ind_niftySmallcap250_Quality50_list.csv,ind_niftySmallcap250_Quality50_list.csv,yes,strategy,50
+NIFTY SME EMERGE,IDX:NIFTYSMEEMERGE,ind_niftysmelist.csv,ind_niftysmelist.csv,yes,thematic,532
+Nifty Sugar & Ethanol,IDX:NIFTYSUGAR&ETHANOL,ind_niftySugarEthanol_list.csv,ind_niftySugarEthanol_list.csv,no,thematic,15
+Nifty Telecommunications,IDX:NIFTYTELECOMMUNICATIONS,ind_niftyTelecommunications_list.csv,ind_niftyTelecommunications_list.csv,no,sectoral,13
+Nifty Top 10 Equal Weight,IDX:NIFTYTOP10EQUALWEIGHT,ind_niftytop10EqualWeight_list.csv,ind_niftytop10EqualWeight_list.csv,yes,strategy,10
+Nifty Top 15 Equal Weight,IDX:NIFTYTOP15EQUALWEIGHT,ind_niftytop15EqualWeight_list.csv,ind_niftytop15EqualWeight_list.csv,yes,strategy,15
+Nifty Top 20 Equal Weight,IDX:NIFTYTOP20EQUALWEIGHT,ind_niftyTop20EqualWeight_list.csv,ind_niftyTop20EqualWeight_list.csv,yes,strategy,20
+Nifty Total Market,IDX:NIFTYTOTALMARKET,ind_niftytotalmarket_list.csv,ind_niftytotalmarket_list.csv,yes,broad,750
+Nifty Total Market Momentum Quality 50,IDX:NIFTYTOTALMARKETMOMENTUMQUALITY50,ind_niftyTotalMarketMomentumQuality50_list.csv,ind_niftyTotalMarketMomentumQuality50_list.csv,yes,strategy,50
+Nifty Transportation & Logistics,IDX:NIFTYTRANSPORTATION&LOGISTICS,ind_niftyTransportationandLogistics_list.csv,ind_niftyTransportationandLogistics_list.csv,no,thematic,30
+Nifty Waves,IDX:NIFTYWAVES,ind_niftyWaves_list.csv,ind_niftyWaves_list.csv,no,thematic,43
+NIFTY100 Alpha 30,IDX:NIFTY100ALPHA30,ind_nifty100Alpha30list.csv,ind_nifty100Alpha30list.csv,yes,strategy,30
+Nifty100 Equal Weight,IDX:NIFTY100EQUALWEIGHT,ind_nifty100list.csv,ind_nifty100list.csv,yes,broad,100
+Nifty100 Liquid 15,IDX:NIFTY100LIQUID15,ind_Nifty100_Liquid15.csv,ind_Nifty100_Liquid15.csv,yes,thematic,15
+Nifty100 Low Volatility 30,IDX:NIFTY100LOWVOLATILITY30,ind_Nifty100LowVolatility30list.csv,ind_Nifty100LowVolatility30list.csv,yes,strategy,30
+NIFTY100 Quality 30,IDX:NIFTY100QUALITY30,ind_nifty100Quality30list.csv,ind_nifty100Quality30list.csv,yes,strategy,30
+Nifty200 Alpha 30,IDX:NIFTY200ALPHA30,ind_nifty200alpha30_list.csv,ind_nifty200alpha30_list.csv,yes,strategy,30
+Nifty200 Momentum 30,IDX:NIFTY200MOMENTUM30,ind_nifty200Momentum30_list.csv,ind_nifty200Momentum30_list.csv,yes,strategy,30
+NIFTY200 Quality 30,IDX:NIFTY200QUALITY30,ind_nifty200Quality30_list.csv,ind_nifty200Quality30_list.csv,yes,strategy,30
+Nifty200 Value 30,IDX:NIFTY200VALUE30,ind_nifty200Value30_list.csv,ind_nifty200Value30_list.csv,yes,strategy,30
+NIFTY50 Equal Weight,IDX:NIFTY50EQUALWEIGHT,ind_Nifty50EqualWeight.csv,ind_Nifty50EqualWeight.csv,yes,strategy,50
+Nifty50 Value 20,IDX:NIFTY50VALUE20,ind_Nifty50_Value20.csv,ind_Nifty50_Value20.csv,yes,strategy,20
+Nifty500 Ahimsa,IDX:NIFTY500AHIMSA,ind_nifty500Ahimsa_list.csv,ind_nifty500Ahimsa_list.csv,no,thematic,326
+Nifty500 Equal Weight,IDX:NIFTY500EQUALWEIGHT,ind_nifty500EqualWeight_list.csv,ind_nifty500EqualWeight_list.csv,yes,strategy,500
+Nifty500 Flexicap Quality 30,IDX:NIFTY500FLEXICAPQUALITY30,ind_nifty500FlexicapQuality30_list.csv,ind_nifty500FlexicapQuality30_list.csv,yes,strategy,30
+Nifty500 Healthcare,IDX:NIFTY500HEALTHCARE,ind_nifty500Healthcare_list.csv,ind_nifty500Healthcare_list.csv,no,sectoral,48
+Nifty500 LargeMidSmall Equal-Cap Weighted,IDX:NIFTY500LARGEMIDSMALLEQUAL-CAPWEIGHTED,ind_nifty500LargeMidSmallEqualCapWeighted_list.csv,ind_nifty500LargeMidSmallEqualCapWeighted_list.csv,yes,broad,500
+Nifty500 Low Volatility 50,IDX:NIFTY500LOWVOLATILITY50,ind_nifty500LowVolatility50_list.csv,ind_nifty500LowVolatility50_list.csv,yes,strategy,50
+Nifty500 Momentum 50,IDX:NIFTY500MOMENTUM50,ind_nifty500Momentum50_list.csv,ind_nifty500Momentum50_list.csv,yes,strategy,50
+Nifty500 Multicap 50:25:25,IDX:NIFTY500MULTICAP50:25:25,ind_nifty500Multicap502525_list.csv,ind_nifty500Multicap502525_list.csv,yes,broad,500
+Nifty500 Multicap India Manufacturing 50:30:20,IDX:NIFTY500MULTICAPINDIAMANUFACTURING50:30:20,ind_nifty500MulticapIndiaManufacturing503020_list.csv,ind_nifty500MulticapIndiaManufacturing503020_list.csv,yes,thematic,75
+Nifty500 Multicap Infrastructure 50:30:20,IDX:NIFTY500MULTICAPINFRASTRUCTURE50:30:20,ind_nifty500MulticapInfrastructure503020_list.csv,ind_nifty500MulticapInfrastructure503020_list.csv,yes,thematic,75
+Nifty500 Multicap Momentum Quality 50,IDX:NIFTY500MULTICAPMOMENTUMQUALITY50,ind_nifty500MulticapMomentumQuality50_list.csv,ind_nifty500MulticapMomentumQuality50_list.csv,yes,strategy,50
+Nifty500 Multifactor MQVLv 50,IDX:NIFTY500MULTIFACTORMQVLV50,ind_nifty500MultifactorMQVLv50_list.csv,ind_nifty500MultifactorMQVLv50_list.csv,yes,strategy,50
+Nifty500 Quality 50,IDX:NIFTY500QUALITY50,ind_nifty500Quality50_list.csv,ind_nifty500Quality50_list.csv,yes,strategy,50
+NIFTY500 Value 50,IDX:NIFTY500VALUE50,ind_nifty500Value50_list.csv,ind_nifty500Value50_list.csv,yes,strategy,50
