@@ -284,3 +284,46 @@ def test_every_catalog_row_carries_nse_s_own_family_label():
     assert by_name["Nifty 50"] == "broad"
     keep = [r for r in catalog if r["family"] in ("sectoral", "thematic")]
     assert len(keep) > 60
+
+
+def test_curation_is_seed_data_with_the_owner_s_thirty_names():
+    # The Rotation tool's list is DATA: exactly 30 rows flagged, each carrying
+    # the owner's display name. Changing the list is a seed edit + republish,
+    # never an app release — that promise is this test.
+    catalog = builders._read_constituents_catalog()
+    flagged = [r for r in catalog if r.get("rotation", "").strip().lower() == "yes"]
+    assert len(flagged) == 30
+    labels = {r["index_name"]: r["display_label"] for r in flagged}
+    # The owner's names where NSE's differ.
+    assert labels["Nifty India Defence"] == "Nifty Defence"
+    assert labels["Nifty EV & New Age Automotive"] == "Nifty EV"
+    assert labels["Nifty Healthcare Index"] == "Nifty Healthcare"
+    assert labels["Nifty Metal"] == "Nifty Metals & Mining"
+    assert labels["Nifty India Manufacturing"] == "Nifty Manufacturing"
+    # None of the near-duplicates the owner rejected.
+    names = set(labels)
+    for banned in ["25/50", "MidSmall", "Ex-Bank", "Nifty500 Healthcare"]:
+        assert not any(banned in n for n in names), banned
+
+
+def test_display_label_falls_back_to_the_index_name():
+    df = nse_constituents.parse_constituents_csv(
+        _csv(6),
+        index_key="IDX:NIFTYBANK",
+        index_name="Nifty Bank",
+        family="sectoral",
+        source_file="x.csv",
+    )
+    assert df["display_label"].unique().tolist() == ["Nifty Bank"]
+    assert not df["rotation_list"].any()
+
+
+def test_the_housing_header_variant_is_accepted():
+    # NSE ships two header spellings. The Housing list says "Company" where
+    # every other file says "Company Name" — a real variant the gate must
+    # admit, found when the 30-index curation came back 29. Still a whitelist:
+    # anything outside the two known forms is rejected.
+    variant = b"Company,Industry,Symbol,Series,ISIN Code\n" + _csv(6)[len(HEADER):]
+    assert len(_parse(variant)) == 6
+    with pytest.raises(nse_constituents.MalformedConstituentCsv):
+        _parse(b"Firm,Industry,Symbol,Series,ISIN Code\n" + _csv(6)[len(HEADER):])
