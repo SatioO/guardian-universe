@@ -117,6 +117,9 @@ builders.BUILDERS["ca_flags"] = functools.partial(
 # registered directly. Its keyword-only fetch/TTL/floor args carry defaults, so
 # it still satisfies BUILDERS' `Callable[[DatasetSpec, date], RunStatus]`.
 builders.BUILDERS["sector_industry"] = builders.build_sector_industry
+# index_constituents likewise fetches its own external CSVs (one per index);
+# registered bare, its keyword-only fetch/TTL/floor args carry defaults.
+builders.BUILDERS["index_constituents"] = builders.build_index_constituents
 
 
 def _plain_runner(cmd: list[str]) -> int:

@@ -145,6 +145,23 @@ SECTOR_MIN_ROWS: int = 400
 # script's header); classification is near-static so this is infrequent.
 SECTOR_SEED_PATH: Path = PROJECT_ROOT / "seeds" / "sector_industry_seed.csv"
 
+# Index -> member-stock reference. Retires the desktop client's runtime
+# niftyindices scrape, where 15 index->filename pairs were hardcoded in Rust
+# and every new index cost an app release.
+CONSTITUENTS_DIR: Path = DATA_DIR / "constituents"
+# NSE publishes no bulk index-membership file and the per-index CSV filenames
+# follow no derivable rule, so the catalog is committed rather than computed —
+# harvested from each index's own page. See the seeds README.
+CONSTITUENTS_CATALOG_PATH: Path = PROJECT_ROOT / "seeds" / "index_constituents_catalog.csv"
+# Weekly, matching the cadence the desktop cache already used. Index
+# rebalances are semi-annual (March/September) with ad-hoc corporate-action
+# changes between, so a 7-day window bounds staleness without polling a
+# near-static resource daily.
+CONSTITUENTS_REFRESH_TTL_DAYS: int = 7
+# Floor across ALL indices in one run. The per-index floor lives in
+# nse_constituents.MIN_MEMBERS; this catches a run where most fetches failed.
+CONSTITUENTS_MIN_ROWS: int = 2000
+
 # Corporate-action ex-date detector (G1b task 7): flag an instrument when
 # abs(prevclose_today / close_prev - 1) exceeds this fraction -- a split,
 # bonus, or other ex-date discontinuity, not ordinary price movement.

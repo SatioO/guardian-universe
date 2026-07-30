@@ -42,7 +42,7 @@ from pipeline import config, store
 from pipeline.daily_update import RunStatus
 from pipeline.datasets import DatasetSpec
 from pipeline.fetch import _BROWSER_UA, _fetch_with_retry
-from pipeline.sources import classification_publication, nse_sector
+from pipeline.sources import classification_publication, nse_constituents, nse_sector
 from pipeline.sources.classification_registry import ClassificationRegistryRecord
 from pipeline.sources.nse_universe import (
     RegistryEntry,
@@ -674,3 +674,221 @@ def _sector_content_unchanged(out_path: Path, df: pd.DataFrame) -> bool:
         return f.astype("string").fillna("").to_csv(index=False)
 
     return _canon(df) == _canon(prev)
+
+
+# ── index constituents ──────────────────────────────────────────────────────
+
+def _read_constituents_catalog() -> list[dict[str, str]]:
+    """The committed index -> published-CSV catalog.
+
+    Not computed: NSE's per-index filenames follow no rule (Defence keeps
+    "india", Consumption drops it, Infrastructure abbreviates, MidSmall
+    Financial Services carries NSE's own typo). See the seeds README.
+    """
+    path = config.CONSTITUENTS_CATALOG_PATH
+    if not path.exists():
+        return []
+    import csv as _csv
+
+    with path.open(newline="") as f:
+        return [row for row in _csv.DictReader(f) if row.get("csv_path")]
+
+
+def _index_key_map(indices_spec: DatasetSpec) -> dict[str, str]:
+    """Map normalized index NAME -> current `IDX:` key, read from the indices
+    dataset's most recent session.
+
+    Resolved per run, never frozen into the catalog, because index names drift
+    and the key drifts with them: `IDX:NIFTYINDIAINTERNET&E-COMMERCE` became
+    `IDX:NIFTYINDIAINTERNET` on 2025-05-05. A stale key does not error — it
+    publishes a basket under a key nothing joins to, and the consumer's drill
+    silently empties, which reads as "this index has no members" rather than
+    as a fault.
+    """
+    files = sorted(indices_spec.base_dir.glob(f"{indices_spec.file_prefix}_*.parquet"))
+    if not files:
+        return {}
+    df = pd.read_parquet(files[-1], columns=["date", "instrument_key", "symbol"])
+    if df.empty:
+        return {}
+    latest = df[df["date"] == df["date"].max()]
+    return {
+        nse_constituents.normalize_index_name(str(name)): str(key)
+        for name, key in zip(latest["symbol"], latest["instrument_key"], strict=False)
+    }
+
+
+def _fetch_one_constituent_list(
+    session: requests.Session, row: dict[str, str], index_key: str, target: date
+) -> pd.DataFrame:
+    """Fetch one index's basket, primary host first then the archives mirror.
+
+    Order matters and is the opposite of a "prefer the CDN" instinct: the
+    mirror is missing 23 of 134 lists (Chemicals, Housing, Capital Goods,
+    Consumer Services, ...), so leading with it would drop those indices
+    entirely. The mirror is the fallback for when the primary is unreachable —
+    notably from CI, where Akamai blocks datacenter IPs on NSE's API host.
+    """
+    csv_path = row["csv_path"]
+    name = row["index_name"]
+    source_file = csv_path.rsplit("/", 1)[-1]
+
+    def _parse(payload: bytes) -> pd.DataFrame:
+        return nse_constituents.parse_constituents_csv(
+            payload,
+            index_key=index_key,
+            index_name=name,
+            family=row.get("family", "unknown"),
+            source_file=source_file,
+        )
+
+    urls = [nse_constituents.primary_url(csv_path)]
+    if row.get("on_mirror", "").strip().lower() == "yes":
+        urls.append(nse_constituents.mirror_url(csv_path))
+
+    last: Exception | None = None
+    for url in urls:
+        try:
+            return _fetch_with_retry(session, url, target, parse=_parse)
+        except Exception as e:  # noqa: BLE001 - try the next host, then give up
+            last = e
+    raise RuntimeError(f"{name}: all hosts failed ({last})")
+
+
+def _constituents_prior(out_path: Path) -> pd.DataFrame | None:
+    if not out_path.exists():
+        return None
+    try:
+        return pd.read_parquet(out_path)
+    except Exception:  # noqa: BLE001 - a corrupt prior file is treated as absent
+        return None
+
+
+def build_index_constituents(
+    spec: DatasetSpec,
+    target: date,
+    *,
+    fetch_lists: Callable[[date], pd.DataFrame] | None = None,
+    ttl_days: int = config.CONSTITUENTS_REFRESH_TTL_DAYS,
+    min_rows: int = config.CONSTITUENTS_MIN_ROWS,
+) -> RunStatus:
+    """Fetch every catalogued index's published basket and full-rewrite
+    `index_constituents_all.parquet`.
+
+    Weekly TTL: index rebalances are semi-annual (March/September) with ad-hoc
+    corporate-action changes between, so re-fetching ~134 CSVs daily would poll
+    a near-static resource for nothing. Within the TTL this is a no-op.
+
+    Fail-closed, at TWO levels, because the two failures are different:
+      - PER INDEX: a failed fetch or malformed payload keeps that index's prior
+        rows and is counted, never published as an empty basket. An index whose
+        drill silently empties looks like a real (empty) answer to a user.
+      - PER RUN: zero rows, a total under `min_rows`, or a shrink against the
+        stored file holds the whole write back — the same wall
+        build_sector_industry puts up, and the publish shrink-guard besides.
+    """
+    spec.base_dir.mkdir(parents=True, exist_ok=True)
+    out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
+    prior = _constituents_prior(out_path)
+    prior_rows = None if prior is None else len(prior)
+
+    if _sector_is_fresh(out_path, target, ttl_days):
+        return RunStatus(
+            "skipped_idempotent",
+            target,
+            symbol_count=prior_rows or 0,
+            source=spec.source_label,
+            message=f"within {ttl_days}-day TTL; not re-fetched",
+        )
+
+    try:
+        df = (fetch_lists or _fetch_all_constituent_lists)(target)
+    except Exception as e:  # noqa: BLE001 - any failure -> fail-closed
+        return _constituents_fail_closed(spec, target, out_path, prior_rows, f"fetch failed: {e}")
+
+    if df.empty:
+        return _constituents_fail_closed(spec, target, out_path, prior_rows, "parsed 0 valid rows")
+    if len(df) < min_rows:
+        return _constituents_fail_closed(
+            spec, target, out_path, prior_rows,
+            f"parsed {len(df)} rows < floor {min_rows} (suspected partial run)",
+        )
+
+    # Carry forward any index the run could not reach, so one unreachable host
+    # never deletes a basket that was fine yesterday.
+    if prior is not None:
+        missing = set(prior["index_key"]) - set(df["index_key"])
+        if missing:
+            carried = prior[prior["index_key"].isin(missing)]
+            df = pd.concat([df, carried], ignore_index=True)
+
+    if prior_rows is not None and len(df) < prior_rows:
+        return _constituents_fail_closed(
+            spec, target, out_path, prior_rows,
+            f"parsed {len(df)} rows < prior {prior_rows} (shrink-guard)",
+        )
+
+    dupes = df.duplicated(subset=["index_key", "instrument_key"]).sum()
+    if dupes:
+        return _constituents_fail_closed(
+            spec, target, out_path, prior_rows,
+            f"{dupes} duplicate (index_key, instrument_key) rows",
+        )
+
+    # REQUIRED for the manifest: build_manifest reads columns=["date"], so a
+    # missing column raises ArrowInvalid and aborts the publish for EVERY
+    # dataset, not just this one.
+    out = df.copy()
+    out["date"] = pd.Timestamp(target)
+    out = out[[*nse_constituents.CONSTITUENT_COLUMNS, "date"]]
+    _write_atomic(out, out_path)
+    return RunStatus(
+        "ok",
+        target,
+        symbol_count=len(out),
+        source=spec.source_label,
+        message=f"{out['index_key'].nunique()} indices",
+    )
+
+
+def _constituents_fail_closed(
+    spec: DatasetSpec, target: date, out_path: Path, prior_rows: int | None, why: str
+) -> RunStatus:
+    """Keep the prior file when there is one; fail loudly when there is not."""
+    if out_path.exists() and prior_rows:
+        return RunStatus(
+            "skipped", target, symbol_count=prior_rows, source=spec.source_label,
+            message=f"{why}; retained prior file",
+        )
+    return RunStatus("failed", target, source=spec.source_label, message=why)
+
+
+def _fetch_all_constituent_lists(target: date) -> pd.DataFrame:
+    """Fetch every catalogued basket. Per-index failures are skipped (the
+    caller carries prior rows forward for them); the run fails only if the
+    catalog is missing or nothing at all resolved."""
+    catalog = _read_constituents_catalog()
+    if not catalog:
+        return pd.DataFrame(columns=nse_constituents.CONSTITUENT_COLUMNS)
+
+    from pipeline import datasets as _datasets
+
+    keys = _index_key_map(_datasets.INDICES)
+    session = requests.Session()
+    session.headers.update({"User-Agent": _BROWSER_UA})
+
+    frames: list[pd.DataFrame] = []
+    for row in catalog:
+        key = keys.get(nse_constituents.normalize_index_name(row["index_name"]))
+        if not key:
+            # Unresolvable name -> skip. Emitting under the catalog's advisory
+            # key would publish rows nothing can join to.
+            continue
+        try:
+            frames.append(_fetch_one_constituent_list(session, row, key, target))
+        except Exception:  # noqa: BLE001 - per-index skip; prior rows carry forward
+            continue
+
+    if not frames:
+        return pd.DataFrame(columns=nse_constituents.CONSTITUENT_COLUMNS)
+    return pd.concat(frames, ignore_index=True)
