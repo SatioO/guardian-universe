@@ -34,6 +34,7 @@ def _parse(payload: bytes):
         payload,
         index_key="IDX:NIFTYBANK",
         index_name="Nifty Bank",
+        family="sectoral",
         source_file="ind_niftybanklist.csv",
     )
 
@@ -45,6 +46,9 @@ def test_parses_a_published_basket_into_the_normalized_frame():
     assert list(df.columns) == nse_constituents.CONSTITUENT_COLUMNS
     assert len(df) == 6
     assert df["index_key"].unique().tolist() == ["IDX:NIFTYBANK"]
+    # NSE's family travels WITH the rows: the consumer scopes by it and cannot
+    # re-derive it from the name.
+    assert df["family"].unique().tolist() == ["sectoral"]
     # The ISIN is the join key and is mirrored into instrument_key.
     assert (df["instrument_key"] == df["isin"]).all()
     assert df["symbol"].iloc[0] == "SYM0"
@@ -126,6 +130,7 @@ def _frame(indices: dict[str, int]) -> pd.DataFrame:
             rows.append(
                 {
                     "index_key": key, "index_name": key.removeprefix("IDX:"),
+                    "family": "sectoral",
                     "instrument_key": f"INE{i:04d}A0101", "symbol": f"S{i}",
                     "isin": f"INE{i:04d}A0101", "company": f"C{i}",
                     "industry": "Fin", "series": "EQ", "source_file": "x.csv",

@@ -52,6 +52,11 @@ MIN_MEMBERS = 5
 CONSTITUENT_COLUMNS: list[str] = [
     "index_key",       # "IDX:NIFTYBANK" — joins to indices_*.parquet.instrument_key
     "index_name",      # "Nifty Bank" — NSE's own display name, verbatim
+    "family",          # NSE's own category: sectoral | thematic | strategy | broad.
+                       # Consumers scope by this (the Rotation tool plots
+                       # sectoral + thematic), so it has to travel with the
+                       # rows — it cannot be re-derived from the name: NSE
+                       # files Nifty Energy as thematic.
     "instrument_key",  # ISIN — THE join key, to ohlc_* and instruments_all
     "symbol",          # display/diagnostics only, never the join
     "isin",            # same value as instrument_key; mirrors the redundancy
@@ -86,7 +91,7 @@ class MalformedConstituentCsv(ValueError):
 
 
 def parse_constituents_csv(
-    payload: bytes, *, index_key: str, index_name: str, source_file: str
+    payload: bytes, *, index_key: str, index_name: str, family: str, source_file: str
 ) -> pd.DataFrame:
     """Parse one index's member CSV into the normalized constituent frame.
 
@@ -133,6 +138,7 @@ def parse_constituents_csv(
             {
                 "index_key": index_key,
                 "index_name": index_name,
+                "family": family,
                 "instrument_key": isin,
                 "symbol": symbol.upper(),
                 "isin": isin,

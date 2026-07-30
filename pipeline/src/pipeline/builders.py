@@ -735,7 +735,11 @@ def _fetch_one_constituent_list(
 
     def _parse(payload: bytes) -> pd.DataFrame:
         return nse_constituents.parse_constituents_csv(
-            payload, index_key=index_key, index_name=name, source_file=source_file
+            payload,
+            index_key=index_key,
+            index_name=name,
+            family=row.get("family", "unknown"),
+            source_file=source_file,
         )
 
     urls = [nse_constituents.primary_url(csv_path)]
