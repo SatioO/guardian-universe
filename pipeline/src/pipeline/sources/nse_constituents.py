@@ -38,11 +38,18 @@ PRIMARY_DIR = "/IndexConstituent"
 # fallback, never the sole source, or those indices vanish silently.
 MIRROR_BASE_URL = "https://nsearchives.nseindia.com/content/indices"
 
-# The exact first line every published constituent CSV carries. This is the
-# guard that stops an HTML error page served with HTTP 200 from being read as
-# "this index has no members" — an empty basket is indistinguishable from a
-# real one downstream, so it must be rejected here.
-EXPECTED_HEADER = "Company Name,Industry,Symbol,Series,ISIN Code"
+# The exact first lines NSE publishes constituent CSVs with. A WHITELIST, not
+# a fuzzy match: this is the guard that stops an HTML error page served with
+# HTTP 200 from being read as "this index has no members" — an empty basket is
+# indistinguishable from a real one downstream. Two spellings, because NSE
+# ships two: most files say "Company Name"; a few (Nifty Housing) say
+# "Company". Same five columns, same order, either way.
+EXPECTED_HEADERS: tuple[str, ...] = (
+    "Company Name,Industry,Symbol,Series,ISIN Code",
+    "Company,Industry,Symbol,Series,ISIN Code",
+)
+# The canonical form, kept for messages and downstream docs.
+EXPECTED_HEADER = EXPECTED_HEADERS[0]
 
 # A published basket is never this small; anything shorter is a truncated
 # response or an error document that happened to parse.
@@ -53,10 +60,14 @@ CONSTITUENT_COLUMNS: list[str] = [
     "index_key",       # "IDX:NIFTYBANK" — joins to indices_*.parquet.instrument_key
     "index_name",      # "Nifty Bank" — NSE's own display name, verbatim
     "family",          # NSE's own category: sectoral | thematic | strategy | broad.
-                       # Consumers scope by this (the Rotation tool plots
-                       # sectoral + thematic), so it has to travel with the
-                       # rows — it cannot be re-derived from the name: NSE
-                       # files Nifty Energy as thematic.
+                       # Travels with the rows — it cannot be re-derived from
+                       # the name: NSE files Nifty Energy as thematic.
+    "rotation_list",   # bool: on the Rotation tool's curated list. CURATION IS
+                       # DATA, not app code — changing the tool's list is a
+                       # seed edit + republish, never an app release.
+    "display_label",   # what the Rotation tool calls it — the owner's name
+                       # ("Nifty EV"), not NSE's mouthful ("Nifty EV & New Age
+                       # Automotive"). Falls back to index_name when unset.
     "instrument_key",  # ISIN — THE join key, to ohlc_* and instruments_all
     "symbol",          # display/diagnostics only, never the join
     "isin",            # same value as instrument_key; mirrors the redundancy
@@ -91,7 +102,14 @@ class MalformedConstituentCsv(ValueError):
 
 
 def parse_constituents_csv(
-    payload: bytes, *, index_key: str, index_name: str, family: str, source_file: str
+    payload: bytes,
+    *,
+    index_key: str,
+    index_name: str,
+    family: str,
+    rotation_list: bool = False,
+    display_label: str = "",
+    source_file: str,
 ) -> pd.DataFrame:
     """Parse one index's member CSV into the normalized constituent frame.
 
@@ -112,7 +130,7 @@ def parse_constituents_csv(
     except StopIteration as e:
         raise MalformedConstituentCsv(f"{source_file}: empty payload") from e
 
-    if [h.strip() for h in header] != EXPECTED_HEADER.split(","):
+    if all([h.strip() for h in header] != want.split(",") for want in EXPECTED_HEADERS):
         # Deliberately quote what we got: when NSE changes the format, the
         # message is the whole diagnosis.
         raise MalformedConstituentCsv(
@@ -139,6 +157,8 @@ def parse_constituents_csv(
                 "index_key": index_key,
                 "index_name": index_name,
                 "family": family,
+                "rotation_list": rotation_list,
+                "display_label": display_label.strip() or index_name,
                 "instrument_key": isin,
                 "symbol": symbol.upper(),
                 "isin": isin,

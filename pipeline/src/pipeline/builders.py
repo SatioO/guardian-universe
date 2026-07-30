@@ -739,6 +739,8 @@ def _fetch_one_constituent_list(
             index_key=index_key,
             index_name=name,
             family=row.get("family", "unknown"),
+            rotation_list=row.get("rotation", "").strip().lower() == "yes",
+            display_label=row.get("display_label", ""),
             source_file=source_file,
         )
 
@@ -792,7 +794,16 @@ def build_index_constituents(
     prior = _constituents_prior(out_path)
     prior_rows = None if prior is None else len(prior)
 
-    if _sector_is_fresh(out_path, target, ttl_days):
+    # The TTL exists to avoid re-fetching ~134 CSVs daily; it must NOT pin the
+    # CATALOG's metadata. Curation (rotation_list, display_label) is seed data
+    # that reaches the parquet only through a rebuild, so an edited seed beats
+    # the TTL — otherwise a curation change would sit invisible for a week.
+    seed_newer = (
+        config.CONSTITUENTS_CATALOG_PATH.exists()
+        and out_path.exists()
+        and config.CONSTITUENTS_CATALOG_PATH.stat().st_mtime > out_path.stat().st_mtime
+    )
+    if _sector_is_fresh(out_path, target, ttl_days) and not seed_newer:
         return RunStatus(
             "skipped_idempotent",
             target,
