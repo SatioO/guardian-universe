@@ -186,6 +186,22 @@ SECTOR_INDUSTRY = DatasetSpec(
 
 
 
+INDEX_CONSTITUENTS = DatasetSpec(
+    key="index_constituents", file_prefix="index_constituents",
+    base_dir=config.CONSTITUENTS_DIR,
+    source_label="nse-index-constituents",
+    normalizer=lambda df: df,  # identity: build_index_constituents shapes rows itself
+    make_fetcher=_no_fetcher,  # fetched inside the builder, not via run_daily
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="index_constituents", schema_version=1,
+    # A slow-moving SNAPSHOT, so a single full-rewrite `_all.parquet` rather
+    # than year-partitioned: membership has no accumulating date dimension, it
+    # has an as-of. `derived` keeps it out of the OHLC-shaped Phase-1 fetch
+    # loop and out of the per-trading-day freshness check (it refreshes
+    # weekly), while still running each daily cycle via the Phase-2 BUILDERS.
+    derived=True,
+)
+
 CLASSIFICATION_REGISTRY = DatasetSpec(
     key="classification_registry",
     file_prefix="classification_registry",
@@ -241,11 +257,12 @@ DATASETS: dict[str, DatasetSpec] = {
     "classification_registry": CLASSIFICATION_REGISTRY,
     "classification_observations": CLASSIFICATION_OBSERVATIONS,
     "fundamentals": FUNDAMENTALS,
+    "index_constituents": INDEX_CONSTITUENTS,
 }
 DATASET_ORDER: list[str] = [
     "equities", "indices", "reference", "ca_flags", "sector_industry",
     "classification_registry", "classification_observations",
-    "fundamentals",
+    "fundamentals", "index_constituents",
 ]
 
 # publish.py resolves specs by manifest_name (by_manifest_name); manifest_name
