@@ -416,24 +416,38 @@ def test_build_min_rows_floor_rejects_truncated_fetch(tmp_path: Path):
     assert not (tmp_path / "sector" / "sector_industry_all.parquet").exists()
 
 
-def test_build_shrink_guard_holds_smaller_list(tmp_path: Path):
+def test_a_smaller_parse_cannot_shrink_the_artifact_and_does_not_red_the_run(tmp_path: Path):
+    """THE post-cutover contract, learned the hard way in production.
+
+    A parse-vs-artifact row guard used to live before the registry logic. The
+    cutover made the published artifact a ratcheting superset (registry rows
+    merged over retained prior rows), so the artifact legitimately GREW past
+    what any single parse contains -- and the guard then hard-failed every
+    run for a week over a "shrink" in which nothing shrank (4681-row seed vs
+    a 4814-row artifact, all 133 extras registry-classified additions).
+
+    The real invariant is one layer down: a smaller parse flows through the
+    registry, the union retains every prior record, and the ARTIFACT never
+    loses a row. The run ends green, because nothing is wrong.
+    """
     spec = _sector_spec(tmp_path / "sector")
     builders.build_sector_industry(
         spec, date(2026, 7, 1), fetch_frame=lambda _t: _good_frame(), min_rows=1,
     )  # 5 rows
     out_path = tmp_path / "sector" / "sector_industry_all.parquet"
-    good_bytes = out_path.read_bytes()
+    assert len(pd.read_parquet(out_path)) == 5
 
-    # A later fetch with fewer rows (2) must NOT overwrite -> respects the
-    # publish shrink-guard (any per-file row decrease would block publish).
+    # The production shape in miniature: the parse (2 rows) is far below the
+    # artifact (5). Pre-fix this was 'failed: coverage guard rejected
+    # publication' before any registry code ran.
     result = builders.build_sector_industry(
         spec, date(2026, 7, 11),
         fetch_frame=lambda _t: _frame(_GOOD_ROWS[0], _GOOD_ROWS[1]),
         ttl_days=7, min_rows=1,
     )
-    assert result.status == "failed"
-    assert "coverage guard" in result.message
-    assert out_path.read_bytes() == good_bytes  # 5-row file preserved
+    assert result.status in ("success", "skipped_idempotent"), result.message
+    # The union kept every record: the artifact holds the line at 5.
+    assert len(pd.read_parquet(out_path)) == 5
 
 
 def test_build_manifest_picks_up_sector_output(tmp_path: Path):
