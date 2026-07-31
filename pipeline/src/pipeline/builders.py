@@ -575,24 +575,25 @@ def build_sector_industry(
             prior_rows,
             f"parsed {len(df)} rows < floor {min_rows} (suspected truncation)",
         )
-    if prior_rows is not None and len(df) < prior_rows:
-        if len(df) < prior_rows * 0.99:
-            return RunStatus(
-                "failed",
-                target,
-                symbol_count=prior_rows,
-                source="nse-sector",
-                message=(
-                    f"parsed {len(df)} rows < 99% of prior {prior_rows}; "
-                    "coverage guard rejected publication"
-                ),
-            )
-        return _sector_fail_closed(
-            target,
-            out_path,
-            prior_rows,
-            f"parsed {len(df)} rows < prior {prior_rows} (shrink-guard)",
-        )
+    # NO parse-vs-artifact shrink guard here, ON PURPOSE. One lived here and
+    # broke the pipeline for a week: it compared the parsed frame against the
+    # PUBLISHED artifact's row count, and the registry cutover made the
+    # artifact a ratcheting superset (registry actives merged over retained
+    # prior rows). The first post-cutover publish grew it 4681 -> 4814, after
+    # which the unchanged 4681-row seed read as a 2.76% "shrink" and every run
+    # hard-failed before any registry logic executed. Nothing had shrunk;
+    # nothing was delisted; the comparison itself was between two different
+    # universes -- the one this function's own comment below says coverage
+    # must never be measured against.
+    #
+    # The protections that made that guard feel necessary all still stand,
+    # each measuring like against like:
+    #   - the empty/min_rows walls above catch a truncated parse;
+    #   - the registry, not the parse, controls what is publishable
+    #     (_active_registry_or_bootstrap), so a thin parse cannot drop records;
+    #   - the union guard below refuses any publish that would shrink the
+    #     artifact (published-vs-published);
+    #   - decide_publication gates coverage against the expected active count.
 
     # Content-guard (seed path only): skip the write (and thus the daily
     # re-publish) when the classification is byte-identical to the current file,
