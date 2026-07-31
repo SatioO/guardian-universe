@@ -219,6 +219,67 @@ def test_an_empty_or_thin_run_never_overwrites(spec):
     ).status == "failed"
 
 
+def test_an_edited_seed_beats_the_ttl_even_when_the_parquet_is_newer(spec, tmp_path, monkeypatch):
+    # THE CI shape: checkout writes the seed FIRST, the sync step downloads
+    # the prior parquet AFTER, so the parquet's mtime always wins and an
+    # mtime-based "seed newer" check can never fire. The content hash must.
+    import os
+    import time
+
+    from pipeline import config as cfg
+
+    seed = tmp_path / "catalog.csv"
+    seed.write_text("index_name,csv_path\nNifty Bank,ind_niftybanklist.csv\n")
+    monkeypatch.setattr(cfg, "CONSTITUENTS_CATALOG_PATH", seed)
+
+    builders.build_index_constituents(
+        spec, TARGET, fetch_lists=lambda _d: _frame({"IDX:A": 30}), min_rows=10
+    )
+
+    # Edit the seed, then make the parquet STRICTLY NEWER — the CI ordering.
+    seed.write_text("index_name,csv_path\nNifty Bank,ind_niftybanklist.csv\n# curated\n")
+    out = spec.base_dir / "index_constituents_all.parquet"
+    now = time.time()
+    os.utime(seed, (now - 60, now - 60))
+    os.utime(out, (now, now))
+
+    ran = {"fetched": False}
+
+    def fetch(_d):
+        ran["fetched"] = True
+        return _frame({"IDX:A": 30})
+
+    st = builders.build_index_constituents(
+        spec, date(2026, 8, 1), fetch_lists=fetch, ttl_days=7, min_rows=10
+    )
+    assert ran["fetched"], "content change must beat the TTL regardless of mtimes"
+    assert st.status == "success"
+
+
+def test_a_pre_catalog_rev_parquet_rebuilds_rather_than_skipping(spec, tmp_path, monkeypatch):
+    # The exact stranding this fixes: the published file predates the
+    # catalog_rev column, the TTL sees it as fresh, and without the rebuild
+    # the new columns would sit unpublished until the file aged out.
+    from pipeline import config as cfg
+
+    seed = tmp_path / "catalog.csv"
+    seed.write_text("index_name,csv_path\nNifty Bank,ind_niftybanklist.csv\n")
+    monkeypatch.setattr(cfg, "CONSTITUENTS_CATALOG_PATH", seed)
+
+    spec.base_dir.mkdir(parents=True, exist_ok=True)
+    legacy = _frame({"IDX:A": 30})
+    legacy["date"] = pd.Timestamp(TARGET)  # fresh as-of, no catalog_rev column
+    legacy.to_parquet(spec.base_dir / "index_constituents_all.parquet", index=False)
+
+    st = builders.build_index_constituents(
+        spec, date(2026, 8, 1), fetch_lists=lambda _d: _frame({"IDX:A": 30}),
+        ttl_days=7, min_rows=10,
+    )
+    assert st.status == "success"
+    out = pd.read_parquet(spec.base_dir / "index_constituents_all.parquet")
+    assert "catalog_rev" in out.columns
+
+
 def test_the_weekly_ttl_makes_the_daily_cron_a_no_op(spec):
     builders.build_index_constituents(
         spec, TARGET, fetch_lists=lambda _d: _frame({"IDX:A": 30}), min_rows=10
