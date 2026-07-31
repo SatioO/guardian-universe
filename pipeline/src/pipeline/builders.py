@@ -757,6 +757,32 @@ def _fetch_one_constituent_list(
     raise RuntimeError(f"{name}: all hosts failed ({last})")
 
 
+def _catalog_rev() -> str:
+    """Stable content hash of the committed catalog seed (12 hex chars)."""
+    import hashlib
+
+    path = config.CONSTITUENTS_CATALOG_PATH
+    if not path.exists():
+        return "no-catalog"
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+
+
+def _stored_catalog_rev(out_path: Path) -> str | None:
+    """The seed hash the stored parquet was built from.
+
+    `None` for a missing file, an unreadable file, or a pre-`catalog_rev`
+    build — all of which must compare unequal to the current hash, so the
+    rebuild fires and the file catches up to the schema.
+    """
+    if not out_path.exists():
+        return None
+    try:
+        col = pd.read_parquet(out_path, columns=["catalog_rev"])
+        return None if col.empty else str(col["catalog_rev"].iloc[0])
+    except Exception:  # noqa: BLE001 - column absent or file unreadable
+        return None
+
+
 def _constituents_prior(out_path: Path) -> pd.DataFrame | None:
     if not out_path.exists():
         return None
@@ -798,12 +824,15 @@ def build_index_constituents(
     # CATALOG's metadata. Curation (rotation_list, display_label) is seed data
     # that reaches the parquet only through a rebuild, so an edited seed beats
     # the TTL — otherwise a curation change would sit invisible for a week.
-    seed_newer = (
-        config.CONSTITUENTS_CATALOG_PATH.exists()
-        and out_path.exists()
-        and config.CONSTITUENTS_CATALOG_PATH.stat().st_mtime > out_path.stat().st_mtime
-    )
-    if _sector_is_fresh(out_path, target, ttl_days) and not seed_newer:
+    #
+    # CONTENT-based, not mtime-based, because mtime cannot work in CI: the
+    # checkout writes the seed FIRST, then the sync step downloads the prior
+    # parquet, so the parquet is always newer and an mtime check never fires
+    # exactly where the rebuild matters. The published file carries the hash
+    # of the seed that built it; any seed edit changes the hash and beats the
+    # TTL on the next run, in CI and locally alike.
+    seed_changed = _stored_catalog_rev(out_path) != _catalog_rev()
+    if _sector_is_fresh(out_path, target, ttl_days) and not seed_changed:
         return RunStatus(
             "skipped_idempotent",
             target,
@@ -851,7 +880,10 @@ def build_index_constituents(
     # dataset, not just this one.
     out = df.copy()
     out["date"] = pd.Timestamp(target)
-    out = out[[*nse_constituents.CONSTITUENT_COLUMNS, "date"]]
+    # One value for the whole file: which seed built it. This is what the next
+    # run compares against to decide whether an edited catalog beats the TTL.
+    out["catalog_rev"] = _catalog_rev()
+    out = out[[*nse_constituents.CONSTITUENT_COLUMNS, "date", "catalog_rev"]]
     _write_atomic(out, out_path)
     # "success", not "ok": data-daily's secondary-status allowlist is
     # success|skipped_holiday|skipped_idempotent|not_yet, and an invented word
