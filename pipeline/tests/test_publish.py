@@ -1,7 +1,9 @@
 import dataclasses
+import hashlib
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -11,9 +13,11 @@ from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.manifest import dataset_files, write_json
 from pipeline.publish import (
     carry_forward_deltas,
+    carry_forward_foreign_datasets,
     check_cas,
     check_no_shrink,
     latest_trading_date,
+    owns_asset,
     publish_dataset,
 )
 from pipeline.sync import SYNCED_STATE
@@ -401,20 +405,23 @@ def test_publish_with_registered_but_empty_second_dataset(tmp_path: Path):
 def test_fundamentals_state_asset_is_protected_from_gc(tmp_path: Path):
     # The Rust producer's incremental state lives on the release as a
     # mutable, clobbered asset -- data-daily's GC must never collect it even
-    # once it ages past the grace window (a stray parquet of the same age IS
-    # collected, proving the protection is the name, not the age).
+    # once it ages past the grace window (a superseded asset of the same age
+    # in the SAME namespace IS collected, proving the protection is the name,
+    # not the age; `owns_asset` would spare anything outside the namespace for
+    # a different reason, so the comparator has to be one of ours to isolate
+    # PROTECTED_ASSETS as the thing under test).
     ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
     _synced(meta, None)
     fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
     publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
                     generated_at="gen-1", now=NOW)
     fake.seed("fundamentals_state.json", b"{}", created_at="2026-06-01T00:00:00Z")
-    fake.seed("stray.parquet", b"stray", created_at="2026-06-01T00:00:00Z")
+    fake.seed("ohlc_2019.dead1234.parquet", b"stray", created_at="2026-06-01T00:00:00Z")
     _synced(meta, "gen-1")
     publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
                     generated_at="gen-2", now=NOW)
-    assert "fundamentals_state.json" in fake.assets  # protected, any age
-    assert "stray.parquet" not in fake.assets        # same age, unprotected -> GC'd
+    assert "fundamentals_state.json" in fake.assets   # protected, any age
+    assert "ohlc_2019.dead1234.parquet" not in fake.assets  # ours, unprotected -> GC'd
 
 
 def _fundamentals_frame() -> pd.DataFrame:
@@ -515,3 +522,359 @@ def test_second_runner_publish_carries_live_deltas_forward(tmp_path: Path):
     ohlc_ds = next(d for d in live2["datasets"] if d["name"] == "ohlc")
     assert [d["asset"] for d in ohlc_ds["deltas"]] == [delta_asset]
     assert delta_asset in fake.assets  # still referenced -> never GC'd
+
+
+# ── Shared release: datasets THIS runner does not produce ──
+
+
+def _seed_foreign_dataset(
+    fake: FakeReleaseClient,
+    *,
+    name: str,
+    generated_at: str,
+    payload: bytes = b"foreign-parquet-bytes",
+    created_at: str | None = None,
+    with_assets: bool = True,
+) -> dict[str, Any]:
+    """Simulate ANOTHER producer publishing into the same `data-latest`
+    release: put its content-addressed asset there and rewrite the live
+    manifest so its dataset entry sits alongside ours (which is what the real
+    foreign publish did -- it preserved every one of our datasets and only
+    added its own). No spec of ours describes it, so `build_manifest` can
+    never emit it.
+
+    `with_assets=False` models the entry lingering after its asset is gone.
+    Returns the dataset entry written, for verbatim comparison afterwards."""
+    sha = hashlib.sha256(payload).hexdigest()
+    asset = f"{name}_all.{sha[:8]}.parquet"
+    if with_assets:
+        fake.seed(asset, payload, created_at=created_at)
+    ds: dict[str, Any] = {
+        "name": name, "schema_version": 1, "latest_date": "2026-07-03",
+        "baseline": [{"name": f"{name}_all.parquet", "asset": asset,
+                      "sha256": sha, "bytes": len(payload), "rows": 3}],
+        "deltas": [],
+    }
+    live = json.loads(fake.assets["manifest.json"])
+    live["datasets"].append(ds)
+    live["generated_at"] = generated_at
+    fake.assets["manifest.json"] = json.dumps(live).encode()
+    return ds
+
+
+def test_shrink_guard_skips_a_dataset_this_runner_does_not_own():
+    # `earnings_results` is on the live release but belongs to another
+    # producer. It can never appear in a manifest built from OUR specs, so its
+    # absence is not a shrink -- carry_forward_foreign_datasets owns its fate.
+    # The SAME live/new pair is still a hard error the moment that name is
+    # ours, and with owned=None (the pre-shared-release default).
+    live = {"latest_trading_date": "2026-07-03", "datasets": [
+        {"name": "ohlc", "baseline": [{"name": "ohlc_2026.parquet", "rows": 5000,
+                                       "sha256": "t", "bytes": 9, "asset": "b"}]},
+        {"name": "earnings_results", "baseline": [
+            {"name": "earnings_results_all.parquet", "rows": 12, "sha256": "e",
+             "bytes": 4, "asset": "e1"}]},
+    ]}
+    new = {"latest_trading_date": "2026-07-03", "datasets": [
+        {"name": "ohlc", "baseline": [{"name": "ohlc_2026.parquet", "rows": 5000,
+                                       "sha256": "t", "bytes": 9, "asset": "b"}],
+         "deltas": []},
+    ]}
+    check_no_shrink(new, live, owned={"ohlc"})  # foreign -> not a shrink
+    with pytest.raises(UnexpectedFailure, match="missing locally"):
+        check_no_shrink(new, live, owned={"ohlc", "earnings_results"})
+    with pytest.raises(UnexpectedFailure, match="missing locally"):
+        check_no_shrink(new, live)
+
+
+def test_owned_never_relaxes_the_row_shrink_or_date_regression_guards():
+    # `owned` narrows exactly ONE branch (a whole dataset absent from `new`).
+    # Every other protection is untouched for a dataset we do own.
+    live = {"latest_trading_date": "2026-07-03", "datasets": [{"name": "ohlc", "baseline": [
+        {"name": "ohlc_2026.parquet", "rows": 5000, "sha256": "t", "bytes": 9, "asset": "b"}]}]}
+    shrunk = {"latest_trading_date": "2026-07-03", "datasets": [{"name": "ohlc", "baseline": [
+        {"name": "ohlc_2026.parquet", "rows": 1, "sha256": "s", "bytes": 1, "asset": "a"}]}]}
+    with pytest.raises(UnexpectedFailure, match="rows 1 < live 5000"):
+        check_no_shrink(shrunk, live, owned={"ohlc"})
+    regressed = {"latest_trading_date": "2026-07-01", "datasets": [{"name": "ohlc", "baseline": [
+        {"name": "ohlc_2026.parquet", "rows": 5000, "sha256": "t", "bytes": 9, "asset": "b"}]}]}
+    with pytest.raises(UnexpectedFailure, match="regress"):
+        check_no_shrink(regressed, live, owned={"ohlc"})
+    lost_file = {"latest_trading_date": "2026-07-03",
+                 "datasets": [{"name": "ohlc", "baseline": [], "deltas": []}]}
+    with pytest.raises(UnexpectedFailure, match="missing locally"):
+        check_no_shrink(lost_file, live, owned={"ohlc"})
+
+
+def test_carry_forward_foreign_datasets_pure_rules():
+    live = {"datasets": [
+        {"name": "ohlc", "baseline": [{"name": "ohlc_2026.parquet", "asset": "ohlc.aaa.parquet",
+                                       "sha256": "o", "bytes": 9}], "deltas": []},
+        {"name": "earnings_results", "schema_version": 3, "latest_date": "2026-07-31",
+         "baseline": [{"name": "earnings_results_all.parquet", "asset": "er.abc.parquet",
+                       "sha256": "e", "bytes": 4}],
+         "deltas": [{"date": "2026-07-31", "name": "earnings_results_2026-07-31.parquet",
+                     "asset": "delta_er.def.parquet", "sha256": "d", "bytes": 2}]},
+        {"name": "half_gone", "baseline": [{"name": "hg_all.parquet", "asset": "hg.abc.parquet",
+                                            "sha256": "h", "bytes": 4}],
+         "deltas": [{"date": "2026-07-31", "name": "hg_2026-07-31.parquet",
+                     "asset": "delta_hg.gone.parquet", "sha256": "g", "bytes": 2}]},
+        {"name": "legacy_no_asset", "files": [{"name": "legacy.parquet",
+                                               "sha256": "l", "bytes": 4}]},
+    ]}
+    existing = {"ohlc.aaa.parquet", "er.abc.parquet", "delta_er.def.parquet", "hg.abc.parquet"}
+
+    new: dict[str, Any] = {"datasets": [
+        {"name": "ohlc", "baseline": [{"name": "ohlc_2026.parquet", "asset": "ohlc.bbb.parquet",
+                                       "sha256": "o2", "bytes": 11}], "deltas": []}]}
+    carry_forward_foreign_datasets(new, live, owned={"ohlc"}, existing=existing)
+
+    # Owned -> left alone (build_manifest already described it, from newer
+    # local bytes). Foreign + every asset present -> carried. A foreign
+    # dataset with ONE absent asset ("half_gone") or an entry missing the
+    # asset/sha256/bytes keys `_verify` and `_gc` index ("legacy_no_asset") ->
+    # dropped whole rather than published in a shape its producer never wrote.
+    assert [ds["name"] for ds in new["datasets"]] == ["ohlc", "earnings_results"]
+    assert new["datasets"][0]["baseline"][0]["asset"] == "ohlc.bbb.parquet"
+    assert new["datasets"][1] == live["datasets"][1]  # verbatim, deltas included
+
+    # Deep copy: the carried entry must not alias the live manifest.
+    new["datasets"][1]["baseline"][0]["bytes"] = 0
+    assert live["datasets"][1]["baseline"][0]["bytes"] == 4
+
+    # A foreign entry we cannot even READ is dropped, never raised on: this is
+    # the one place another repo's JSON reaches publish, and an exception here
+    # would stall the pipeline exactly like the shrink-guard did.
+    malformed: dict[str, Any] = {"datasets": [{"name": "ohlc", "baseline": [], "deltas": []}]}
+    carry_forward_foreign_datasets(
+        malformed,
+        {"datasets": [
+            {"name": "null_deltas", "baseline": [{"name": "a", "asset": "er.abc.parquet",
+                                                  "sha256": "e", "bytes": 4}], "deltas": None},
+            {"name": "string_baseline", "baseline": "oops", "deltas": []},
+            {"name": "entry_not_a_dict", "baseline": ["oops"], "deltas": []},
+            # `bytes` is indexed by _verify's smallest-asset min() AFTER the
+            # flip, where a failure is a red run on a good release that every
+            # re-run reproduces. Refuse it before the flip instead.
+            {"name": "unusable_bytes", "baseline": [{"name": "b", "asset": "er.abc.parquet",
+                                                     "sha256": "e", "bytes": None}],
+             "deltas": []},
+        ]},
+        owned={"ohlc"},
+        existing=existing,
+    )
+    assert [ds["name"] for ds in malformed["datasets"]] == ["ohlc"]
+
+    # No live manifest / nothing foreign on it -> no-op.
+    ours: dict[str, Any] = {"datasets": [{"name": "ohlc", "baseline": [], "deltas": []}]}
+    carry_forward_foreign_datasets(ours, None, owned={"ohlc"}, existing=existing)
+    carry_forward_foreign_datasets(ours, {"datasets": []}, owned={"ohlc"}, existing=existing)
+    assert [ds["name"] for ds in ours["datasets"]] == ["ohlc"]
+
+
+def test_publish_carries_a_foreign_dataset_forward(tmp_path: Path, capsys):
+    # The failure that stalled data-daily: another producer wrote
+    # `earnings_results` onto the shared release. This runner has no such spec
+    # and never builds one, so before the carry its publish died in the
+    # shrink-guard -- and simply relaxing the guard would have flipped in a
+    # manifest that unreferenced the other producer's data.
+    ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
+
+    foreign = _seed_foreign_dataset(fake, name="earnings_results",
+                                    generated_at="foreign-gen",
+                                    created_at="2026-06-01T00:00:00Z")  # past GC_GRACE
+    fake.seed("ohlc_2019.dead1234.parquet", b"stray", created_at="2026-06-01T00:00:00Z")
+    _synced(meta, "foreign-gen")
+
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-2", now=NOW)
+
+    # _verify ran over the carried entry (its asset is the smallest on the
+    # release, so it IS the post-flip sha-check target) and the flipped
+    # manifest still references only present, sha-matching assets.
+    assert_release_consistent(fake)
+    live = json.loads(fake.assets["manifest.json"])
+    by_name = {ds["name"]: ds for ds in live["datasets"]}
+    assert by_name["earnings_results"] == foreign  # verbatim, not rebuilt
+    assert dataset_files(by_name["ohlc"])[0]["asset"] in fake.assets  # ours still published
+    # Referenced by the manifest we just flipped in -> GC spares it despite
+    # aging out; an unreferenced asset of OURS of the SAME age proves the
+    # protection is the reference, not the age.
+    assert foreign["baseline"][0]["asset"] in fake.assets
+    assert "ohlc_2019.dead1234.parquet" not in fake.assets
+    # Announced on every publish: an abandoned producer would otherwise freeze
+    # its latest_date on the release with nothing to notice it.
+    assert "carrying foreign dataset 'earnings_results' forward" in capsys.readouterr().err
+
+
+def test_publish_does_not_resurrect_a_foreign_dataset_whose_assets_are_gone(
+    tmp_path: Path, capsys
+):
+    # The producer deleted its assets (or our GC already took them) but left
+    # the entry on the manifest. Carrying it would republish a reference to
+    # bytes that no longer exist -- the rule carry_forward_deltas already
+    # follows via `existing`.
+    ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
+
+    _seed_foreign_dataset(fake, name="earnings_results", generated_at="foreign-gen",
+                          with_assets=False)
+    _synced(meta, "foreign-gen")
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-2", now=NOW)
+
+    assert_release_consistent(fake)  # would fail if the dead asset were re-referenced
+    live = json.loads(fake.assets["manifest.json"])
+    assert [ds["name"] for ds in live["datasets"]] == ["ohlc"]
+    assert "NOT carrying foreign dataset 'earnings_results'" in capsys.readouterr().err
+
+
+def test_publish_still_fails_when_an_owned_dataset_vanishes(tmp_path: Path):
+    # Ownership is registry membership: `indices` IS one of this runner's
+    # specs, so its disappearance from the local store is precisely the
+    # accident the shrink-guard exists to catch. The foreign carry must not
+    # soften it -- publish must still hard-fail, before the flip.
+    eq = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
+    idx = dataclasses.replace(datasets.INDICES, base_dir=tmp_path / "indices")
+    meta, stage = tmp_path / "meta", tmp_path / "stage"
+    meta.mkdir()
+    _write_store(eq.base_dir, ["2026-07-03"])
+    _write_store(idx.base_dir, ["2026-07-03"], prefix="indices")
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False)
+    publish_dataset(specs=[eq, idx], meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="g1", now=NOW)
+    live1 = json.loads(fake.assets["manifest.json"])
+
+    (idx.base_dir / "indices_2026.parquet").unlink()
+    _synced(meta, "g1")
+    with pytest.raises(UnexpectedFailure, match="missing locally"):
+        publish_dataset(specs=[eq, idx], meta_dir=meta, stage_dir=stage, client=fake,
+                        generated_at="g2", now=NOW)
+
+    assert_release_consistent(fake)
+    assert json.loads(fake.assets["manifest.json"]) == live1  # never flipped
+
+
+def test_foreign_carry_forward_is_idempotent_across_publishes(tmp_path: Path):
+    # Nothing is pinned: every publish recomputes the carry from live. The
+    # second one reads back the entry WE wrote, so it must reproduce the same
+    # manifest -- not duplicate, drop, or rewrite the foreign dataset.
+    ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
+
+    _seed_foreign_dataset(fake, name="earnings_results", generated_at="foreign-gen")
+    _synced(meta, "foreign-gen")
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-2", now=NOW)
+    live2 = json.loads(fake.assets["manifest.json"])
+
+    _synced(meta, "gen-2")
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-3", now=NOW)
+    live3 = json.loads(fake.assets["manifest.json"])
+
+    assert_release_consistent(fake)
+    assert live3["datasets"] == live2["datasets"]
+    assert [ds["name"] for ds in live3["datasets"]] == ["ohlc", "earnings_results"]
+
+
+def test_gc_never_collects_assets_outside_this_runners_namespace(tmp_path: Path, capsys):
+    # The destructive half of the shared-release assumption. `manifest.json`
+    # is not the only index on the release: a sibling producer tracks datasets
+    # of its own in its own index (`producer_manifest.json`), so its assets are
+    # unreferenced BY US permanently and by design. Age them past the grace
+    # window and the old GC deletes another producer's LIVE baselines -- data
+    # loss, not a stalled workflow. Carrying the manifest entry forward does
+    # not help here: these datasets are not in our manifest to carry.
+    ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-1", now=NOW)
+
+    aged = "2026-06-01T00:00:00Z"  # well past GC_GRACE
+    for name in ("board_meetings_2026.7ac886cc.parquet",
+                 "earnings_announcements_2026.5ce26a24.parquet",
+                 "delta_board_meetings_2026-07-31.abc12345.parquet",
+                 "producer_manifest.json"):
+        fake.seed(name, b"theirs", created_at=aged)
+    fake.seed("ohlc_2019.dead1234.parquet", b"ours", created_at=aged)
+    _synced(meta, "gen-1")
+
+    publish_dataset(specs=specs_for(ohlc), meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="gen-2", now=NOW)
+
+    # Same age, same unreferenced-ness: only the one in OUR namespace goes.
+    assert "ohlc_2019.dead1234.parquet" not in fake.assets
+    assert "board_meetings_2026.7ac886cc.parquet" in fake.assets
+    assert "earnings_announcements_2026.5ce26a24.parquet" in fake.assets
+    assert "delta_board_meetings_2026-07-31.abc12345.parquet" in fake.assets  # delta_ too
+    assert "producer_manifest.json" in fake.assets  # their index, not in PROTECTED_ASSETS
+    # One bounded line whose COUNT is the signal, not one line per asset.
+    err = capsys.readouterr().err
+    assert "gc: leaving 4 unreferenced asset(s) outside this runner's namespace" in err
+
+
+def test_owns_asset_covers_every_name_publish_writes():
+    # The namespace rule is only safe if it recognises everything publish
+    # uploads -- an asset of ours it failed to claim would leak forever.
+    prefixes = frozenset({"ohlc", "indices", "index_constituents"})
+    assert owns_asset("ohlc_2026.c4f18702.parquet", file_prefixes=prefixes)  # baseline
+    assert owns_asset("delta_ohlc_2026-07-31.85d6ea40.parquet", file_prefixes=prefixes)  # delta
+    assert owns_asset("ohlc_2026-07-03.parquet", file_prefixes=prefixes)  # quarantine extra
+    assert owns_asset("index_constituents_all.44f061d2.parquet", file_prefixes=prefixes)
+    # The `_` boundary is load-bearing, and getting it wrong is DESTRUCTIVE
+    # (it claims a foreign asset, so GC deletes it). A sibling producer
+    # publishing `ohlcv_*` on a market-data release is the obvious collision;
+    # bare startswith would swallow it under our `ohlc`.
+    assert not owns_asset("ohlcv_2026.5ce26a24.parquet", file_prefixes=prefixes)
+    assert not owns_asset("delta_ohlcv_2026-07-31.abc12345.parquet", file_prefixes=prefixes)
+    assert not owns_asset("indices2_all.parquet", file_prefixes=prefixes)
+    # Foreign namespaces -- the real ones sharing data-latest today.
+    for name in ("earnings_results_all.9aae4b2b.parquet",
+                 "earnings_schedule_all.9acb50d1.parquet",
+                 "earnings_announcements_2026.5ce26a24.parquet",
+                 "board_meetings_2023.4ff221de.parquet",
+                 "delta_board_meetings_2026-07-31.abc12345.parquet",
+                 "producer_manifest.json"):
+        assert not owns_asset(name, file_prefixes=prefixes), name
+    # A registry with no specs claims nothing (so GC deletes nothing).
+    assert not owns_asset("ohlc_2026.c4f18702.parquet", file_prefixes=frozenset())
+
+
+def test_gc_still_collects_our_own_superseded_assets_across_every_spec(tmp_path: Path):
+    # The namespace rule must not turn GC off. Every registered spec's own
+    # superseded content-addressed assets, plus its deltas and its
+    # diagnostic quarantine extra, still age out and get collected.
+    eq = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
+    idx = dataclasses.replace(datasets.INDICES, base_dir=tmp_path / "indices")
+    meta, stage = tmp_path / "meta", tmp_path / "stage"
+    meta.mkdir()
+    _write_store(eq.base_dir, ["2026-07-03"])
+    _write_store(idx.base_dir, ["2026-07-03"], prefix="indices")
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
+    publish_dataset(specs=[eq, idx], meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="g1", now=NOW)
+
+    aged = "2026-06-01T00:00:00Z"
+    ours = ["ohlc_2025.0badcafe.parquet", "indices_2025.0badcafe.parquet",
+            "delta_ohlc_2026-06-30.0badcafe.parquet", "indices_2026-06-30.parquet"]
+    for name in ours:
+        fake.seed(name, b"superseded", created_at=aged)
+    _synced(meta, "g1")
+    publish_dataset(specs=[eq, idx], meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="g2", now=NOW)
+
+    assert not (set(ours) & set(fake.assets))

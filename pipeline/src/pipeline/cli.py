@@ -153,8 +153,9 @@ def build_parser() -> argparse.ArgumentParser:
     # Operator opt-in for a DELIBERATE data-reducing correction (e.g. rebuilding
     # ca_flags after fixing a bug that had inflated it). Off by default so the
     # nightly cron always keeps the full shrink-guard; downgrades only the
-    # per-file row-shrink check to a warning (missing-file and
-    # latest_trading_date-regression stay hard errors). See check_no_shrink.
+    # per-file row-shrink check to a warning (a missing file/dataset THIS
+    # runner owns and a latest_trading_date-regression stay hard errors). See
+    # check_no_shrink.
     pub.add_argument("--allow-shrink", action="store_true")
     sub.add_parser("sync")
     sub.add_parser("check-freshness")

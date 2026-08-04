@@ -33,13 +33,55 @@ Non-trading days skip cleanly; an already-ingested day is an idempotent no-op.
   an unsynced store is blocked by the guards below anyway.
 - Data assets are content-addressed (`ohlc_2026.<sha8>.parquet`) and immutable;
   `manifest.json` is the only mutable asset and is flipped last. Unreferenced
-  assets are garbage-collected 7 days after upload.
+  assets are garbage-collected 7 days after upload — but only assets in *this*
+  producer's namespace (see shared-release ownership below).
 - `publish` refuses to: shrink coverage (fewer rows/years, older
   latest_trading_date), publish over a release that changed since sync
   (re-run the pipeline), or leave an unverified manifest (it re-downloads and
   checks itself after the flip).
 - Recovery from a failed publish: nothing to clean up — the old manifest is
   still live and consistent; just re-run sync → daily → publish.
+- **Shared-release ownership.** `manifest.json` is a WHOLE-RELEASE document
+  that several producers write (data-daily, fundamentals-daily, and any
+  sibling repo publishing into `data-latest`), but each runner rebuilds it
+  from its own store scoped to its own dataset registry. **Ownership is
+  registry membership**: a runner verifies and rewrites the datasets its specs
+  describe, and copies every other producer's entries through *verbatim*
+  (`carry_forward_foreign_datasets`, the dataset-granularity twin of
+  `carry_forward_deltas`). So the shrink-guard's "missing locally" error means
+  a dataset **we** produce vanished — always a real fault, never someone
+  else's dataset. Consequences to know:
+  - Each carried dataset prints a `publish: carrying foreign dataset '<name>'
+    forward` line to stderr on **every** publish. That is the only signal a
+    foreign producer has been abandoned — if a name shows up there for weeks
+    with a frozen `latest_date`, chase the producer, don't ignore the line.
+  - A foreign dataset is carried only while **every** asset it references is
+    still on the release. A producer retires a dataset by dropping its entry
+    (or its assets); we never resurrect or permanently pin one. A
+    `publish: NOT carrying foreign dataset '<name>'` line means the entry is
+    unusable, so clients stop seeing that dataset until its producer repairs
+    it — the bytes are not deleted, but nobody else will notice, so chase it.
+  - **GC is scoped the same way**, one level down, in the flat asset
+    namespace (`owns_asset`): it deletes an unreferenced, aged-out asset only
+    if a registered spec's `file_prefix` claims the name
+    (`{prefix}_*`, or `delta_{prefix}_*`). `manifest.json` is *not* the only
+    index on `data-latest` — a sibling producer keeps its own
+    (`producer_manifest.json`, covering `earnings_announcements` and
+    `board_meetings`), and those assets are unreferenced by us permanently and
+    by design. "Unreferenced by our manifest" is therefore not evidence an
+    asset is dead. A `gc: leaving N unreferenced asset(s) outside this
+    runner's namespace alone` line each run is normal; **N climbing steadily**
+    means a producer stopped cleaning up after itself and those bytes are now
+    a manual sweep.
+  - Corollary: **retiring** one of our datasets from `datasets.DATASETS`
+    orphans its assets forever, because nothing then claims their prefix.
+    Delete them by hand as part of the retirement. (Leaking bytes is
+    recoverable; deleting another producer's is not — the rule errs that way
+    deliberately.)
+  - The rule self-retires per dataset: register the dataset in
+    `datasets.DATASETS` and `sync` materializes it, `build_manifest` emits it,
+    ownership flips (both halves — the carry stops, and GC starts claiming its
+    assets) — the `fundamentals` pattern. Nothing to delete afterwards.
 
 ## Yearly
 - Refresh `pipeline/data/meta/holidays.json` from NSE's published trading-holiday
