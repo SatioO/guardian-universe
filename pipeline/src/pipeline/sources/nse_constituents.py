@@ -137,7 +137,10 @@ def parse_constituents_csv(
             f"{source_file}: unexpected header {','.join(h.strip() for h in header)!r}"
         )
 
-    rows: list[dict[str, str]] = []
+    # `str | bool` because `rotation_list` is a bool (see CONSTITUENT_COLUMNS):
+    # every other column is a string, so a plain `dict[str, str]` type-errors on
+    # the one curated-list flag.
+    rows: list[dict[str, str | bool]] = []
     seen: set[str] = set()
     for rec in reader:
         if len(rec) < 5:
