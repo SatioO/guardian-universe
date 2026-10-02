@@ -38,11 +38,17 @@ from pathlib import Path
 import pandas as pd
 import requests
 
+from pipeline import calendar as cal
 from pipeline import config, store
 from pipeline.daily_update import RunStatus
 from pipeline.datasets import DatasetSpec
 from pipeline.fetch import _BROWSER_UA, _fetch_with_retry
-from pipeline.sources import classification_publication, nse_constituents, nse_sector
+from pipeline.sources import (
+    classification_publication,
+    nse_constituents,
+    nse_fo_mktlots,
+    nse_sector,
+)
 from pipeline.sources.classification_registry import ClassificationRegistryRecord
 from pipeline.sources.nse_universe import (
     RegistryEntry,
@@ -939,3 +945,210 @@ def _fetch_all_constituent_lists(target: date) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame(columns=nse_constituents.CONSTITUENT_COLUMNS)
     return pd.concat(frames, ignore_index=True)
+
+
+# ── CAS-eligible stocks ─────────────────────────────────────────────────────
+
+_CAS_COLUMNS: list[str] = ["symbol", "isin", "date", "source"]
+
+# Cash series an F&O stock can sit in, in preference order. Derivatives need
+# the rolling (EQ) segment; BE/BZ only cover a stock the master last saw
+# there. Never every series: an issuer's bonds/NCDs trade under its symbol
+# with their OWN ISINs (series N1-N9, NA-NE, ...) — the trap _load_isin_map in
+# datasets.py documents — so a series-blind join can hand a stock a bond's ISIN.
+_CAS_EQUITY_SERIES: tuple[str, ...] = ("EQ", "BE", "BZ")
+
+
+def _cas_symbol_isins(universe_spec: DatasetSpec) -> dict[str, str]:
+    """symbol -> current ISIN, from the pipeline's own symbol master (the
+    `reference` dataset's `instruments_all.parquet`).
+
+    The master is SCD2 and ISINs move under a symbol (a face-value split
+    re-issues the ISIN: 360ONE has two EQ rows), and symbols get reused, so the
+    LATEST `last_seen` row wins, series preference breaking ties. A missing or
+    unreadable master is an empty map — the builder's ISIN-coverage gate turns
+    that into a retained prior file, never a published list without ISINs.
+    """
+    path = universe_spec.base_dir / f"{universe_spec.file_prefix}_all.parquet"
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_parquet(path, columns=["symbol", "series", "isin", "last_seen"])
+    except Exception:  # noqa: BLE001 - unreadable master -> empty; coverage gate fails closed
+        return {}
+    df = df[df["series"].isin(_CAS_EQUITY_SERIES)]
+    df = df.assign(
+        symbol=df["symbol"].astype(str).str.strip().str.upper(),
+        isin=df["isin"].fillna("").astype(str).str.strip().str.upper(),
+        _rank=df["series"].map({s: i for i, s in enumerate(_CAS_EQUITY_SERIES)}),
+    )
+    df = df[df["isin"].str.len() == 12]
+    df = df.sort_values(["last_seen", "_rank"], ascending=[False, True], kind="mergesort")
+    df = df.drop_duplicates(subset=["symbol"], keep="first")
+    return dict(zip(df["symbol"], df["isin"], strict=True))
+
+
+def _cas_trading_day(target: date) -> bool:
+    """The daily run's own calendar (META_DIR holidays + special sessions).
+
+    The published `date` is "the trading date this list is as of", and the
+    Phase-2 builders still run on a holiday (the primary's `skipped_holiday`
+    counts as healthy), so without this an NSE weekday holiday would stamp a
+    non-trading date on the file.
+    """
+    holidays_path = config.META_DIR / "holidays.json"
+    holidays = cal.load_holidays(holidays_path) if holidays_path.exists() else set()
+    special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
+    return cal.is_trading_day(target, holidays, special_sessions=special)
+
+
+def _fetch_mktlots_frame(target: date) -> pd.DataFrame:
+    """Fetch + parse NSE's F&O market-lot file through the shared warm-session
+    + retry contract, exactly as the sector and constituents fetches do. The
+    parser is the header gate: an HTML/PDF document served with 200 raises
+    inside the fetch, so it reaches the builder as a fetch failure."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": _BROWSER_UA})
+    return _fetch_with_retry(
+        session,
+        nse_fo_mktlots.MKTLOTS_URL,
+        target,
+        parse=nse_fo_mktlots.parse_mktlots_csv,
+    )
+
+
+def build_cas_eligible(
+    spec: DatasetSpec,
+    target: date,
+    *,
+    universe_spec: DatasetSpec,
+    fetch_underlyings: Callable[[date], pd.DataFrame] = _fetch_mktlots_frame,
+    trading_day: Callable[[date], bool] = _cas_trading_day,
+    min_rows: int = config.CAS_MIN_ROWS,
+    min_isin_coverage: float = config.CAS_MIN_ISIN_COVERAGE,
+) -> RunStatus:
+    """Full-rewrite `cas_eligible_all.parquet`: every stock NSE's Closing
+    Auction Session covers (a cash stock with derivative contracts), as of
+    `target`. Columns: symbol, isin, date, source.
+
+    STOCK OR INDEX. The market-lot file lists index underlyings (NIFTY,
+    BANKNIFTY, and new ones such as NIFTYFPI) above NSE's "Derivatives on
+    Individual Securities" marker and stocks below it. A row is a stock when
+    it sits below the marker OR its symbol is in the pipeline's own equity
+    universe. Either signal alone has a failure the other covers: a renamed
+    marker would make every row an index, and a symbol renamed today is not
+    in the master yet. An index symbol is in neither, which is what drops it —
+    no hard-coded index list. A below-marker stock the master does not know
+    keeps a null ISIN (counted in the status message).
+
+    Every daily run, no TTL: one small file, and NSE revises it in the IST
+    evening, after the earlier retry rungs.
+
+    Fail-closed, keeping the prior file:
+      - fetch error / HTML or PDF served with 200 (the parser's header gate)
+      - fewer than `min_rows` stocks (a truncated or partial response)
+      - fewer than `min_isin_coverage` of rows resolve an ISIN (symbol master
+        missing or broken; publishing would strip the client's join key)
+    These are transient, so with a prior file they are `skipped_idempotent`
+    (retained, quiet) and only a first run with nothing to keep is `failed` —
+    the constituents policy.
+
+    A SHRINK is held back too, but LOUDLY. The publish shrink-guard fails the
+    whole shared release on any per-file row decrease, so a shorter list must
+    never be written; yet a genuine F&O exit is the normal way this list
+    shrinks and repeats every run until accepted, so it reports `failed`
+    (prior retained) and names the symbols — a silent hold would freeze the
+    list's date with nobody told. Accepting it is the operator step in the
+    RUNBOOK's cas_eligible section.
+    """
+    spec.base_dir.mkdir(parents=True, exist_ok=True)
+    out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
+    prior = _constituents_prior(out_path)
+    prior_rows = None if prior is None else len(prior)
+
+    if not trading_day(target):
+        return RunStatus(
+            "skipped_holiday",
+            target,
+            symbol_count=prior_rows or 0,
+            source=spec.source_label,
+            message="non-trading day; list not refreshed",
+        )
+
+    try:
+        underlyings = fetch_underlyings(target)
+    except Exception as e:  # noqa: BLE001 - any fetch/parse failure -> fail-closed
+        return _constituents_fail_closed(spec, target, out_path, prior_rows, f"fetch failed: {e}")
+
+    isins = _cas_symbol_isins(universe_spec)
+    is_stock = (underlyings["section"] == nse_fo_mktlots.SECTION_STOCK) | underlyings[
+        "symbol"
+    ].isin(isins.keys())
+    stocks = underlyings[is_stock]
+    dropped_indices = int((~is_stock).sum())
+
+    if stocks.empty:
+        return _constituents_fail_closed(
+            spec, target, out_path, prior_rows, "parsed 0 stock underlyings"
+        )
+    if len(stocks) < min_rows:
+        return _constituents_fail_closed(
+            spec, target, out_path, prior_rows,
+            f"parsed {len(stocks)} stock underlyings < floor {min_rows} (suspected truncation)",
+        )
+
+    resolved = stocks["symbol"].map(isins)
+    with_isin = int(resolved.notna().sum())
+    if with_isin < min_isin_coverage * len(stocks):
+        return _constituents_fail_closed(
+            spec, target, out_path, prior_rows,
+            f"only {with_isin} of {len(stocks)} stocks resolved an ISIN from "
+            f"{universe_spec.file_prefix}_all.parquet (floor {min_isin_coverage:.0%}); "
+            "symbol master missing or stale",
+        )
+
+    out = (
+        pd.DataFrame(
+            {
+                "symbol": stocks["symbol"].to_numpy(),
+                "isin": resolved.astype(object).where(resolved.notna(), None).to_numpy(),
+            }
+        )
+        .sort_values("symbol", kind="mergesort")
+        .reset_index(drop=True)
+    )
+    # REQUIRED for the manifest: build_manifest reads columns=["date"].
+    out["date"] = pd.Timestamp(target)
+    out["source"] = nse_fo_mktlots.SOURCE
+    out = out[_CAS_COLUMNS]
+
+    if prior is not None and prior_rows is not None and len(out) < prior_rows:
+        gone: list[str] = (
+            sorted(set(prior["symbol"].astype(str)) - set(out["symbol"]))
+            if "symbol" in prior.columns
+            else []
+        )
+        shown = ", ".join(gone[:15]) + (f" (+{len(gone) - 15} more)" if len(gone) > 15 else "")
+        return RunStatus(
+            "failed",
+            target,
+            symbol_count=prior_rows,
+            source=spec.source_label,
+            message=(
+                f"{len(out)} stocks < prior {prior_rows} (shrink-guard; no longer listed: "
+                f"{shown or 'n/a'}); retained prior file -- accept per RUNBOOK cas_eligible"
+            ),
+        )
+
+    _write_atomic(out, out_path)
+    missing = sorted(out.loc[out["isin"].isna(), "symbol"])
+    note = f"; {len(missing)} without ISIN: {', '.join(missing[:15])}" if missing else ""
+    # "success", not "ok": data-daily's secondary-status allowlist is
+    # success|skipped_holiday|skipped_idempotent|not_yet.
+    return RunStatus(
+        "success",
+        target,
+        symbol_count=len(out),
+        source=spec.source_label,
+        message=f"{len(out)} stocks; {dropped_indices} index underlyings dropped{note}",
+    )

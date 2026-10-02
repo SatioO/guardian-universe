@@ -202,6 +202,24 @@ INDEX_CONSTITUENTS = DatasetSpec(
     derived=True,
 )
 
+CAS_ELIGIBLE = DatasetSpec(
+    key="cas_eligible", file_prefix="cas_eligible",
+    base_dir=config.CAS_ELIGIBLE_DIR,
+    source_label="nse-fo-mktlots",
+    normalizer=lambda df: df,  # identity: build_cas_eligible shapes rows itself
+    make_fetcher=_no_fetcher,  # fetched inside the builder, not via run_daily
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="cas_eligible", schema_version=1,
+    # Stocks NSE's Closing Auction Session covers: every cash stock with
+    # derivative contracts. A current SNAPSHOT like index_constituents (one
+    # `_all.parquet`, rewritten whole), but refreshed on every daily run rather
+    # than weekly: it is one small file, and F&O entries and exits take effect
+    # on specific days. `derived` keeps it out of the Phase-1 fetch loop and the
+    # continuity check while the Phase-2 BUILDERS loop runs it each day — after
+    # `reference`, whose symbol master supplies the ISINs.
+    derived=True,
+)
+
 CLASSIFICATION_REGISTRY = DatasetSpec(
     key="classification_registry",
     file_prefix="classification_registry",
@@ -258,11 +276,12 @@ DATASETS: dict[str, DatasetSpec] = {
     "classification_observations": CLASSIFICATION_OBSERVATIONS,
     "fundamentals": FUNDAMENTALS,
     "index_constituents": INDEX_CONSTITUENTS,
+    "cas_eligible": CAS_ELIGIBLE,
 }
 DATASET_ORDER: list[str] = [
     "equities", "indices", "reference", "ca_flags", "sector_industry",
     "classification_registry", "classification_observations",
-    "fundamentals", "index_constituents",
+    "fundamentals", "index_constituents", "cas_eligible",
 ]
 
 # publish.py resolves specs by manifest_name (by_manifest_name); manifest_name
