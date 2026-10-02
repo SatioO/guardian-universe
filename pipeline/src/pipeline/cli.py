@@ -120,6 +120,13 @@ builders.BUILDERS["sector_industry"] = builders.build_sector_industry
 # index_constituents likewise fetches its own external CSVs (one per index);
 # registered bare, its keyword-only fetch/TTL/floor args carry defaults.
 builders.BUILDERS["index_constituents"] = builders.build_index_constituents
+# cas_eligible fetches NSE's F&O market-lot file itself and joins ISINs from the
+# `reference` symbol master, bound here as `universe_spec` (this module is the
+# name edge). DATASET_ORDER runs `reference` first in Phase 2, so the master it
+# reads is the one rebuilt this run. Same import-time binding WARNING as above.
+builders.BUILDERS["cas_eligible"] = functools.partial(
+    builders.build_cas_eligible, universe_spec=datasets.DATASETS["reference"]
+)
 
 
 def _plain_runner(cmd: list[str]) -> int:

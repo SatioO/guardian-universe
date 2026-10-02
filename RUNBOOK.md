@@ -1398,3 +1398,42 @@ failure opens/appends the standard `pipeline-failure` issue; re-dispatch the
 quarterly mode to resume. Scanner sector data is published only after the
 active-universe coverage and taxonomy gates pass; registry state and raw
 Screener provenance are still retained on every successful collection.
+
+## CAS-eligible stocks (`cas_eligible`)
+
+`cas_eligible_all.parquet` (manifest name `cas_eligible`, schema v1) lists every
+stock NSE's Closing Auction Session covers — each cash stock with derivative
+contracts (CAS live 2026-08-03; circulars CMTR73362, CMTR74466, CMTR75479).
+Columns: `symbol`, `isin`, `date` (the trading date the list is as of),
+`source` (`nse-fo-mktlots`). One current snapshot, rewritten whole.
+
+`builders.build_cas_eligible` runs in the daily Phase-2 loop after `reference`.
+It fetches NSE's F&O market-lot file
+(`nsearchives.nseindia.com/content/fo/fo_mktlots.csv`) on every trading-day run,
+keeps the stock underlyings (below NSE's "Derivatives on Individual Securities"
+marker, or in the pipeline's equity universe; index underlyings are in neither),
+and joins each symbol's current ISIN from `reference/instruments_all.parquet`.
+Non-trading days skip with `skipped_holiday`.
+
+| Outcome | Status | File |
+|---|---|---|
+| fetch error, HTML/PDF served with 200, < `CAS_MIN_ROWS` (100) stocks, < 90% of rows resolve an ISIN | `skipped_idempotent` (`failed` on a first run) | prior kept |
+| fewer stocks than the published file (shrink-guard) | **`failed`**, names the symbols that left | prior kept |
+
+A shrink is loud on purpose. A genuine F&O exit (a stock's last contract
+expired) is the usual way this list gets shorter, and it repeats on every run
+until accepted. The publish shrink-guard would block the whole release if the
+shorter file were published, so the builder holds it back and the daily job
+goes red. If the named symbols really have left F&O (check NSE's exclusion
+circular), accept the shorter list from a machine NSE does not block, outside
+the data-daily cron window:
+```
+cd pipeline && uv run python -m pipeline sync
+rm data/cas/cas_eligible_all.parquet
+uv run python -m pipeline daily            # on a weekend/holiday: --date <last trading day>
+uv run python -m pipeline publish --allow-shrink
+```
+`--allow-shrink` relaxes the row check for every file in that publish, so read
+its warnings: only `cas_eligible_all.parquet` should shrink. If many symbols
+"left" at once and NSE announced nothing, it is a bad response: wait for the
+next run.

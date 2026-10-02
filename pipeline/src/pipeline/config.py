@@ -162,6 +162,23 @@ CONSTITUENTS_REFRESH_TTL_DAYS: int = 7
 # nse_constituents.MIN_MEMBERS; this catches a run where most fetches failed.
 CONSTITUENTS_MIN_ROWS: int = 2000
 
+# CAS-eligible stocks: NSE's Closing Auction Session (live 2026-08-03) covers
+# every cash stock with derivative contracts, so the list is the stock block of
+# NSE's F&O market-lot file. A daily current snapshot, not a history.
+CAS_ELIGIBLE_DIR: Path = DATA_DIR / "cas"
+# F&O stock underlyings have sat around 180-230 for years (213 on 2026-10-03),
+# and NSE removes stocks in batches of a handful to a few dozen, never half the
+# segment at once. Under 100 is a truncated or partial response, not a real
+# list. A smaller drop above the floor is the shrink-guard's business (see
+# builders.build_cas_eligible), not this one's.
+CAS_MIN_ROWS: int = 100
+# Share of rows that must resolve an ISIN from the pipeline's own symbol
+# master. The F&O universe is large, seasoned stocks, so on a healthy run
+# every row resolves (213 of 213 on 2026-10-03); a handful of same-day renames
+# could miss. Well below that means the reference is missing or broken, and
+# publishing would strip ISINs from a list the client joins on.
+CAS_MIN_ISIN_COVERAGE: float = 0.9
+
 # Corporate-action ex-date detector (G1b task 7): flag an instrument when
 # abs(prevclose_today / close_prev - 1) exceeds this fraction -- a split,
 # bonus, or other ex-date discontinuity, not ordinary price movement.
