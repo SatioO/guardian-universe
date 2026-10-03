@@ -1437,3 +1437,58 @@ uv run python -m pipeline publish --allow-shrink
 its warnings: only `cas_eligible_all.parquet` should shrink. If many symbols
 "left" at once and NSE announced nothing, it is a bad response: wait for the
 next run.
+
+## F&O freeze limits (`fno_freeze_limits`)
+
+`fno_freeze_limits_all.parquet` (manifest name `fno_freeze_limits`, schema v1)
+holds, per F&O underlying, the largest single order NSE takes (its quantity
+freeze). The desktop app slices orders and protective stops by it: a stop above
+the freeze is rejected at the moment it fires, so a limit too HIGH is the one
+failure that matters. Columns: `symbol`, `kind` (`index` | `stock`),
+`lot_size`, `max_order_quantity` (units, a whole number of `lot_size`, except a
+stand-in, which may be less than a lot; the app rounds it down to its own
+contract's lot and reads anything below one lot as one lot), `basis`
+(`exchange`, or `stand_in` where the file's limit cannot be trusted), `date` (the day of the
+contract file: NSE's file D lists the contracts of session D+1; carried rows
+keep their own older date, so read the file's date as its maximum), `source`
+(`nse-fo-contract`). One current snapshot, rewritten whole.
+
+NSE stopped its separate quantity-freeze report on 2024-04-15 (circular
+NSE/FAOP/61157; the old `qtyfreeze` path now redirects to it). The limit is in
+the daily MII contract file,
+`nsearchives.nseindia.com/content/fo/NSE_FO_contract_DDMMYYYY.csv.gz`, posted in
+the evening of D (18:30-20:00 IST seen), as `MaxTradQty`: the first quantity
+that freezes, so the largest order is one less (NIFTY 3,511 → 3,510 units, 54
+lots of 65). Every doubt resolves to a smaller limit: two values for one
+underlying keep the smaller, two lot sizes round down to the larger lot, a limit
+that is not a whole number of lots rounds down to one, and an underlying with
+any row it cannot read (a lot, a limit, an instrument code), a limit below one
+lot, or option series none of which is permitted to trade stands in at one lot,
+or at the smaller limit the file does show. Every symbol the file lists gets a
+row: only one absent from it is carried forward. `PrtdToTrad` is set on option series
+only (every future reads 0). NSE's own test series (011NSETEST...181NSETEST)
+list futures only and are never published; a real underlying that loses its
+options keeps its row.
+
+`builders.build_fno_freeze_limits` runs in the daily Phase-2 loop. It reads the
+latest contract file on or before the run date, walking back up to
+`FNO_CONTRACT_LOOKBACK_DAYS` (7) days on a 404 only. Non-trading days skip with
+`skipped_holiday`.
+
+| Outcome | Status | File |
+|---|---|---|
+| a file of the published day or newer (an evening correction included) | `success` | rewritten |
+| an older file than the published one (a back-dated `daily --date`) | `skipped_idempotent` | kept |
+| underlyings no longer listed, up to `FNO_FREEZE_LIMITS_MAX_CHURN` (3, or 3% of the file) newly gone this run | `success`, names them | their rows carried forward (never shrinks); rows carried before do not count again |
+| stand-ins up to the same churn | `success`, names them | written at one lot |
+| more stand-ins or missing underlyings than that (a format change, a partial file) | **`failed`** | nothing written, prior kept |
+| fetch error, 403/500, any document that is not the contract file, < `FNO_FREEZE_LIMITS_MIN_ROWS` (100) underlyings | `skipped_idempotent` (`failed` on a first run) | prior kept |
+| limits a trading day or more behind (file D serves session D+1), whatever the cause | **`failed`** | the newest available kept |
+| no contract file at all in the lookback window | **`failed`** | prior kept |
+
+A carried row belongs to an underlying with no contracts left, so it can size
+nothing; it stays only so the publish shrink-guard never blocks the release
+over a routine F&O exit. Purge them by hand when they pile up (remove the file
+and run `daily`, then `publish --allow-shrink`, as for `cas_eligible`). A run
+that fails on churn names the symbols: if they really changed (a large F&O
+exit), accept the same way.

@@ -220,6 +220,21 @@ CAS_ELIGIBLE = DatasetSpec(
     derived=True,
 )
 
+FNO_FREEZE_LIMITS = DatasetSpec(
+    key="fno_freeze_limits", file_prefix="fno_freeze_limits",
+    base_dir=config.FNO_FREEZE_LIMITS_DIR,
+    source_label="nse-fo-contract",
+    normalizer=lambda df: df,  # identity: build_fno_freeze_limits shapes rows itself
+    make_fetcher=_no_fetcher,  # fetched inside the builder, not via run_daily
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="fno_freeze_limits", schema_version=1,
+    # The largest single order NSE takes per F&O underlying (the quantity
+    # freeze), from the daily contract file. A current SNAPSHOT like
+    # cas_eligible, refreshed on every daily run: NSE revises limits with lot
+    # sizes and the desktop app slices orders and protective stops by them.
+    derived=True,
+)
+
 CLASSIFICATION_REGISTRY = DatasetSpec(
     key="classification_registry",
     file_prefix="classification_registry",
@@ -277,11 +292,12 @@ DATASETS: dict[str, DatasetSpec] = {
     "fundamentals": FUNDAMENTALS,
     "index_constituents": INDEX_CONSTITUENTS,
     "cas_eligible": CAS_ELIGIBLE,
+    "fno_freeze_limits": FNO_FREEZE_LIMITS,
 }
 DATASET_ORDER: list[str] = [
     "equities", "indices", "reference", "ca_flags", "sector_industry",
     "classification_registry", "classification_observations",
-    "fundamentals", "index_constituents", "cas_eligible",
+    "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
 ]
 
 # publish.py resolves specs by manifest_name (by_manifest_name); manifest_name

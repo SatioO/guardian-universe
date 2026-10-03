@@ -225,7 +225,8 @@ def test_the_published_file_is_typed_for_the_client(spec, master):
     assert schema.field("symbol").type == pa.string()
     assert schema.field("isin").type == pa.string()
     assert schema.field("source").type == pa.string()
-    assert pa.types.is_timestamp(schema.field("date").type)
+    # The unit the published file has always carried: a writer change must not move it.
+    assert schema.field("date").type == pa.timestamp("ms")
 
 
 def test_a_be_series_row_resolves_when_there_is_no_eq_row(spec, tmp_path):

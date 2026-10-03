@@ -179,6 +179,22 @@ CAS_MIN_ROWS: int = 100
 # publishing would strip ISINs from a list the client joins on.
 CAS_MIN_ISIN_COVERAGE: float = 0.9
 
+# F&O quantity-freeze limits: the largest single order NSE takes per
+# underlying, from the daily contract file. A daily current snapshot.
+FNO_FREEZE_LIMITS_DIR: Path = DATA_DIR / "fno"
+# The F&O segment has carried 180-240 underlyings for years (219 real ones on
+# 2026-10-01, beside NSE's 18 test series, which are left out); under 100 is a
+# truncated or partial file, not a real list.
+FNO_FREEZE_LIMITS_MIN_ROWS: int = 100
+# How many calendar days back the builder looks for the latest contract file
+# (named for its trading day; two holidays beside a weekend span four days).
+FNO_CONTRACT_LOOKBACK_DAYS: int = 7
+# Routine F&O churn: underlyings a run may stand in at one lot, or carry
+# forward because the file no longer lists them, before it reads as a broken
+# or partial file. NSE exits stocks a handful at a time.
+FNO_FREEZE_LIMITS_MAX_CHURN: int = 3
+FNO_FREEZE_LIMITS_MAX_CHURN_SHARE: float = 0.03
+
 # Corporate-action ex-date detector (G1b task 7): flag an instrument when
 # abs(prevclose_today / close_prev - 1) exceeds this fraction -- a split,
 # bonus, or other ex-date discontinuity, not ordinary price movement.
