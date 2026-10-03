@@ -32,20 +32,23 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import requests
 
 from pipeline import calendar as cal
 from pipeline import config, store
 from pipeline.daily_update import RunStatus
 from pipeline.datasets import DatasetSpec
+from pipeline.errors import NotYetPublished
 from pipeline.fetch import _BROWSER_UA, _fetch_with_retry
 from pipeline.sources import (
     classification_publication,
     nse_constituents,
+    nse_fo_contract,
     nse_fo_mktlots,
     nse_sector,
 )
@@ -191,6 +194,20 @@ def _empty_reference_frame() -> pd.DataFrame:
 def _write_atomic(df: pd.DataFrame, target: Path) -> None:
     tmp = target.with_suffix(".parquet.tmp")
     df.to_parquet(tmp, compression="zstd", index=False)
+    tmp.replace(target)
+
+
+def _write_atomic_typed(df: pd.DataFrame, target: Path, schema: pa.Schema) -> None:
+    """`_write_atomic` with the column types pinned, for a file the desktop
+    client reads by type.
+
+    Left to pandas, the Arrow types follow the pandas version, not the code:
+    pandas 3 writes text as `large_string` where 2.x wrote `string`, so a
+    dependency bump alone would change a published contract. Casting through
+    an explicit schema keeps the file identical across both.
+    """
+    tmp = target.with_suffix(".parquet.tmp")
+    df.to_parquet(tmp, compression="zstd", index=False, schema=schema)
     tmp.replace(target)
 
 
@@ -950,6 +967,16 @@ def _fetch_all_constituent_lists(target: date) -> pd.DataFrame:
 # ── CAS-eligible stocks ─────────────────────────────────────────────────────
 
 _CAS_COLUMNS: list[str] = ["symbol", "isin", "date", "source"]
+# The types the client reads (see _write_atomic_typed): text as `string`, the
+# as-of date as a timestamp. An unresolved ISIN is a null string.
+_CAS_SCHEMA = pa.schema(
+    [
+        ("symbol", pa.string()),
+        ("isin", pa.string()),
+        ("date", pa.timestamp("ms")),
+        ("source", pa.string()),
+    ]
+)
 
 # Cash series an F&O stock can sit in, in preference order. Derivatives need
 # the rolling (EQ) segment; BE/BZ only cover a stock the master last saw
@@ -1140,7 +1167,7 @@ def build_cas_eligible(
             ),
         )
 
-    _write_atomic(out, out_path)
+    _write_atomic_typed(out, out_path, _CAS_SCHEMA)
     missing = sorted(out.loc[out["isin"].isna(), "symbol"])
     note = f"; {len(missing)} without ISIN: {', '.join(missing[:15])}" if missing else ""
     # "success", not "ok": data-daily's secondary-status allowlist is
@@ -1151,4 +1178,256 @@ def build_cas_eligible(
         symbol_count=len(out),
         source=spec.source_label,
         message=f"{len(out)} stocks; {dropped_indices} index underlyings dropped{note}",
+    )
+
+
+# ── F&O freeze limits ───────────────────────────────────────────────────────
+
+_FNO_LIMIT_COLUMNS: list[str] = [*nse_fo_contract.LIMIT_COLUMNS, "date", "source"]
+# The types the client reads (see _write_atomic_typed). `date` keeps the
+# millisecond unit every published file in this pipeline carries.
+_FNO_LIMIT_SCHEMA = pa.schema(
+    [
+        ("symbol", pa.string()),
+        ("kind", pa.string()),
+        ("lot_size", pa.int64()),
+        ("max_order_quantity", pa.int64()),
+        ("basis", pa.string()),
+        ("date", pa.timestamp("ms")),
+        ("source", pa.string()),
+    ]
+)
+
+
+def _fetch_freeze_limits(
+    target: date, *, lookback_days: int = config.FNO_CONTRACT_LOOKBACK_DAYS
+) -> tuple[date, pd.DataFrame]:
+    """The latest contract file on or before `target`, and its day.
+
+    NSE posts file D in the evening of D (18:30-20:00 IST seen), listing the
+    contracts of the next session, so a run before that reads D-1; the walk
+    back also covers holidays and long weekends. Only a 404 moves to an older
+    day: a refusal, a server error or a wrong document served with 200 fails
+    the fetch, so it is never mistaken for an older right file.
+    """
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": _BROWSER_UA})
+        for back in range(lookback_days):
+            day = target - timedelta(days=back)
+            try:
+                frame = _fetch_with_retry(
+                    session,
+                    nse_fo_contract.contract_url(day),
+                    day,
+                    parse=nse_fo_contract.parse_freeze_limits,
+                )
+            except NotYetPublished:
+                continue
+            return day, frame
+    raise NotYetPublished(
+        f"no contract file in the {lookback_days} days to {target.isoformat()}"
+    )
+
+
+def _prior_file_day(prior: pd.DataFrame | None) -> date | None:
+    if prior is None or prior.empty or "date" not in prior.columns:
+        return None
+    latest = prior["date"].max()
+    if pd.isna(latest):
+        return None
+    try:
+        return pd.Timestamp(latest).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _trading_days_between(
+    after: date, before: date, trading_day: Callable[[date], bool]
+) -> int:
+    """Trading days strictly after `after` and strictly before `before`."""
+    count = 0
+    day = after + timedelta(days=1)
+    while day < before:
+        if trading_day(day):
+            count += 1
+        day += timedelta(days=1)
+    return count
+
+
+def _allowed(prior_rows: int) -> int:
+    """How many underlyings may be carried or stood in before a run reads as
+    a broken or partial file rather than routine F&O churn."""
+    share = int(prior_rows * config.FNO_FREEZE_LIMITS_MAX_CHURN_SHARE)
+    return max(config.FNO_FREEZE_LIMITS_MAX_CHURN, share)
+
+
+def build_fno_freeze_limits(
+    spec: DatasetSpec,
+    target: date,
+    *,
+    fetch_limits: Callable[[date], tuple[date, pd.DataFrame]] = _fetch_freeze_limits,
+    trading_day: Callable[[date], bool] = _cas_trading_day,
+    min_rows: int = config.FNO_FREEZE_LIMITS_MIN_ROWS,
+) -> RunStatus:
+    """Full-rewrite `fno_freeze_limits_all.parquet`: per F&O underlying, its
+    kind (index or stock), lot size, the largest single order NSE takes
+    (`max_order_quantity`, a whole number of lots) and its `basis`. `date` is
+    the day of the contract file the limits come from (NSE's file D, for
+    session D+1).
+
+    A limit too high is the failure that matters (the app sizes orders and
+    protective stops by it), so:
+      - an OLDER file never replaces a newer one (a back-dated run keeps the
+        published file); the same day's file read again is published again,
+        so an evening correction lands;
+      - an underlying the file still lists never gets an old limit back: one
+        whose limit cannot be trusted stands in at one lot (parser), and only
+        one ABSENT from the file is carried forward, so a routine F&O exit
+        never shrinks the file and never withholds a lowered limit elsewhere;
+      - more stand-ins or carried rows than routine churn allows means a
+        broken or partial file: nothing is written, `failed`;
+      - limits a trading day or more behind are `failed`, loudly, whatever
+        the cause (no file, a wrong document, a format change): file D
+        serves session D+1, so a run on D+1 holding file D is current;
+      - an underlying with no option series is published only if it was
+        before (a real one that lost its options), never NSE's test series.
+    Otherwise fail-closed like cas_eligible: a fetch error or wrong document,
+    or fewer than `min_rows` underlyings, keeps the prior file
+    (`skipped_idempotent`; `failed` on a first run with nothing to keep).
+    """
+    spec.base_dir.mkdir(parents=True, exist_ok=True)
+    out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
+    prior = _constituents_prior(out_path)
+    prior_rows = None if prior is None else len(prior)
+    prior_day = _prior_file_day(prior)
+    prior_symbols: set[str] = set()
+    if prior is not None and "symbol" in prior.columns:
+        prior_symbols = set(prior["symbol"].astype(str))
+
+    if not trading_day(target):
+        return RunStatus(
+            "skipped_holiday",
+            target,
+            symbol_count=prior_rows or 0,
+            source=spec.source_label,
+            message="non-trading day; limits not refreshed",
+        )
+
+    def behind(day: date | None) -> int:
+        return 0 if day is None else _trading_days_between(day, target, trading_day)
+
+    def kept(why: str) -> RunStatus:
+        """The prior file stays: quiet while it is current, loud once stale."""
+        missed = behind(prior_day)
+        if prior_day is not None and missed >= 1:
+            return RunStatus(
+                "failed",
+                target,
+                symbol_count=prior_rows or 0,
+                source=spec.source_label,
+                message=(
+                    f"{why}; published limits are from {prior_day.isoformat()}, "
+                    f"{missed} trading days behind (prior kept)"
+                ),
+            )
+        return _constituents_fail_closed(spec, target, out_path, prior_rows, why)
+
+    def refused(why: str) -> RunStatus:
+        """An anomaly to look at (a format change, a partial file): loud now."""
+        return RunStatus(
+            "failed",
+            target,
+            symbol_count=prior_rows or 0,
+            source=spec.source_label,
+            message=f"{why}; nothing written" + ("; prior kept" if prior_rows else ""),
+        )
+
+    try:
+        file_day, limits = fetch_limits(target)
+    except NotYetPublished as e:
+        return RunStatus(
+            "failed",
+            target,
+            symbol_count=prior_rows or 0,
+            source=spec.source_label,
+            message=f"{e}; limits going stale"
+            + (f" (published file is from {prior_day.isoformat()}, kept)" if prior_day else ""),
+        )
+    except Exception as e:  # noqa: BLE001 - any fetch/parse failure -> fail-closed
+        return kept(f"fetch failed: {e}")
+
+    if prior_day is not None and file_day < prior_day:
+        return kept(
+            f"contract file of {file_day.isoformat()} is older than the published "
+            f"{prior_day.isoformat()}"
+        )
+
+    # NSE's test series (futures-only) never enter; a real underlying that
+    # lost its options keeps its row.
+    limits = limits[limits["has_options"] | limits["symbol"].isin(prior_symbols)]
+    if limits.empty:
+        return kept("parsed 0 underlyings")
+    if len(limits) < min_rows:
+        return kept(f"parsed {len(limits)} underlyings < floor {min_rows} (suspected truncation)")
+
+    churn = _allowed(prior_rows or 0)
+    stand_ins = sorted(limits.loc[limits["basis"] == nse_fo_contract.BASIS_STAND_IN, "symbol"])
+    if len(stand_ins) > churn:
+        return refused(
+            f"{len(stand_ins)} underlyings without a trustworthy limit (over {churn}; "
+            f"format change?): {', '.join(stand_ins[:15])}"
+        )
+
+    out = limits.drop(columns=["has_options"]).copy()
+    # REQUIRED for the manifest: build_manifest reads columns=["date"].
+    out["date"] = pd.Timestamp(file_day)
+    out["source"] = nse_fo_contract.SOURCE
+    out = out[_FNO_LIMIT_COLUMNS]
+
+    carried: list[str] = []
+    carriable = {"symbol", "kind", "lot_size", "max_order_quantity", "date"}
+    if prior is not None and carriable <= set(prior.columns):
+        gone = prior[~prior["symbol"].isin(out["symbol"])].copy()
+        if not gone.empty:
+            carried = sorted(gone["symbol"].astype(str))
+            # Only the ones the last file listed are new: rows carried before
+            # keep their older date, and must not count again on every run.
+            new_dates = pd.to_datetime(gone["date"], errors="coerce").dt.date
+            leaving = sorted(gone.loc[new_dates == prior_day, "symbol"].astype(str))
+            if len(leaving) > churn:
+                return refused(
+                    f"{len(leaving)} underlyings missing from the file (over {churn}; "
+                    f"partial file?): {', '.join(leaving[:15])}"
+                )
+            if "basis" not in gone.columns:
+                gone["basis"] = nse_fo_contract.BASIS_EXCHANGE
+            if "source" not in gone.columns:
+                gone["source"] = nse_fo_contract.SOURCE
+            out = pd.concat([out, gone[_FNO_LIMIT_COLUMNS]], ignore_index=True)
+
+    out = out.sort_values("symbol", kind="mergesort").reset_index(drop=True)
+    _write_atomic_typed(out, out_path, _FNO_LIMIT_SCHEMA)
+
+    notes = ""
+    if stand_ins:
+        notes += f"; {len(stand_ins)} stand in at one lot: {', '.join(stand_ins[:15])}"
+    if carried:
+        more = f" (+{len(carried) - 15} more)" if len(carried) > 15 else ""
+        listed = ", ".join(carried[:15]) + more
+        notes += f"; {len(carried)} no longer listed, carried forward: {listed}"
+    summary = (
+        f"{len(limits)} underlyings ({int((limits['kind'] == 'index').sum())} indices) "
+        f"from the {file_day.isoformat()} contract file{notes}"
+    )
+    missed = behind(file_day)
+    if missed >= 1:
+        return RunStatus(
+            "failed",
+            target,
+            symbol_count=len(out),
+            source=spec.source_label,
+            message=f"{summary}; that file is {missed} trading days behind",
+        )
+    return RunStatus(
+        "success", target, symbol_count=len(out), source=spec.source_label, message=summary
     )

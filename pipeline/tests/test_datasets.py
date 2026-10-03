@@ -20,7 +20,7 @@ def test_equities_spec_fields():
     assert datasets.DATASET_ORDER == [
         "equities", "indices", "reference", "ca_flags", "sector_industry",
         "classification_registry", "classification_observations",
-        "fundamentals", "index_constituents", "cas_eligible",
+        "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
     ]
 
 
@@ -67,7 +67,7 @@ def test_all_specs_follows_dataset_order():
         datasets.EQUITIES, datasets.INDICES, datasets.REFERENCE, datasets.CA_FLAGS,
         datasets.SECTOR_INDUSTRY, datasets.CLASSIFICATION_REGISTRY,
         datasets.CLASSIFICATION_OBSERVATIONS, datasets.FUNDAMENTALS,
-        datasets.INDEX_CONSTITUENTS, datasets.CAS_ELIGIBLE,
+        datasets.INDEX_CONSTITUENTS, datasets.CAS_ELIGIBLE, datasets.FNO_FREEZE_LIMITS,
     ]
 
 

@@ -127,6 +127,9 @@ builders.BUILDERS["index_constituents"] = builders.build_index_constituents
 builders.BUILDERS["cas_eligible"] = functools.partial(
     builders.build_cas_eligible, universe_spec=datasets.DATASETS["reference"]
 )
+# fno_freeze_limits fetches NSE's daily F&O contract file itself; registered
+# bare, its keyword-only fetch/calendar/floor args carry defaults.
+builders.BUILDERS["fno_freeze_limits"] = builders.build_fno_freeze_limits
 
 
 def _plain_runner(cmd: list[str]) -> int:
