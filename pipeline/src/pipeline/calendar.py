@@ -1,26 +1,17 @@
 """Trading-calendar logic. Pure; holidays are injected as a set of dates."""
 from __future__ import annotations
 
-import json
 from datetime import date, timedelta
 from pathlib import Path
 
-
-def load_holidays(path: Path) -> set[date]:
-    raw: dict[str, list[str]] = json.loads(path.read_text())
-    out: set[date] = set()
-    for _year, days in raw.items():
-        for d in days:
-            out.add(date.fromisoformat(d))
-    return out
+from pipeline import market_calendar
 
 
-def load_special_sessions(path: Path) -> set[date]:
-    """Special trading sessions (e.g. Muhurat) that trade despite weekend/holiday."""
-    if not path.exists():
-        return set()
-    raw = json.loads(path.read_text())
-    return {date.fromisoformat(s["date"]) for s in raw.get("sessions", [])}
+def load_trading_calendar(meta_dir: Path) -> tuple[set[date], set[date]]:
+    """(holidays, special_sessions) of NSE, the pipeline's trading calendar,
+    from the one market calendar file (market_calendar.json): its closures,
+    and its sessions, which trade despite a weekend or a holiday (Muhurat)."""
+    return market_calendar.load(meta_dir / market_calendar.FILENAME).trading_inputs("NSE")
 
 
 def is_trading_day(

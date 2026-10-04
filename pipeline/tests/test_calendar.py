@@ -1,17 +1,16 @@
-import json
 from datetime import date
 from pathlib import Path
 
 import pytest
 
 from pipeline import calendar as cal
+from tests import fakes
 
 
 @pytest.fixture
 def holidays(tmp_path: Path) -> set[date]:
-    p = tmp_path / "holidays.json"
-    p.write_text(json.dumps({"2026": ["2026-01-26", "2026-08-15"]}))
-    return cal.load_holidays(p)
+    fakes.write_market_calendar(tmp_path, nse_closures=["2026-01-26", "2026-08-15"])
+    return cal.load_trading_calendar(tmp_path)[0]
 
 
 def test_weekend_is_not_a_trading_day(holidays: set[date]):
@@ -55,7 +54,6 @@ def test_trading_days_back_rejects_non_positive_n(holidays: set[date]):
 
 
 def test_special_session_overrides_weekend_and_holiday(tmp_path):
-    import json
     from datetime import date
 
     from pipeline import calendar as cal
@@ -65,10 +63,22 @@ def test_special_session_overrides_weekend_and_holiday(tmp_path):
     assert cal.is_trading_day(muhurat, set(), special_sessions={muhurat})
     assert cal.is_trading_day(muhurat, {muhurat}, special_sessions={muhurat})  # beats holiday too
 
-    p = tmp_path / "special_sessions.json"
-    p.write_text(json.dumps({"sessions": [{"date": "2026-11-08", "label": "muhurat"}]}))
-    assert cal.load_special_sessions(p) == {muhurat}
-    assert cal.load_special_sessions(tmp_path / "absent.json") == set()
+    # A listed session trades even before its hours are known.
+    fakes.write_market_calendar(tmp_path, nse_sessions=[{"date": "2026-11-08", "label": "muhurat"}])
+    assert cal.load_trading_calendar(tmp_path) == (set(), {muhurat})
+
+
+def test_the_trading_calendar_is_the_one_market_calendar_file(tmp_path: Path):
+    from pipeline import market_calendar
+
+    with pytest.raises(market_calendar.CalendarError, match="missing"):
+        cal.load_trading_calendar(tmp_path)
+    # The committed file: NSE's closures are the pipeline's holidays, and a
+    # Muhurat day listed as a closure still trades.
+    holidays, special = cal.load_trading_calendar(Path(__file__).parents[1] / "data" / "meta")
+    assert date(2026, 10, 2) in holidays
+    assert cal.is_trading_day(date(2025, 10, 21), holidays, special)
+    assert cal.is_trading_day(date(2026, 2, 1), holidays, special)  # Budget Sunday
 
 
 def test_previous_trading_day_sees_special_session():

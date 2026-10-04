@@ -40,7 +40,7 @@ import pyarrow as pa
 import requests
 
 from pipeline import calendar as cal
-from pipeline import config, store
+from pipeline import config, market_calendar, store
 from pipeline.daily_update import RunStatus
 from pipeline.datasets import DatasetSpec
 from pipeline.errors import NotYetPublished
@@ -1016,16 +1016,14 @@ def _cas_symbol_isins(universe_spec: DatasetSpec) -> dict[str, str]:
 
 
 def _cas_trading_day(target: date) -> bool:
-    """The daily run's own calendar (META_DIR holidays + special sessions).
+    """The daily run's own calendar (META_DIR/market_calendar.json).
 
     The published `date` is "the trading date this list is as of", and the
     Phase-2 builders still run on a holiday (the primary's `skipped_holiday`
     counts as healthy), so without this an NSE weekday holiday would stamp a
     non-trading date on the file.
     """
-    holidays_path = config.META_DIR / "holidays.json"
-    holidays = cal.load_holidays(holidays_path) if holidays_path.exists() else set()
-    special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
+    holidays, special = cal.load_trading_calendar(config.META_DIR)
     return cal.is_trading_day(target, holidays, special_sessions=special)
 
 
@@ -1178,6 +1176,110 @@ def build_cas_eligible(
         symbol_count=len(out),
         source=spec.source_label,
         message=f"{len(out)} stocks; {dropped_indices} index underlyings dropped{note}",
+    )
+
+
+# ── Market calendar ─────────────────────────────────────────────────────────
+
+# The types the client reads (see _write_atomic_typed). `day` is the calendar
+# date; `date` is the as-of the manifest reads, in the pipeline's ms unit.
+_MARKET_CALENDAR_SCHEMA = pa.schema(
+    [
+        ("venue", pa.string()),
+        ("day", pa.date32()),
+        ("kind", pa.string()),
+        ("pre_open_seconds", pa.int32()),
+        ("open_seconds", pa.int32()),
+        ("close_seconds", pa.int32()),
+        ("label", pa.string()),
+        ("source", pa.string()),
+        ("date", pa.timestamp("ms")),
+    ]
+)
+
+
+def build_market_calendar(
+    spec: DatasetSpec, target: date, *, meta_dir: Path = config.META_DIR
+) -> RunStatus:
+    """Full-rewrite `market_calendar_all.parquet` from the one market calendar
+    file, META_DIR/market_calendar.json: per venue, closures, days with their
+    own hours, and the years verified complete (rows and rules:
+    market_calendar.py).
+
+    Every daily run, holiday or not: nothing is fetched, and a meta commit
+    should publish on the next run.
+
+    Fail-closed, keeping the prior file: malformed or self-contradicting meta
+    is `skipped_idempotent` with a prior file and `failed` without one. A
+    calendar that LOST rows is held back loudly (`failed`, prior retained, the
+    lost rows named): the publish shrink-guard would block the whole release,
+    and a dropped closure or session silently changes when the app's alerts
+    fire. Removing a wrong entry is the operator step in the RUNBOOK's
+    market_calendar section.
+    """
+    spec.base_dir.mkdir(parents=True, exist_ok=True)
+    out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
+    prior = _constituents_prior(out_path)
+    prior_rows = None if prior is None else len(prior)
+
+    try:
+        calendar = market_calendar.load(meta_dir / market_calendar.FILENAME)
+        rows = calendar.rows()
+    except market_calendar.CalendarError as e:
+        return _constituents_fail_closed(
+            spec, target, out_path, prior_rows, f"calendar invalid: {e}"
+        )
+
+    out = pd.DataFrame(
+        {
+            "venue": [r.venue for r in rows],
+            "day": [r.day for r in rows],
+            "kind": [r.kind for r in rows],
+            "pre_open_seconds": pd.array([r.pre_open_seconds for r in rows], dtype="Int32"),
+            "open_seconds": pd.array([r.open_seconds for r in rows], dtype="Int32"),
+            "close_seconds": pd.array([r.close_seconds for r in rows], dtype="Int32"),
+            "label": [r.label for r in rows],
+            "source": [r.source for r in rows],
+        }
+    )
+    # REQUIRED for the manifest: build_manifest reads columns=["date"].
+    out["date"] = pd.Timestamp(target)
+
+    if prior is not None and prior_rows is not None and len(out) < prior_rows:
+        def keys(frame: pd.DataFrame) -> set[str]:
+            return {
+                f"{v} {pd.Timestamp(d).date().isoformat()} {k}"
+                for v, d, k in zip(frame["venue"], frame["day"], frame["kind"], strict=True)
+            }
+
+        comparable = {"venue", "day", "kind"} <= set(prior.columns)
+        gone = sorted(keys(prior) - keys(out)) if comparable else []
+        shown = ", ".join(gone[:15]) + (f" (+{len(gone) - 15} more)" if len(gone) > 15 else "")
+        return RunStatus(
+            "failed",
+            target,
+            symbol_count=prior_rows,
+            source=spec.source_label,
+            message=(
+                f"{len(out)} rows < prior {prior_rows} (shrink-guard; no longer listed: "
+                f"{shown or 'n/a'}); retained prior file -- accept per RUNBOOK market_calendar"
+            ),
+        )
+
+    _write_atomic_typed(out, out_path, _MARKET_CALENDAR_SCHEMA)
+    covered = ", ".join(sorted(f"{r.venue} {r.day.year}" for r in rows if r.kind == "covered"))
+    closed = sum(r.kind == "closed" for r in rows)
+    sessions = sum(r.kind == "session" for r in rows)
+    pending = calendar.sessions_awaiting_hours()
+    # Named on every run until the hours are added: the app treats such a day
+    # as closed, so a Muhurat session left without hours is missed by alerts.
+    awaiting = f"; awaiting hours: {', '.join(pending)}" if pending else ""
+    return RunStatus(
+        "success",
+        target,
+        symbol_count=len(out),
+        source=spec.source_label,
+        message=f"{closed} closures, {sessions} sessions; covered: {covered or 'none'}{awaiting}",
     )
 
 

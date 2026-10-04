@@ -1,0 +1,337 @@
+{
+  "_doc": [
+    "The one market calendar: the producer's own trading days (cli/builders via calendar.load_trading_calendar) and the market_calendar dataset the desktop app syncs are both read from this file. Curated by hand from exchange circulars, never scraped; refresh yearly (RUNBOOK 'Yearly').",
+    "Per venue (NSE, BSE, MCX; the app's NFO shares NSE): source = the circulars behind it; closures = closed dates by year; sessions = days that trade other hours than the regular ones (a special session on a weekend or a closure, or a partial day), exchange-local HH:MM with an optional preOpen (call auction start) and a source when it differs from the venue's; coveredYears = years whose closures are verified complete with every special session listed (the app reads any other year as unknown; a listed session still awaiting its hours is treated as closed until they are added).",
+    "A session without hours is a day the exchange is known to have traded whose hours are not yet verified: the producer counts it as a trading day; the app is not sent it until its hours are added."
+  ],
+  "venues": {
+    "NSE": {
+      "source": "NSE Capital Market trading-holiday circulars: 2025 CMTR65587; 2026 CMTR71775, amended by CMTR72260 (2026-01-15)",
+      "coveredYears": [
+        2025,
+        2026
+      ],
+      "closures": {
+        "2021": [
+          "2021-01-26",
+          "2021-03-11",
+          "2021-03-29",
+          "2021-04-02",
+          "2021-04-14",
+          "2021-04-21",
+          "2021-05-13",
+          "2021-07-21",
+          "2021-08-19",
+          "2021-09-10",
+          "2021-10-15",
+          "2021-11-04",
+          "2021-11-05",
+          "2021-11-19"
+        ],
+        "2022": [
+          "2022-01-26",
+          "2022-03-01",
+          "2022-03-18",
+          "2022-04-14",
+          "2022-04-15",
+          "2022-05-03",
+          "2022-08-09",
+          "2022-08-15",
+          "2022-08-31",
+          "2022-10-05",
+          "2022-10-26",
+          "2022-11-08"
+        ],
+        "2023": [
+          "2023-01-26",
+          "2023-03-07",
+          "2023-03-30",
+          "2023-04-04",
+          "2023-04-07",
+          "2023-04-14",
+          "2023-05-01",
+          "2023-06-29",
+          "2023-08-15",
+          "2023-09-19",
+          "2023-10-02",
+          "2023-10-24",
+          "2023-11-14",
+          "2023-11-27",
+          "2023-12-25"
+        ],
+        "2024": [
+          "2024-01-22",
+          "2024-01-26",
+          "2024-03-08",
+          "2024-03-25",
+          "2024-03-29",
+          "2024-04-11",
+          "2024-04-17",
+          "2024-05-01",
+          "2024-05-20",
+          "2024-06-17",
+          "2024-07-17",
+          "2024-08-15",
+          "2024-10-02",
+          "2024-11-15",
+          "2024-11-20",
+          "2024-12-25"
+        ],
+        "2025": [
+          "2025-02-26",
+          "2025-03-14",
+          "2025-03-31",
+          "2025-04-10",
+          "2025-04-14",
+          "2025-04-18",
+          "2025-05-01",
+          "2025-08-15",
+          "2025-08-27",
+          "2025-10-02",
+          "2025-10-21",
+          "2025-10-22",
+          "2025-11-05",
+          "2025-12-25"
+        ],
+        "2026": [
+          "2026-01-15",
+          "2026-01-26",
+          "2026-02-15",
+          "2026-03-03",
+          "2026-03-21",
+          "2026-03-26",
+          "2026-03-31",
+          "2026-04-03",
+          "2026-04-14",
+          "2026-05-01",
+          "2026-05-28",
+          "2026-06-26",
+          "2026-08-15",
+          "2026-09-14",
+          "2026-10-02",
+          "2026-10-20",
+          "2026-11-10",
+          "2026-11-24",
+          "2026-12-25"
+        ]
+      },
+      "sessions": [
+        {
+          "date": "2023-11-12",
+          "label": "muhurat-2023 (Diwali Laxmi Pujan — Sunday evening Muhurat trading; NSE published a bhavcopy)"
+        },
+        {
+          "date": "2024-01-20",
+          "label": "special-session-2024-01-20 (Saturday NSE special live/DR session; bhavcopy published — derived from NSE archive)"
+        },
+        {
+          "date": "2024-03-02",
+          "label": "special-session-2024-03-02 (Saturday NSE special live/DR session; bhavcopy published — derived from NSE archive)"
+        },
+        {
+          "date": "2024-05-18",
+          "label": "special-session-2024-05-18 (Saturday NSE special live/DR session; bhavcopy published — derived from NSE archive)"
+        },
+        {
+          "date": "2025-02-01",
+          "label": "budget-2025 (Union Budget special live session; Saturday — NSE published a bhavcopy)",
+          "preOpen": "09:00",
+          "open": "09:15",
+          "close": "15:30",
+          "source": "NSE live-session notification of 2024-12-23 and NSE/MSD/66381 (standard timings); MCX open to 17:00"
+        },
+        {
+          "date": "2025-10-21",
+          "label": "muhurat-2025 (Diwali Laxmi Pujan — afternoon Muhurat trading; NSE publishes a bhavcopy)",
+          "preOpen": "13:30",
+          "open": "13:45",
+          "close": "14:45",
+          "source": "NSE and BSE Muhurat circulars (2025-10): pre-open 13:30-13:45, session 13:45-14:45"
+        },
+        {
+          "date": "2026-02-01",
+          "label": "budget-2026 (Union Budget special live session; Sunday — NSE publishes a bhavcopy)",
+          "preOpen": "09:00",
+          "open": "09:15",
+          "close": "15:30",
+          "source": "NSE CMTR72349 (standard timings 09:15-15:30, pre-open 09:00); BSE notice of 2026-01-16; MCX circular of 2026-01-16 (09:00-17:00)"
+        },
+        {
+          "date": "2026-11-08",
+          "label": "Muhurat 2026 (Diwali Laxmi Pujan): NSE CMTR71775 lists it, timings to be notified; add hours when the circular is out"
+        }
+      ]
+    },
+    "BSE": {
+      "source": "BSE equity calendar: 2025 master circular; 2026 notice 20251212-8, amended by notice 20260112-8 (2026-01-15)",
+      "coveredYears": [
+        2025,
+        2026
+      ],
+      "closures": {
+        "2025": [
+          "2025-02-26",
+          "2025-03-14",
+          "2025-03-31",
+          "2025-04-10",
+          "2025-04-14",
+          "2025-04-18",
+          "2025-05-01",
+          "2025-08-15",
+          "2025-08-27",
+          "2025-10-02",
+          "2025-10-21",
+          "2025-10-22",
+          "2025-11-05",
+          "2025-12-25"
+        ],
+        "2026": [
+          "2026-01-15",
+          "2026-01-26",
+          "2026-03-03",
+          "2026-03-26",
+          "2026-03-31",
+          "2026-04-03",
+          "2026-04-14",
+          "2026-05-01",
+          "2026-05-28",
+          "2026-06-26",
+          "2026-09-14",
+          "2026-10-02",
+          "2026-10-20",
+          "2026-11-10",
+          "2026-11-24",
+          "2026-12-25"
+        ]
+      },
+      "sessions": [
+        {
+          "date": "2025-02-01",
+          "label": "budget-2025 (Union Budget special live session; Saturday — NSE published a bhavcopy)",
+          "preOpen": "09:00",
+          "open": "09:15",
+          "close": "15:30",
+          "source": "NSE live-session notification of 2024-12-23 and NSE/MSD/66381 (standard timings); MCX open to 17:00"
+        },
+        {
+          "date": "2025-10-21",
+          "label": "muhurat-2025 (Diwali Laxmi Pujan — afternoon Muhurat trading; NSE publishes a bhavcopy)",
+          "preOpen": "13:30",
+          "open": "13:45",
+          "close": "14:45",
+          "source": "NSE and BSE Muhurat circulars (2025-10): pre-open 13:30-13:45, session 13:45-14:45"
+        },
+        {
+          "date": "2026-02-01",
+          "label": "budget-2026 (Union Budget special live session; Sunday — NSE publishes a bhavcopy)",
+          "preOpen": "09:00",
+          "open": "09:15",
+          "close": "15:30",
+          "source": "NSE CMTR72349 (standard timings 09:15-15:30, pre-open 09:00); BSE notice of 2026-01-16; MCX circular of 2026-01-16 (09:00-17:00)"
+        }
+      ]
+    },
+    "MCX": {
+      "source": "MCX circular 636-2025 (2026 holidays: full closures, morning- and evening-session closures) and circular 068/2026 (hours from 2026-03-09; the evening close follows US daylight saving: 23:30 in it, 23:55 out of it)",
+      "coveredYears": [
+        2026
+      ],
+      "closures": {
+        "2026": [
+          "2026-01-26",
+          "2026-04-03",
+          "2026-10-02",
+          "2026-12-25"
+        ]
+      },
+      "sessions": [
+        {
+          "date": "2025-02-01",
+          "label": "budget-2025 (Union Budget special live session; Saturday — NSE published a bhavcopy)",
+          "open": "09:00",
+          "close": "17:00",
+          "source": "NSE live-session notification of 2024-12-23 and NSE/MSD/66381 (standard timings); MCX open to 17:00"
+        },
+        {
+          "date": "2026-01-01",
+          "label": "evening session closed",
+          "open": "09:00",
+          "close": "17:00"
+        },
+        {
+          "date": "2026-02-01",
+          "label": "budget-2026 (Union Budget special live session; Sunday — NSE publishes a bhavcopy)",
+          "open": "09:00",
+          "close": "17:00",
+          "source": "NSE CMTR72349 (standard timings 09:15-15:30, pre-open 09:00); BSE notice of 2026-01-16; MCX circular of 2026-01-16 (09:00-17:00)"
+        },
+        {
+          "date": "2026-03-03",
+          "label": "morning session closed",
+          "open": "17:00",
+          "close": "23:55"
+        },
+        {
+          "date": "2026-03-26",
+          "label": "morning session closed",
+          "open": "17:00",
+          "close": "23:30"
+        },
+        {
+          "date": "2026-03-31",
+          "label": "morning session closed",
+          "open": "17:00",
+          "close": "23:30"
+        },
+        {
+          "date": "2026-04-14",
+          "label": "morning session closed",
+          "open": "17:00",
+          "close": "23:30"
+        },
+        {
+          "date": "2026-05-01",
+          "label": "morning session closed",
+          "open": "17:00",
+          "close": "23:30"
+        },
+        {
+          "date": "2026-05-28",
+          "label": "morning session closed",
+          "open": "17:00",
+          "close": "23:30"
+        },
+        {
+          "date": "2026-06-26",
+          "label": "morning session closed",
+          "open": "17:00",
+          "close": "23:30"
+        },
+        {
+          "date": "2026-09-14",
+          "label": "morning session closed",
+          "open": "17:00",
+          "close": "23:30"
+        },
+        {
+          "date": "2026-10-20",
+          "label": "morning session closed",
+          "open": "17:00",
+          "close": "23:30"
+        },
+        {
+          "date": "2026-11-10",
+          "label": "morning session closed",
+          "open": "17:00",
+          "close": "23:55"
+        },
+        {
+          "date": "2026-11-24",
+          "label": "morning session closed",
+          "open": "17:00",
+          "close": "23:55"
+        }
+      ]
+    }
+  }
+}

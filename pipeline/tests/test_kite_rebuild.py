@@ -20,6 +20,7 @@ import pytest
 
 from pipeline.errors import UnexpectedFailure
 from pipeline.sources.kite_rebuild import KiteDayRebuilder
+from tests import fakes
 
 _TARGET = date(2026, 7, 3)
 
@@ -546,9 +547,9 @@ def _scope_config_to_tmp(monkeypatch, config_mod, cli_mod, datasets_mod, tmp_pat
                           ref_rows: list[dict[str, object]],
                           abs_rowcount_range: tuple[int, int] = (0, 10**9)) -> None:
     """Shared setup for rebuild-day CLI tests: scopes REFERENCE_DIR, META_DIR
-    (with an empty holidays.json), and the equities registry entry to tmp_path
+    (with an empty market_calendar.json), and the equities registry entry to tmp_path
     -- so a test can NEVER accidentally read/write the real repo's
-    data/meta/holidays.json or data/ohlc store (Global Constraint 6)."""
+    data/meta/market_calendar.json or data/ohlc store (Global Constraint 6)."""
     import dataclasses
 
     ref_dir = tmp_path / "reference"
@@ -557,7 +558,7 @@ def _scope_config_to_tmp(monkeypatch, config_mod, cli_mod, datasets_mod, tmp_pat
 
     meta_dir = tmp_path / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
-    (meta_dir / "holidays.json").write_text("{}")
+    fakes.write_market_calendar(meta_dir)
     monkeypatch.setattr(config_mod, "META_DIR", meta_dir)
 
     equities_spec = dataclasses.replace(

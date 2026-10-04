@@ -20,8 +20,8 @@ jobs:
         run: |
           next_year=$(( $(date -u +%Y) + 1 ))
           gh label create pipeline-maintenance --color 0E8A16 --force >/dev/null 2>&1 || true
-          title="Data pipeline: refresh holidays.json for ${next_year}"
-          body="Refresh \`pipeline/data/meta/holidays.json\` + \`pipeline/data/meta/special_sessions.json\` for ${next_year} from the NSE trading-holiday circulars (manual — no scraping; see RUNBOOK.md 'Yearly'). This is a yearly reminder, not an automatic fix: \`check-freshness\` will also start failing on/after Dec 1 if ${next_year} isn't in holidays.json yet (see \`freshness.holidays_need_refresh\`)."
+          title="Data pipeline: refresh market_calendar.json for ${next_year}"
+          body="Refresh \`pipeline/data/meta/market_calendar.json\` for ${next_year} from the NSE, BSE and MCX trading-holiday circulars: closures, special sessions (Muhurat, Budget day) and MCX partial days, then add ${next_year} to each venue's coveredYears (manual — no scraping; see RUNBOOK.md 'Yearly'). The desktop app reads this calendar through the market_calendar dataset. \`check-freshness\` also starts failing on/after Dec 1 if ${next_year} has no NSE closures yet (see \`freshness.holidays_need_refresh\`)."
           n=$(gh issue list --label pipeline-maintenance --state open --json number -q '.[0].number' || true)
           if [ -z "$n" ]; then
             gh issue create --title "$title" --label pipeline-maintenance --body "$body"

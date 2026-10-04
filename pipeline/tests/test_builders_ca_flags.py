@@ -52,6 +52,7 @@ def test_ca_flags_spec_fields():
         "equities", "indices", "reference", "ca_flags", "sector_industry",
         "classification_registry", "classification_observations",
         "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
+        "market_calendar",
     ]
     with pytest.raises(RuntimeError, match="derived dataset has no fetcher"):
         s.make_fetcher()

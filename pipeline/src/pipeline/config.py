@@ -179,6 +179,12 @@ CAS_MIN_ROWS: int = 100
 # publishing would strip ISINs from a list the client joins on.
 CAS_MIN_ISIN_COVERAGE: float = 0.9
 
+# Market calendar the desktop app reads: per venue, closures, days with their
+# own hours, and the years verified complete. Built from the one curated
+# calendar file, META_DIR/market_calendar.json (also the pipeline's own trading
+# calendar), never scraped. A current snapshot, rewritten whole.
+MARKET_CALENDAR_DIR: Path = DATA_DIR / "calendar"
+
 # F&O quantity-freeze limits: the largest single order NSE takes per
 # underlying, from the daily contract file. A daily current snapshot.
 FNO_FREEZE_LIMITS_DIR: Path = DATA_DIR / "fno"

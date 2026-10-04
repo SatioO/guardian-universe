@@ -21,6 +21,7 @@ def test_equities_spec_fields():
         "equities", "indices", "reference", "ca_flags", "sector_industry",
         "classification_registry", "classification_observations",
         "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
+        "market_calendar",
     ]
 
 
@@ -68,6 +69,7 @@ def test_all_specs_follows_dataset_order():
         datasets.SECTOR_INDUSTRY, datasets.CLASSIFICATION_REGISTRY,
         datasets.CLASSIFICATION_OBSERVATIONS, datasets.FUNDAMENTALS,
         datasets.INDEX_CONSTITUENTS, datasets.CAS_ELIGIBLE, datasets.FNO_FREEZE_LIMITS,
+        datasets.MARKET_CALENDAR,
     ]
 
 
