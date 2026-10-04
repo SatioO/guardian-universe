@@ -74,7 +74,7 @@ def test_the_committed_calendar_holds_the_verified_special_sessions():
 def test_a_session_awaiting_its_hours_is_named_and_not_sent_to_the_app():
     calendar = _committed()
     # Muhurat 2026: NSE lists the day; its timings are notified later.
-    assert "NSE 2026-11-08" in calendar.sessions_awaiting_hours()
+    assert calendar.sessions_awaiting_hours() == ["NSE 2026-11-08"]
     assert _find(calendar.rows(), "NSE", "2026-11-08", "session") == []
     # ...but the pipeline's own calendar trades it already.
     assert date(2026, 11, 8) in calendar.trading_inputs("NSE")[1]
