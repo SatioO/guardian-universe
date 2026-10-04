@@ -99,12 +99,15 @@ class MarketCalendar:
         return set(v.closures), {s.day for s in v.sessions}
 
     def sessions_awaiting_hours(self) -> list[str]:
-        """'NSE 2026-11-08' for each listed session whose hours are not added yet."""
+        """'NSE 2026-11-08' for each listed session in a covered year whose
+        hours are not added yet: the app treats it as closed until they are.
+        Sessions in years the calendar does not cover are history the app never
+        reads as complete, so they are not named."""
         return [
             f"{v.id} {s.day.isoformat()}"
             for v in self.venues.values()
             for s in v.sessions
-            if not s.has_hours
+            if not s.has_hours and s.day.year in v.covered_years
         ]
 
     def rows(self) -> list[Row]:
