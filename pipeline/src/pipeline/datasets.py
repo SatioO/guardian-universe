@@ -235,6 +235,23 @@ FNO_FREEZE_LIMITS = DatasetSpec(
     derived=True,
 )
 
+MARKET_CALENDAR = DatasetSpec(
+    key="market_calendar", file_prefix="market_calendar",
+    base_dir=config.MARKET_CALENDAR_DIR,
+    source_label="guardian-universe-meta",
+    normalizer=lambda df: df,  # identity: build_market_calendar shapes rows itself
+    make_fetcher=_no_fetcher,  # curated meta files, never fetched
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="market_calendar", schema_version=1,
+    # The exchange calendar the desktop app fires alerts and draws sessions by:
+    # NSE/BSE/MCX closures, special and partial-day sessions with their hours,
+    # and the years each venue's calendar is verified complete. Built from
+    # pipeline/data/meta/market_calendar.json (see market_calendar.py). A
+    # current SNAPSHOT rewritten each daily run, so a commit to the calendar
+    # publishes on the next run.
+    derived=True,
+)
+
 CLASSIFICATION_REGISTRY = DatasetSpec(
     key="classification_registry",
     file_prefix="classification_registry",
@@ -293,11 +310,13 @@ DATASETS: dict[str, DatasetSpec] = {
     "index_constituents": INDEX_CONSTITUENTS,
     "cas_eligible": CAS_ELIGIBLE,
     "fno_freeze_limits": FNO_FREEZE_LIMITS,
+    "market_calendar": MARKET_CALENDAR,
 }
 DATASET_ORDER: list[str] = [
     "equities", "indices", "reference", "ca_flags", "sector_industry",
     "classification_registry", "classification_observations",
     "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
+    "market_calendar",
 ]
 
 # publish.py resolves specs by manifest_name (by_manifest_name); manifest_name

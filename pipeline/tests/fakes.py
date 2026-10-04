@@ -132,3 +132,24 @@ def assert_release_consistent(fake: FakeReleaseClient) -> None:
             assert asset in fake.assets, f"manifest references missing asset {asset}"
             sha = hashlib.sha256(fake.assets[asset]).hexdigest()
             assert sha == entry["sha256"], f"sha mismatch for {asset}"
+
+
+def write_market_calendar(
+    meta_dir: Path,
+    nse_closures: list[str] | None = None,
+    nse_sessions: list[dict] | None = None,
+) -> Path:
+    """A minimal valid `market_calendar.json` in `meta_dir`: NSE closures and
+    sessions as given (by default none), BSE and MCX empty, nothing covered."""
+    closures: dict[str, list[str]] = {}
+    for day in nse_closures or []:
+        closures.setdefault(day[:4], []).append(day)
+    venues = {
+        "NSE": {"source": "test", "closures": closures, "sessions": nse_sessions or []},
+        "BSE": {"source": "test"},
+        "MCX": {"source": "test"},
+    }
+    path = meta_dir / "market_calendar.json"
+    path.write_text(json.dumps({"venues": venues}))
+    return path
+

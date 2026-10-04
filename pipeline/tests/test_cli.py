@@ -14,6 +14,7 @@ from pipeline.manifest import asset_name
 from pipeline.sources.classification_publication import Provenance
 from pipeline.sources.screener_classification import ClassificationObservation
 from pipeline.sources.screener_collector import CollectedClassification
+from tests import fakes
 from tests.fakes import FakeReleaseClient
 
 
@@ -39,14 +40,13 @@ def test_parser_backfill_dataset_choices():
 
 
 def test_main_backfill_runs_all_registered_specs(monkeypatch, tmp_path):
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     seen = []
 
     def fake_backfill(spec, end, n, **kw):
@@ -59,14 +59,13 @@ def test_main_backfill_runs_all_registered_specs(monkeypatch, tmp_path):
 
 
 def test_main_backfill_skips_derived_specs(monkeypatch, tmp_path):
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path)
     seen = []
 
@@ -288,7 +287,7 @@ def test_cmd_check_freshness_fails_when_holidays_need_refresh(tmp_path: Path, ca
     )
     assert rc == 1
     out = capsys.readouterr().out
-    assert "holidays" in out.lower()
+    assert "market_calendar.json" in out
     assert "2027" in out  # names the year that's missing, not just "stale"
 
 
@@ -352,14 +351,13 @@ def test_parser_daily_dataset_choices():
 
 
 def test_main_daily_runs_all_registered_specs(monkeypatch, tmp_path):
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     seen = []
 
     def fake_run_daily(spec, target, **kw):
@@ -424,14 +422,13 @@ def _fake_registry(monkeypatch, tmp_path, *, extra_derived=True):
 
 
 def test_daily_fetch_loop_skips_derived_specs(monkeypatch, tmp_path):
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path)
     seen = []
 
@@ -455,14 +452,13 @@ def test_daily_phase2_skips_external_specs(monkeypatch, tmp_path):
     # BUILDERS entry) must never run through the Phase-2 builder loop -- a
     # derived-but-external spec would otherwise get a spurious `failed`
     # secondary status every night (data-daily reds on those).
-    import json
     from datetime import date
 
     from pipeline import config, datasets
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
 
     equities = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
     external_spec = dataclasses.replace(datasets.FUNDAMENTALS, base_dir=tmp_path / "fundamentals")
@@ -483,14 +479,13 @@ def test_daily_phase2_skips_external_specs(monkeypatch, tmp_path):
 
 
 def test_daily_writes_primary_and_secondary_status_files(monkeypatch, tmp_path):
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path, extra_derived=False)
 
     def fake_run_daily(spec, target, **kw):
@@ -507,14 +502,13 @@ def test_daily_writes_primary_and_secondary_status_files(monkeypatch, tmp_path):
 def test_daily_dataset_indices_writes_only_secondary_status_file(monkeypatch, tmp_path):
     """This FIXES the T3 clobber gap: a lone `--dataset indices` run must not
     touch last_run_status.json (the primary/publish-gate file)."""
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path, extra_derived=False)
 
     def fake_run_daily(spec, target, **kw):
@@ -528,14 +522,13 @@ def test_daily_dataset_indices_writes_only_secondary_status_file(monkeypatch, tm
 
 
 def test_daily_secondary_failure_exits_0_when_primary_succeeds(monkeypatch, tmp_path):
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path, extra_derived=False)
 
     def fake_run_daily(spec, target, **kw):
@@ -550,14 +543,13 @@ def test_daily_secondary_failure_exits_0_when_primary_succeeds(monkeypatch, tmp_
 
 
 def test_daily_primary_failure_exits_1(monkeypatch, tmp_path):
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path, extra_derived=False)
 
     def fake_run_daily(spec, target, **kw):
@@ -571,12 +563,11 @@ def test_daily_primary_failure_exits_1(monkeypatch, tmp_path):
 
 
 def test_daily_dataset_derived_key_errors_out(monkeypatch, tmp_path, capsys):
-    import json
 
     from pipeline import config
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path)  # registers "reference" as derived
     # argparse choices must accept "reference" (registered key) but main()
     # rejects running it alone.
@@ -587,14 +578,13 @@ def test_daily_dataset_derived_key_errors_out(monkeypatch, tmp_path, capsys):
 
 
 def test_daily_derived_builder_runs_only_when_all_and_primary_ok(monkeypatch, tmp_path):
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path)
     calls = []
 
@@ -614,14 +604,13 @@ def test_daily_derived_builder_runs_only_when_all_and_primary_ok(monkeypatch, tm
 
 
 def test_daily_derived_builder_skipped_when_primary_fails(monkeypatch, tmp_path):
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path)
     calls = []
 
@@ -642,14 +631,13 @@ def test_daily_derived_builder_skipped_when_primary_fails(monkeypatch, tmp_path)
 
 
 def test_daily_derived_builder_exception_maps_to_failed_status(monkeypatch, tmp_path):
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path)
 
     def fake_run_daily(spec, target, **kw):
@@ -677,7 +665,7 @@ def test_daily_derived_missing_builder_entry_is_failed_status(monkeypatch, tmp_p
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path)
 
     def fake_run_daily(spec, target, **kw):
@@ -701,7 +689,7 @@ def test_daily_derived_builder_runs_when_primary_idempotent_skip(monkeypatch, tm
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path)
     calls = []
 
@@ -727,14 +715,13 @@ def test_daily_lone_secondary_failure_exits_1(monkeypatch, tmp_path):
     """`--dataset indices` alone, with a failing indices run, must exit 1 --
     its own status drives the exit code since the primary never ran (T5
     prerequisite carried into T6)."""
-    import json
     from datetime import date
 
     from pipeline import config
     from pipeline.daily_update import RunStatus
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     _fake_registry(monkeypatch, tmp_path, extra_derived=False)
 
     def fake_run_daily(spec, target, **kw):
@@ -874,7 +861,7 @@ def test_catchup_window_fetches_only_the_missing_middle_day(monkeypatch, tmp_pat
     from pipeline import config, store
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     fetcher = RecordingFetcher()
     make_fetcher_calls = _catchup_registry(monkeypatch, tmp_path, fetcher)
 
@@ -921,12 +908,11 @@ def test_daily_catchup_window_shares_one_cache_across_the_window(monkeypatch, tm
     only a spy on `store._read_year` (same wrapper pattern as
     `test_backfill.py`'s `test_backfill_reuses_one_cache_across_the_whole_run`)
     to record every `cache` argument passed through."""
-    import json
 
     from pipeline import config, store
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     fetcher = RecordingFetcher()
     _catchup_registry(monkeypatch, tmp_path, fetcher)
 
@@ -964,7 +950,7 @@ def test_catchup_past_day_404_exits_0_and_writes_window_failures_marker(monkeypa
     from pipeline import config, store
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
 
     target = date(2026, 7, 6)
     window = cal.trading_days_back(target, config.CATCHUP_WINDOW_DAYS, set())
@@ -997,12 +983,11 @@ def test_daily_clean_run_writes_no_window_failures_marker(monkeypatch, tmp_path)
     """A clean run (no window-day failures at all) must not write
     `window_failures.json` -- the marker is a signal-when-present file, not an
     always-written status file (contrast with last_run_status.json)."""
-    import json
 
     from pipeline import config
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
 
     target = date(2026, 7, 6)
     fetcher = RecordingFetcher()  # no exceptions -- every window day succeeds
@@ -1024,7 +1009,7 @@ def test_daily_clean_run_removes_stale_window_failures_marker(monkeypatch, tmp_p
     from pipeline import config
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     stale_marker = tmp_path / "window_failures.json"
     stale_marker.write_text(
         json.dumps(
@@ -1054,7 +1039,7 @@ def test_daily_primary_target_failure_exits_1_even_with_window_failure_marker(
     from pipeline import config
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
 
     target = date(2026, 7, 6)
     window = cal.trading_days_back(target, config.CATCHUP_WINDOW_DAYS, set())
@@ -1128,7 +1113,7 @@ def test_daily_secondary_window_failure_exits_0_and_writes_marker(monkeypatch, t
     from pipeline import config
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
 
     target = date(2026, 7, 6)
     window = cal.trading_days_back(target, config.CATCHUP_WINDOW_DAYS, set())
@@ -1155,12 +1140,11 @@ def test_daily_secondary_window_failure_exits_0_and_writes_marker(monkeypatch, t
 def test_catchup_past_day_failure_is_printed(monkeypatch, tmp_path, capsys):
     """The non-target-day failure must be printed clearly, not just silently
     folded into the exit code."""
-    import json
 
     from pipeline import config
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
 
     target = date(2026, 7, 6)
     window = cal.trading_days_back(target, config.CATCHUP_WINDOW_DAYS, set())
@@ -1184,7 +1168,7 @@ def test_catchup_target_day_404_is_not_yet_not_failed(monkeypatch, tmp_path):
     from pipeline import config
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
 
     target = date(2026, 7, 6)
     fetcher = RecordingFetcher(exceptions={target: NotYetPublished("404")})
@@ -1201,13 +1185,12 @@ def test_catchup_window_skips_holiday_inside_window(monkeypatch, tmp_path):
     that falls inside the naive 7-calendar-day span must never be requested
     (trading_days_back itself is already unit-tested; this is the one
     integration assertion that the CLI actually threads holidays through)."""
-    import json
 
     from pipeline import config
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
     holiday = date(2026, 7, 2)  # a Thursday inside the window ending 2026-07-06
-    (tmp_path / "holidays.json").write_text(json.dumps({"2026": [holiday.isoformat()]}))
+    fakes.write_market_calendar(tmp_path, nse_closures=[holiday.isoformat()])
 
     target = date(2026, 7, 6)
     fetcher = RecordingFetcher()
@@ -1244,7 +1227,7 @@ def test_daily_holiday_target_reports_that_days_skip_not_window_fallback(monkeyp
     from pipeline import config
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))  # empty holidays
+    fakes.write_market_calendar(tmp_path)  # empty holidays
 
     target = date(2026, 7, 5)  # a Sunday -- not a trading day, no holiday entry needed
     fetcher = RecordingFetcher()
@@ -1409,12 +1392,11 @@ def test_cmd_cross_check_primary_source_down_exits_1_with_clear_message(capsys):
 def test_main_cross_check_defaults_date_to_previous_trading_day(monkeypatch, tmp_path):
     """`main(["cross-check"])` with no --date must resolve to the previous
     trading day (via the real calendar), not today."""
-    import json
 
     from pipeline import config
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     seen_dates = []
 
     def fake_cmd_cross_check(target, **kw):
@@ -1429,12 +1411,11 @@ def test_main_cross_check_defaults_date_to_previous_trading_day(monkeypatch, tmp
 
 
 def test_main_cross_check_explicit_date_bypasses_default(monkeypatch, tmp_path):
-    import json
 
     from pipeline import config
 
     monkeypatch.setattr(config, "META_DIR", tmp_path)
-    (tmp_path / "holidays.json").write_text(json.dumps({}))
+    fakes.write_market_calendar(tmp_path)
     seen_dates = []
 
     def fake_cmd_cross_check(target, **kw):

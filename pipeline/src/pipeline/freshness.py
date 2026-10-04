@@ -62,7 +62,7 @@ def missing_days(
 
 
 def holidays_need_refresh(holidays: set[date], today: date) -> bool:
-    """Calendar-hygiene nag rule (G2 task 8): is `holidays.json` due for its
+    """Calendar-hygiene nag rule (G2 task 8): is `market_calendar.json` due for its
     yearly refresh?
 
     True when BOTH: (1) `today` is on or after December 1st of `today`'s own
@@ -74,10 +74,10 @@ def holidays_need_refresh(holidays: set[date], today: date) -> bool:
 
     Pure and independent of `is_stale`/`missing_days`: this says nothing
     about whether any PUBLISHED dataset is behind, only whether the
-    trading-calendar INPUT the pipeline relies on (holidays.json) is about
+    trading-calendar INPUT the pipeline relies on (market_calendar.json) is about
     to go stale for next year. Deliberately keyed off `today`'s own year (not
     a fixed calendar constant) so the same rule works correctly across any
-    year boundary, including a holidays.json that was never refreshed across
+    year boundary, including a market_calendar.json that was never refreshed across
     a PRIOR year-end (in which case this keeps returning True every day
     after the following Dec 1 too, since `today.year + 1` still has no
     entry)."""

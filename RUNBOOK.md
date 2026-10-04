@@ -84,16 +84,25 @@ Non-trading days skip cleanly; an already-ingested day is an idempotent no-op.
     assets) — the `fundamentals` pattern. Nothing to delete afterwards.
 
 ## Yearly
-- Refresh `pipeline/data/meta/holidays.json` from NSE's published trading-holiday
-  calendar (https://www.nseindia.com/resources/exchange-communication-holidays).
-  Format: `{"YYYY": ["YYYY-MM-DD", ...]}` — one array of ISO dates per year.
-- Alongside holidays, refresh `pipeline/data/meta/special_sessions.json` with the
-  coming year's special trading sessions (e.g. the Diwali Muhurat session, which
-  trades despite falling on a weekend/holiday). Format:
-  `{"sessions": [{"date": "YYYY-MM-DD", "label": "muhurat"}, ...]}`. A missing
-  file is treated as "no special sessions" (`load_special_sessions` tolerates
-  absence), but a stale file silently omits the year's Muhurat session from the
-  calendar, so review both files in the same pass.
+- Refresh `pipeline/data/meta/market_calendar.json`, the ONE market calendar: the
+  pipeline's own trading days and the `market_calendar` dataset the desktop app
+  syncs both read it (see "Market calendar" below). Curate it by hand from the
+  exchanges' circulars; never scrape.
+  - **Closures**, per venue (`venues.NSE/BSE/MCX.closures["YYYY"]`), from each
+    exchange's trading-holiday circular for the coming year (NSE capital market,
+    BSE equity, MCX commodity). MCX lists partial days separately: a morning- or
+    evening-session closure is a `session` with that day's hours, not a closure.
+  - **Special sessions** (`sessions`): every day that trades on a weekend or a
+    closure (Union Budget, Diwali Muhurat) or on other hours, with exchange-local
+    `open`/`close` and, where there is one, the call-auction `preOpen`. List the
+    day as soon as the holiday circular names it; the exchanges notify Muhurat
+    timings only weeks before, so add the hours then. Until they are added the
+    builder names the day ("awaiting hours: NSE 2026-11-08") on every run, and
+    the app treats it as closed.
+  - **`coveredYears`**: add the year once its closures are complete and every
+    special session is listed. The app reads any year not covered as unknown.
+- The `holidays-refresh` workflow opens a reminder issue every December 1st, and
+  `check-freshness` starts failing then if next year's NSE closures are missing.
 
 ## G1a: multi-dataset mechanism (registry, manifest v2, `--dataset`)
 
@@ -1492,3 +1501,35 @@ over a routine F&O exit. Purge them by hand when they pile up (remove the file
 and run `daily`, then `publish --allow-shrink`, as for `cas_eligible`). A run
 that fails on churn names the symbols: if they really changed (a large F&O
 exit), accept the same way.
+
+## Market calendar (`market_calendar`)
+
+`market_calendar_all.parquet` (manifest name `market_calendar`, schema v1) is the
+exchange calendar the desktop app fires price alerts and draws sessions by. It is
+built from the one curated file `pipeline/data/meta/market_calendar.json`, which is
+also the pipeline's own trading calendar (`calendar.load_trading_calendar`).
+
+Columns: `venue` (NSE, BSE, MCX; the app's NFO shares NSE), `day` (the calendar
+date), `kind`, `pre_open_seconds`/`open_seconds`/`close_seconds` (exchange-local
+seconds, sessions only), `label`, `source` (the circular), and `date` (the run's
+as-of date, which the manifest reads). Kinds:
+
+- `closed`: the venue is shut that whole day.
+- `session`: the day trades these hours instead of the regular ones (a special
+  session on a weekend or a closure, or a partial day). It replaces a closure on
+  the same day. A day may hold several windows.
+- `covered`: the venue's closures are complete for that year (`day` = 1 January).
+
+`builders.build_market_calendar` rewrites the file on every daily run, holiday or
+not; nothing is fetched. It fails closed: a malformed or self-contradicting
+calendar keeps the prior file (`skipped_idempotent`, or `failed` when there is
+none), naming the problem.
+
+**Accepting a shorter calendar.** A run whose calendar has fewer rows than the
+published one reports `failed`, keeps the prior file and names the rows that went
+away: a dropped closure or session silently changes when the app's alerts fire, and
+the publish shrink-guard would block the whole release. When the removal is
+deliberate (a wrongly listed holiday), delete
+`pipeline/data/calendar/market_calendar_all.parquet` on the runner's store and
+re-run; the next publish carries the corrected calendar.
+

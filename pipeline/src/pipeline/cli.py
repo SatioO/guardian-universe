@@ -130,6 +130,8 @@ builders.BUILDERS["cas_eligible"] = functools.partial(
 # fno_freeze_limits fetches NSE's daily F&O contract file itself; registered
 # bare, its keyword-only fetch/calendar/floor args carry defaults.
 builders.BUILDERS["fno_freeze_limits"] = builders.build_fno_freeze_limits
+# market_calendar reads the curated meta files (config.META_DIR); registered bare.
+builders.BUILDERS["market_calendar"] = builders.build_market_calendar
 
 
 def _plain_runner(cmd: list[str]) -> int:
@@ -621,7 +623,7 @@ def cmd_check_freshness(
     1. STALENESS (unchanged from pre-G2 behavior): is the manifest's
        `latest_trading_date` current as of `today`? This only ever looks at
        a single date field -- it says nothing about holes further back.
-    2. CALENDAR HYGIENE (G2 task 8): is `holidays.json` (the `holidays` set
+    2. CALENDAR HYGIENE (G2 task 8): is `market_calendar.json` (the `holidays` set
        passed in by the caller) due for its yearly refresh? On/after
        December 1st, a `holidays` set with no entry dated in NEXT year is
        flagged -- see `freshness.holidays_need_refresh` for the exact rule
@@ -692,10 +694,10 @@ def cmd_check_freshness(
     if freshness.holidays_need_refresh(holidays, today):
         ok = False
         print(
-            f"check-freshness: holidays.json needs its yearly refresh -- "
+            f"check-freshness: market_calendar.json needs its yearly refresh -- "
             f"today ({today.isoformat()}) is on/after December 1st and no "
             f"holiday dated in {today.year + 1} is present yet; refresh "
-            "holidays.json (and special_sessions.json alongside it) from "
+            "market_calendar.json (closures and special sessions of every venue) from "
             "the NSE trading-holiday circular -- see RUNBOOK.md 'Yearly'"
         )
 
@@ -779,8 +781,7 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        holidays = cal.load_holidays(config.META_DIR / "holidays.json")
-        special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
+        holidays, special = cal.load_trading_calendar(config.META_DIR)
         target = date.fromisoformat(args.date) if args.date else datetime.now(UTC).date()
         keys = datasets.DATASET_ORDER if args.dataset == "all" else [args.dataset]
         primary_key = datasets.DATASET_ORDER[0]
@@ -920,8 +921,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if statuses[primary_key].status in ok else 1
         return 0 if all(s.status in ok for s in statuses.values()) else 1
     if args.cmd == "backfill":
-        holidays = cal.load_holidays(config.META_DIR / "holidays.json")
-        special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
+        holidays, special = cal.load_trading_calendar(config.META_DIR)
         keys = datasets.DATASET_ORDER if args.dataset == "all" else [args.dataset]
         all_results = []
         for key in keys:
@@ -1012,8 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {ds.get('name')}: latest_date={ds.get('latest_date')} bytes={total_bytes}")
         return 0
     if args.cmd == "check-freshness":
-        holidays = cal.load_holidays(config.META_DIR / "holidays.json")
-        special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
+        holidays, special = cal.load_trading_calendar(config.META_DIR)
         client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
         with tempfile.TemporaryDirectory() as tmp:
             return cmd_check_freshness(
@@ -1027,13 +1026,11 @@ def main(argv: list[str] | None = None) -> int:
                 client=client,
             )
     if args.cmd == "rebuild-day":
-        holidays = cal.load_holidays(config.META_DIR / "holidays.json")
-        special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
+        holidays, special = cal.load_trading_calendar(config.META_DIR)
         target = date.fromisoformat(args.date)
         return cmd_rebuild_day(target, holidays=holidays, special_sessions=special, via=args.via)
     if args.cmd == "cross-check":
-        holidays = cal.load_holidays(config.META_DIR / "holidays.json")
-        special = cal.load_special_sessions(config.META_DIR / "special_sessions.json")
+        holidays, special = cal.load_trading_calendar(config.META_DIR)
         target = (
             date.fromisoformat(args.date)
             if args.date

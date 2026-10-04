@@ -200,7 +200,7 @@ def test_missing_days_year_boundary_with_young_store_no_prev_year_data():
 
 # -- holidays_need_refresh (G2 task 8: yearly calendar-hygiene nag) --
 #
-# Rule: on/after Dec 1 of `today`'s year, `holidays.json` is considered stale
+# Rule: on/after Dec 1 of `today`'s year, `market_calendar.json` is considered stale
 # for calendar-planning purposes unless it already carries at least one
 # holiday dated in NEXT year (today.year + 1). Before Dec 1, it is never
 # flagged regardless of content -- there's no operational urgency yet (NSE's
@@ -230,7 +230,7 @@ def test_holidays_need_refresh_true_after_dec_1_when_next_year_absent():
 
 
 def test_holidays_need_refresh_false_after_dec_1_when_next_year_present():
-    # Next year's holidays.json refresh already landed -- no nag needed even
+    # Next year's market_calendar.json refresh already landed -- no nag needed even
     # though today is well past Dec 1.
     today = date(2026, 12, 15)
     holidays = {date(2026, 1, 26), date(2027, 1, 26)}
