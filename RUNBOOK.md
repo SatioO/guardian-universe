@@ -1533,3 +1533,49 @@ deliberate (a wrongly listed holiday), delete
 `pipeline/data/calendar/market_calendar_all.parquet` on the runner's store and
 re-run; the next publish carries the corrected calendar.
 
+
+## Corporate actions (`corporate_actions`)
+
+`corporate_actions_all.parquet` (manifest name `corporate_actions`, schema v1) lists
+the capital actions that re-base a stock's price, with their ex-dates. The desktop
+app pauses a price alert before its stock opens ex, because its level was set
+against the old prices (a bonus 1:1 halves the price and would fire every "below"
+alert).
+
+Source: the book-closure file `bc{DDMMYYYY}.csv` in NSE's daily PR bundle
+(`nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR{DDMMYY}.zip`, the
+CI-safe archives host). NSE lists an action about one to two weeks before its
+ex-date.
+
+Columns: `symbol`, `ex_date`, `kind`, `price_factor` (post ÷ pre price ratio when
+the purpose states it: a bonus 1:1 is 0.5, a split from ₹10 to ₹2 is 0.2; null for
+rights, demergers and capital reductions), `purpose` (NSE's text, verbatim),
+`first_seen` (the trading day NSE first listed it), and `date` (the run's as-of
+date, which the manifest reads). Kinds: `split`, `consolidation`, `bonus`,
+`rights`, `demerger`, `capital_reduction`. Dividends, interest, buy-backs,
+distributions and partly-paid calls are left out, because the exchange does not
+re-base a price for them.
+
+`builders.build_corporate_actions` runs in the daily Phase-2 loop on trading days
+and **accumulates**: each run adds what that day's file lists, keyed (symbol,
+ex_date, kind), and an action keeps its first row. The table only grows, so the
+publish shrink-guard never trips. A first build (no prior file) also reads the 20
+trading days before it (`CORPORATE_ACTIONS_SEED_DAYS`), best effort, and names any
+seed day it could not read.
+
+| Outcome | Status | File |
+|---|---|---|
+| the day's bundle is missing (404), not a zip, or holds no well-formed `bc*.csv` | `skipped_idempotent` (`failed` on a first run) | prior kept |
+| a purpose the classifier does not recognise | `success`, the purpose named in the message | written, without it |
+| non-trading day | `skipped_holiday` | untouched |
+
+**A purpose not recognised.** When the message names a purpose, decide whether it
+re-bases a price. If it does, add its wording to
+`sources/nse_corporate_actions.classify`, with a test in
+`tests/test_builders_corporate_actions.py`. If it does not, add it to
+`_NOT_A_RE_BASING`. A missed re-basing action is an alert that fires on the new
+prices, so when in doubt, classify it.
+
+**An action NSE withdraws** stays in the table. The app's only response is a pause
+the trader resumes, so a stale row costs one click, while a deleted one could cost
+a false fire.

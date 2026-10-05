@@ -2,8 +2,8 @@
 today, more later). Shared code (run_daily/backfill) threads a spec instead of
 hardcoding a dataset name.
 
-Reserved manifest dataset names for future phases: corporate_actions, breadth,
-fundamentals, reference, ca_flags. Client adjustment enum (P4b): raw | split |
+Reserved manifest dataset names for future phases: breadth, fundamentals,
+reference, ca_flags. Client adjustment enum (P4b): raw | split |
 total_return."""
 from __future__ import annotations
 
@@ -301,6 +301,24 @@ FUNDAMENTALS = DatasetSpec(
     external=True,
 )
 
+CORPORATE_ACTIONS = DatasetSpec(
+    key="corporate_actions", file_prefix="corporate_actions",
+    base_dir=config.CORPORATE_ACTIONS_DIR,
+    source_label="nse-book-closure",
+    normalizer=lambda df: df,  # identity: build_corporate_actions shapes rows itself
+    make_fetcher=_no_fetcher,  # fetched inside the builder, not via run_daily
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="corporate_actions", schema_version=1,
+    # Capital actions that re-base a stock's price, with their ex-dates, as
+    # NSE announces them one to two weeks ahead (the book-closure file in its
+    # daily PR bundle). ACCUMULATED: each run adds what the day's file lists,
+    # so the table only grows and the shrink-guard never trips. The desktop
+    # app pauses a price alert before its stock's ex-date (its level was set
+    # against the old prices). `derived` keeps it out of the Phase-1 fetch
+    # loop; the Phase-2 BUILDERS loop runs it each trading day.
+    derived=True,
+)
+
 DATASETS: dict[str, DatasetSpec] = {
     "equities": EQUITIES, "indices": INDICES, "reference": REFERENCE,
     "ca_flags": CA_FLAGS, "sector_industry": SECTOR_INDUSTRY,
@@ -311,12 +329,13 @@ DATASETS: dict[str, DatasetSpec] = {
     "cas_eligible": CAS_ELIGIBLE,
     "fno_freeze_limits": FNO_FREEZE_LIMITS,
     "market_calendar": MARKET_CALENDAR,
+    "corporate_actions": CORPORATE_ACTIONS,
 }
 DATASET_ORDER: list[str] = [
     "equities", "indices", "reference", "ca_flags", "sector_industry",
     "classification_registry", "classification_observations",
     "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
-    "market_calendar",
+    "market_calendar", "corporate_actions",
 ]
 
 # publish.py resolves specs by manifest_name (by_manifest_name); manifest_name
