@@ -184,6 +184,12 @@ CAS_MIN_ISIN_COVERAGE: float = 0.9
 # calendar file, META_DIR/market_calendar.json (also the pipeline's own trading
 # calendar), never scraped. A current snapshot, rewritten whole.
 MARKET_CALENDAR_DIR: Path = DATA_DIR / "calendar"
+# Capital corporate actions (splits, bonuses, rights, demergers, capital
+# reductions) with their ex-dates, accumulated from NSE's daily book-closure
+# file (builders.build_corporate_actions). A first build seeds this many
+# trading days back, so ex-dates listed before it are not missed.
+CORPORATE_ACTIONS_DIR: Path = DATA_DIR / "corporate_actions"
+CORPORATE_ACTIONS_SEED_DAYS: int = 20
 
 # F&O quantity-freeze limits: the largest single order NSE takes per
 # underlying, from the daily contract file. A daily current snapshot.

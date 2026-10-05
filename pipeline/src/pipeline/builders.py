@@ -48,6 +48,7 @@ from pipeline.fetch import _BROWSER_UA, _fetch_with_retry
 from pipeline.sources import (
     classification_publication,
     nse_constituents,
+    nse_corporate_actions,
     nse_fo_contract,
     nse_fo_mktlots,
     nse_sector,
@@ -1533,3 +1534,163 @@ def build_fno_freeze_limits(
     return RunStatus(
         "success", target, symbol_count=len(out), source=spec.source_label, message=summary
     )
+
+
+# ── Corporate actions ───────────────────────────────────────────────────────
+
+# The types the client reads (see _write_atomic_typed). `price_factor` is the
+# post ÷ pre price ratio when the purpose states it; `first_seen` the trading
+# day NSE first listed the action; `date` the as-of the manifest reads.
+_CORPORATE_ACTIONS_SCHEMA = pa.schema(
+    [
+        ("symbol", pa.string()),
+        ("ex_date", pa.date32()),
+        ("kind", pa.string()),
+        ("price_factor", pa.float64()),
+        ("purpose", pa.string()),
+        ("first_seen", pa.date32()),
+        ("date", pa.timestamp("ms")),
+    ]
+)
+_CORPORATE_ACTION_KEY = ["symbol", "ex_date", "kind"]
+_CORPORATE_ACTION_COLUMNS = ["symbol", "ex_date", "kind", "price_factor", "purpose", "first_seen"]
+
+
+def _fetch_pr_bundle(day: date) -> pd.DataFrame:
+    """The book-closure rows of NSE's PR bundle for `day`, through the shared
+    warm-session + retry contract. The parser is the gate: an HTML page served
+    with 200 raises, so it reaches the builder as a fetch failure; a 404 is
+    `NotYetPublished`."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": _BROWSER_UA})
+    return _fetch_with_retry(
+        session,
+        nse_corporate_actions.pr_url(day),
+        day,
+        parse=nse_corporate_actions.parse_pr_bundle,
+    )
+
+
+def _trading_days_back(target: date, count: int, trading_day: Callable[[date], bool]) -> list[date]:
+    """The `count` trading days ending at `target`, oldest first."""
+    days: list[date] = []
+    day = target
+    while len(days) < count and (target - day).days < count * 3 + 14:
+        if trading_day(day):
+            days.append(day)
+        day -= timedelta(days=1)
+    return sorted(days)
+
+
+def build_corporate_actions(
+    spec: DatasetSpec,
+    target: date,
+    *,
+    fetch_bundle: Callable[[date], pd.DataFrame] = _fetch_pr_bundle,
+    trading_day: Callable[[date], bool] = _cas_trading_day,
+    seed_days: int = config.CORPORATE_ACTIONS_SEED_DAYS,
+) -> RunStatus:
+    """Accumulate `corporate_actions_all.parquet`: every capital action that
+    re-bases a stock's price (split, consolidation, bonus, rights, demerger,
+    capital reduction), keyed (symbol, ex_date, kind), from the book-closure
+    file in NSE's PR bundle for `target` (sources/nse_corporate_actions.py).
+
+    NSE lists an action one to two weeks before its ex-date, and the app must
+    know it before the stock opens ex: the table is the union of every day's
+    file, never a snapshot. A first build (no prior file) also reads the
+    `seed_days` trading days before `target`, best effort, so actions listed
+    before it are there too. An action seen again keeps its first row.
+
+    Fail-closed, keeping the prior file: the target day's bundle missing or
+    malformed is `skipped_idempotent` with a prior file and `failed` without
+    one. A purpose the classifier does not recognise is never guessed at: the
+    run succeeds and names it, so the vocabulary can be extended (RUNBOOK
+    corporate_actions).
+    """
+    spec.base_dir.mkdir(parents=True, exist_ok=True)
+    out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
+    prior = _constituents_prior(out_path)
+    if prior is not None and not set(_CORPORATE_ACTION_COLUMNS) <= set(prior.columns):
+        return _constituents_fail_closed(
+            spec, target, out_path, len(prior), "prior file lacks the corporate_actions columns"
+        )
+    prior_rows = None if prior is None else len(prior)
+
+    if not trading_day(target):
+        return RunStatus(
+            "skipped_holiday",
+            target,
+            symbol_count=prior_rows or 0,
+            source=spec.source_label,
+            message="non-trading day; no book-closure file",
+        )
+
+    days = [target] if prior is not None else _trading_days_back(target, seed_days, trading_day)
+    listed: list[pd.DataFrame] = []
+    seed_misses: list[str] = []
+    for day in days:
+        try:
+            frame = fetch_bundle(day)
+        except Exception as e:  # noqa: BLE001 - any fetch/parse failure -> fail-closed
+            if day == target:
+                return _constituents_fail_closed(
+                    spec, target, out_path, prior_rows, f"{day.isoformat()} bundle: {e}"
+                )
+            seed_misses.append(day.isoformat())
+            continue
+        listed.append(frame.assign(first_seen=day))
+
+    rows: list[dict[str, object]] = []
+    unknown: set[str] = set()
+    for frame in listed:
+        for symbol, ex_date, purpose, first_seen in zip(
+            frame["symbol"], frame["ex_date"], frame["purpose"], frame["first_seen"], strict=True
+        ):
+            actions = nse_corporate_actions.classify(purpose)
+            if actions is None:
+                unknown.add(purpose)
+                continue
+            for action in actions:
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "ex_date": pd.Timestamp(ex_date).date(),
+                        "kind": action.kind,
+                        "price_factor": action.price_factor,
+                        "purpose": purpose,
+                        "first_seen": pd.Timestamp(first_seen).date(),
+                    }
+                )
+    found = pd.DataFrame(rows, columns=_CORPORATE_ACTION_COLUMNS)
+
+    parts = [found]
+    if prior is not None:
+        kept = prior[_CORPORATE_ACTION_COLUMNS].copy()
+        kept["ex_date"] = pd.to_datetime(kept["ex_date"]).dt.date
+        kept["first_seen"] = pd.to_datetime(kept["first_seen"]).dt.date
+        parts.insert(0, kept)
+    out = pd.concat([p for p in parts if not p.empty] or [found], ignore_index=True)
+    # The first sighting wins: prior rows come first, then oldest days first.
+    out = out.drop_duplicates(subset=_CORPORATE_ACTION_KEY, keep="first")
+    out = out.sort_values(["ex_date", "symbol", "kind"], kind="mergesort").reset_index(drop=True)
+    # REQUIRED for the manifest: build_manifest reads columns=["date"].
+    out["date"] = pd.Timestamp(target)
+    _write_atomic_typed(out, out_path, _CORPORATE_ACTIONS_SCHEMA)
+
+    upcoming = out[pd.to_datetime(out["ex_date"]).dt.date >= target]
+    added = len(out) - (prior_rows or 0)
+    summary = (
+        f"{len(out)} actions ({added} new, "
+        f"{len(upcoming)} with an ex-date from {target.isoformat()})"
+    )
+    if seed_misses:
+        summary += f"; seed days without a bundle: {', '.join(seed_misses)}"
+    if unknown:
+        named = sorted(unknown)
+        more = f" (+{len(named) - 10} more)" if len(named) > 10 else ""
+        shown = "; ".join(named[:10]) + more
+        summary += f"; purposes not recognised (extend nse_corporate_actions.classify): {shown}"
+    return RunStatus(
+        "success", target, symbol_count=len(out), source=spec.source_label, message=summary
+    )
+
