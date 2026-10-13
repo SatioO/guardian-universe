@@ -32,6 +32,7 @@ CANON_COLUMNS: list[str] = [
     "volume",
     "value",
     "trades",
+    "nse_token",
     "source",
 ]
 

@@ -21,8 +21,9 @@ def _day(d: str, close: float, key: str = "INE002A01018") -> pd.DataFrame:
         "symbol": "RELIANCE", "series": "EQ",
         "open": close, "high": close, "low": close, "close": close,
         "prevclose": close, "volume": 1, "value": 1.0, "trades": 1,
+        "nse_token": None,
         "source": "nse-udiff",
-    }])[config.CANON_COLUMNS]
+    }]).astype({"nse_token": "Int64"})[config.CANON_COLUMNS]
 
 
 def test_append_creates_year_file_and_has_day(tmp_path: Path):
@@ -137,8 +138,9 @@ def test_day_series_counts(tmp_path: Path):
             "symbol": key, "series": series,
             "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
             "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
+            "nse_token": None,
             "source": "nse-udiff",
-        }])[config.CANON_COLUMNS]
+        }]).astype({"nse_token": "Int64"})[config.CANON_COLUMNS]
 
     append_day(pd.concat([
         row("K1", "EQ"), row("K2", "EQ"), row("K3", "BE"),
@@ -155,8 +157,9 @@ def test_day_series_counts_respects_prefix(tmp_path: Path):
             "symbol": key, "series": series,
             "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
             "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
+            "nse_token": None,
             "source": "nse-udiff",
-        }])[config.CANON_COLUMNS]
+        }]).astype({"nse_token": "Int64"})[config.CANON_COLUMNS]
 
     append_day(row("NIFTY50", "INDEX"), tmp_path, prefix="indices")
     assert day_series_counts(tmp_path, date(2026, 7, 3)) == {}
@@ -244,8 +247,9 @@ def test_append_day_is_thin_wrapper_over_append_keyed(tmp_path: Path):
         "symbol": "AAA", "series": "EQ",
         "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
         "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
+        "nse_token": None,
         "source": "nse-udiff",
-    }])[config.CANON_COLUMNS]
+    }]).astype({"nse_token": "Int64"})[config.CANON_COLUMNS]
     append_day(df, tmp_path)
     out = pd.read_parquet(config.ohlc_path(2026, tmp_path))
     assert list(out.columns) == config.CANON_COLUMNS
@@ -387,8 +391,9 @@ def test_append_day_sweeps_stale_orphan_tmp_on_entry(tmp_path: Path):
         "symbol": "AAA", "series": "EQ",
         "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
         "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
+        "nse_token": None,
         "source": "nse-udiff",
-    }])[config.CANON_COLUMNS]
+    }]).astype({"nse_token": "Int64"})[config.CANON_COLUMNS]
     append_day(df, tmp_path)
 
     assert not stale.exists()

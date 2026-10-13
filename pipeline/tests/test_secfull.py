@@ -100,6 +100,8 @@ def test_shape_adapter_output_feeds_normalize_equity_bhavcopy_unchanged():
     assert row["close"] == 3000.0
     assert row["series"] == "EQ"
     assert row["source"] == "nse-secfull"
+    # secfull carries no exchange token: the fallback day records "unknown".
+    assert pd.isna(row["nse_token"])
 
 
 def test_shape_adapter_fixed_session_and_instrument_type_fields():

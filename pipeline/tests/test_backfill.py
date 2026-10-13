@@ -133,7 +133,7 @@ def test_backfill_reuses_one_cache_across_the_whole_run(tmp_path, monkeypatch):
         def fetch_raw(self, d):
             df = pd.DataFrame({
                 "TradDt": [d.isoformat()], "ISIN": ["INE1"], "TckrSymb": ["A"],
-                "SctySrs": ["EQ"], "FinInstrmTp": ["STK"], "SsnId": ["F1"],
+                "SctySrs": ["EQ"], "FinInstrmTp": ["STK"], "FinInstrmId": [1000], "SsnId": ["F1"],
                 "OpnPric": [1.0], "HghPric": [1.0], "LwPric": [1.0], "ClsPric": [1.0],
                 "PrvsClsgPric": [1.0], "TtlTradgVol": [1], "TtlTrfVal": [1.0],
                 "TtlNbOfTxsExctd": [1],
@@ -211,8 +211,8 @@ def _eq_rows(d: str, n: int) -> pd.DataFrame:
         "date": pd.Timestamp(d), "instrument_key": f"K{i:05d}", "isin": f"K{i:05d}",
         "symbol": f"S{i}", "series": "EQ",
         "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "prevclose": 100.0,
-        "volume": 1, "value": 1.0, "trades": 1, "source": "seed",
-    } for i in range(n)])[config.CANON_COLUMNS]
+        "volume": 1, "value": 1.0, "trades": 1, "nse_token": None, "source": "seed",
+    } for i in range(n)]).astype({"nse_token": "Int64"})[config.CANON_COLUMNS]
 
 
 def _eq_raw_frame(d: str, n: int) -> pd.DataFrame:
@@ -220,7 +220,8 @@ def _eq_raw_frame(d: str, n: int) -> pd.DataFrame:
     `_eq_rows`'s instrument_key scheme after normalization) -- what a fetcher
     would actually serve for day `d`."""
     return pd.DataFrame([{
-        "TradDt": d, "FinInstrmTp": "STK", "ISIN": f"K{i:05d}", "TckrSymb": f"S{i}",
+        "TradDt": d, "FinInstrmTp": "STK", "FinInstrmId": 1000,
+        "ISIN": f"K{i:05d}", "TckrSymb": f"S{i}",
         "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 100, "HghPric": 101, "LwPric": 99,
         "ClsPric": 100, "PrvsClsgPric": 100, "TtlTradgVol": 1, "TtlTrfVal": 1,
         "TtlNbOfTxsExctd": 1,

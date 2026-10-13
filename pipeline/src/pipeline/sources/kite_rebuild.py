@@ -225,12 +225,13 @@ class KiteDayRebuilder:
                 "TtlNbOfTxsExctd": 0,
                 "SsnId": "F1",
                 "FinInstrmTp": "STK",
+                "FinInstrmId": None,  # a broker candle has no NSE token
             })
 
         columns = [
             "TradDt", "ISIN", "TckrSymb", "SctySrs", "OpnPric", "HghPric", "LwPric",
             "ClsPric", "PrvsClsgPric", "TtlTradgVol", "TtlTrfVal", "TtlNbOfTxsExctd",
-            "SsnId", "FinInstrmTp",
+            "SsnId", "FinInstrmTp", "FinInstrmId",
         ]
         return pd.DataFrame(rows, columns=columns)
 

@@ -810,6 +810,7 @@ def _one_day_raw(d: date) -> pd.DataFrame:
             {
                 "TradDt": d.isoformat(),
                 "FinInstrmTp": "STK",
+                "FinInstrmId": 1000,
                 "ISIN": "INE002A01018",
                 "TckrSymb": "RELIANCE",
                 "SctySrs": "EQ",

@@ -108,5 +108,7 @@ def legacy_to_udiff_shape(raw: pd.DataFrame) -> pd.DataFrame:
     # the final settled day file, so these are constant.
     out["SsnId"] = "F1"
     out["FinInstrmTp"] = "STK"
+    # The legacy file carries no exchange token: record "unknown" (null).
+    out["FinInstrmId"] = None
 
     return out.reset_index(drop=True)

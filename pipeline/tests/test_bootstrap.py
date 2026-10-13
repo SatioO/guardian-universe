@@ -19,7 +19,11 @@ from pipeline.manifest import asset_name
 from tests.fakes import FakeReleaseClient
 from tests.test_builders_reference import _history, _legacy_full_rebuild, _row
 
-SESSION_COLUMNS = ["date", "instrument_key", "isin", "symbol", "series"]
+SESSION_COLUMNS = ["date", "instrument_key", "isin", "symbol", "series", "nse_token"]
+
+
+def _sessions(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(rows).astype({"nse_token": "Int64"})[SESSION_COLUMNS]
 
 
 def _year_bytes(rows: list[dict]) -> bytes:
@@ -90,7 +94,7 @@ def test_bootstrap_from_a_snapshot_equals_the_legacy_full_rebuild(tmp_path: Path
     assert "no prior merged" in status.message
     pd.testing.assert_frame_equal(
         pd.read_parquet(reference_spec.base_dir / "instruments_all.parquet"),
-        _legacy_full_rebuild(pd.DataFrame(rows)[SESSION_COLUMNS]),
+        _legacy_full_rebuild(_sessions(rows)),
     )
     # The bootstrap never writes into the daily run's own price store.
     assert not source_spec.base_dir.exists()
@@ -121,7 +125,7 @@ def test_bootstrap_from_data_latest_after_the_retirement(tmp_path: Path):
     assert status.status == "success"
     out = pd.read_parquet(reference_spec.base_dir / "instruments_all.parquet")
     assert "INE_STALE" not in set(out["instrument_key"])
-    pd.testing.assert_frame_equal(out, _legacy_full_rebuild(pd.DataFrame(rows)[SESSION_COLUMNS]))
+    pd.testing.assert_frame_equal(out, _legacy_full_rebuild(_sessions(rows)))
 
 
 def test_bootstrap_merges_the_synced_prior_unless_told_not_to(tmp_path: Path):
@@ -178,7 +182,7 @@ def test_bootstrap_then_daily_merge_works_on_the_bootstrapped_list(tmp_path: Pat
     assert status.status == "success"
     pd.testing.assert_frame_equal(
         pd.read_parquet(reference_spec.base_dir / "instruments_all.parquet"),
-        _legacy_full_rebuild(pd.DataFrame(rows)[SESSION_COLUMNS]),
+        _legacy_full_rebuild(_sessions(rows)),
     )
 
 

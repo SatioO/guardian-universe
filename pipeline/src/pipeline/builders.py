@@ -36,6 +36,7 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import requests
 
 from pipeline import calendar as cal
@@ -70,7 +71,10 @@ _ACTIVE_WINDOW = 10
 
 _REFERENCE_COLUMNS = ["date", "instrument_key", "isin", "symbol", "series"]
 _REFERENCE_KEY = ["instrument_key", "symbol", "series"]
+# What a prior list must carry to be usable. `nse_token` is NOT required: the
+# list published before it existed is a valid prior, and gains the column here.
 _REFERENCE_VERSION_COLUMNS = [*_REFERENCE_KEY, "first_seen", "last_seen", "isin"]
+_REFERENCE_MERGE_COLUMNS = [*_REFERENCE_VERSION_COLUMNS, "nse_token"]
 _REFERENCE_OUTPUT_COLUMNS = [
     "instrument_key",
     "isin",
@@ -83,6 +87,11 @@ _REFERENCE_OUTPUT_COLUMNS = [
     "valid_from",
     "valid_to",
     "date",
+    # Appended last so no existing column moves. NSE's exchange-issued id
+    # (UDiFF FinInstrmId) of this version: a series change issues a new one.
+    # Null where no source file carried it (history before 2026-10-14,
+    # fallback-source days).
+    "nse_token",
 ]
 _REFERENCE_BOOTSTRAP_HINT = (
     "run `python -m pipeline bootstrap-reference` (RUNBOOK.md 'Reference bootstrap')"
@@ -115,15 +124,33 @@ def _read_all_years(source_spec: DatasetSpec) -> pd.DataFrame:
     state, e.g. a run that fetched no session)."""
     base = source_spec.base_dir
     if not base.exists():
-        return pd.DataFrame(columns=_REFERENCE_COLUMNS)
+        return _with_nse_token(pd.DataFrame(columns=_REFERENCE_COLUMNS))
     frames = [
-        pd.read_parquet(p, columns=_REFERENCE_COLUMNS)
+        _with_nse_token(
+            pd.read_parquet(p, columns=[*_REFERENCE_COLUMNS, *_present_token_column(p)])
+        )
         for p in sorted(base.glob(f"{source_spec.file_prefix}_*.parquet"))
     ]
     frames = [f for f in frames if not f.empty]
     if not frames:
-        return pd.DataFrame(columns=_REFERENCE_COLUMNS)
+        return _with_nse_token(pd.DataFrame(columns=_REFERENCE_COLUMNS))
     return pd.concat(frames, ignore_index=True)
+
+
+def _present_token_column(parquet: Path) -> list[str]:
+    """`["nse_token"]` when the file has it, else `[]`: the price files left
+    on a release (the bootstrap's source) predate the column."""
+    names = pq.ParquetFile(parquet).schema_arrow.names  # type: ignore[no-untyped-call]
+    return ["nse_token"] if "nse_token" in names else []
+
+
+def _with_nse_token(frame: pd.DataFrame) -> pd.DataFrame:
+    """`frame` with `nse_token` as nullable Int64: added all-null when absent."""
+    out = frame.copy()
+    if "nse_token" not in out.columns:
+        out["nse_token"] = pd.array([pd.NA] * len(out), dtype="Int64")
+    out["nse_token"] = out["nse_token"].astype("Int64")
+    return out
 
 
 def _reference_calendar() -> tuple[set[date], set[date]]:
@@ -135,19 +162,25 @@ def _reference_versions(sessions: pd.DataFrame) -> pd.DataFrame:
     """One row per distinct `(instrument_key, symbol, series)` version in the
     stored sessions, with the first and last session it traded in."""
     return sessions.groupby(_REFERENCE_KEY, as_index=False).agg(
-        first_seen=("date", "min"), last_seen=("date", "max"), isin=("isin", "last")
+        first_seen=("date", "min"), last_seen=("date", "max"), isin=("isin", "last"),
+        nse_token=("nse_token", "last"),
     )
 
 
 def _merge_versions(prior: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
     """Fold freshly seen versions into the prior list: earliest first_seen,
-    latest last_seen, and the fresh ISIN where both have one."""
+    latest last_seen, and the fresh ISIN and NSE token where both have one (a
+    fresh null never erases a recorded token: `last` skips nulls)."""
     both = pd.concat(
-        [prior[_REFERENCE_VERSION_COLUMNS], fresh[_REFERENCE_VERSION_COLUMNS]],
+        [
+            _with_nse_token(prior)[_REFERENCE_MERGE_COLUMNS],
+            _with_nse_token(fresh)[_REFERENCE_MERGE_COLUMNS],
+        ],
         ignore_index=True,
     )
     return both.groupby(_REFERENCE_KEY, as_index=False).agg(
-        first_seen=("first_seen", "min"), last_seen=("last_seen", "max"), isin=("isin", "last")
+        first_seen=("first_seen", "min"), last_seen=("last_seen", "max"),
+        isin=("isin", "last"), nse_token=("nse_token", "last"),
     )
 
 
