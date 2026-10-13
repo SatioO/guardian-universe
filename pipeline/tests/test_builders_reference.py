@@ -672,3 +672,54 @@ def test_bootstrap_rebuild_reads_price_files_that_predate_the_token(tmp_path: Pa
     assert result.status == "success", result.message
     out = pd.read_parquet(ref_base / "instruments_all.parquet")
     assert out["nse_token"].isna().all() and len(out) == 1
+
+
+def _fallback_day_store(base: Path, symbol: str, isin: str, series: str = "EQ") -> None:
+    """Seed `base` with one session as the legacy CM fallback serves it, run
+    through the real adapter and normalizer: no FinInstrmId, so a null token."""
+    from pipeline.normalize import normalize_equity_bhavcopy
+    from pipeline.sources.nse_cm_legacy import legacy_to_udiff_shape
+
+    raw = pd.DataFrame([{
+        "SYMBOL": symbol, "SERIES": series, "OPEN": 10.0, "HIGH": 11.0, "LOW": 9.0,
+        "CLOSE": 10.0, "PREVCLOSE": 10.0, "TOTTRDQTY": 100, "TOTTRDVAL": 1000.0,
+        "TIMESTAMP": "30-JUN-2026", "TOTALTRADES": 5, "ISIN": isin,
+    }])
+    day = normalize_equity_bhavcopy(legacy_to_udiff_shape(raw), source="nse-cm-legacy")
+    assert day["nse_token"].isna().all()
+    store.append_day(day, base, prefix="ohlc")
+
+
+def test_a_fallback_day_never_erases_a_recorded_token(tmp_path: Path):
+    from pipeline import builders
+
+    ref_base = _bootstrap_prior(tmp_path, [_row("2026-06-29", "INE001", "AAA", nse_token=2885)])
+    run_store = tmp_path / "ohlc"
+    _fallback_day_store(run_store, "AAA", "INE001")
+
+    result = builders.build_reference(
+        _target_spec(ref_base), date(2026, 6, 30), source_spec=_source_spec(run_store),
+        trading_calendar=_weekdays_only,
+    )
+
+    assert result.status == "success", result.message
+    out = pd.read_parquet(ref_base / "instruments_all.parquet")
+    assert len(out) == 1
+    assert out.iloc[0]["nse_token"] == 2885
+    assert out.iloc[0]["last_seen"] == pd.Timestamp("2026-06-30")  # the day did land
+
+
+def test_a_fresh_non_null_token_replaces_the_recorded_one(tmp_path: Path):
+    from pipeline import builders
+
+    ref_base = _bootstrap_prior(tmp_path, [_row("2026-06-29", "INE001", "AAA", nse_token=2885)])
+    run_store = tmp_path / "ohlc"
+    _seed_equities_store(run_store, [_row("2026-06-30", "INE001", "AAA", nse_token=9001)])
+
+    builders.build_reference(
+        _target_spec(ref_base), date(2026, 6, 30), source_spec=_source_spec(run_store),
+        trading_calendar=_weekdays_only,
+    )
+
+    out = pd.read_parquet(ref_base / "instruments_all.parquet")
+    assert out.iloc[0]["nse_token"] == 9001
