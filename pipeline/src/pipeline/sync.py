@@ -17,9 +17,11 @@ verified files or materializes none of them.
 Each manifest dataset is routed to its registered DatasetSpec via
 `datasets.by_manifest_name`; a dataset the registry doesn't recognize is
 skipped with a stderr note rather than failing the sync -- a future producer
-version may publish datasets this code predates (forward-compat). Only
-baselines are materialized: deltas are a client concern and the producer
-re-derives them."""
+version may publish datasets this code predates (forward-compat). So is one
+this producer no longer publishes (an unpublished spec, or a retired name):
+the price stores are run-local, so a manifest that still lists them must not
+pull their history back down. Only baselines are materialized: deltas are a
+client concern and the producer re-derives them."""
 from __future__ import annotations
 
 import json
@@ -53,7 +55,11 @@ def sync_store(
         # Nothing touches a dataset's base_dir until every file has verified.
         verified: list[tuple[Path, Path, str]] = []
         for ds in manifest.get("datasets", []):
-            spec = datasets.by_manifest_name(str(ds.get("name", "")))
+            name = str(ds.get("name", ""))
+            spec = datasets.by_manifest_name(name)
+            if name in datasets.RETIRED_MANIFEST_NAMES or (spec is not None and not spec.published):
+                print(f"sync: skipping retired dataset {name!r}", file=sys.stderr)
+                continue
             if spec is None:
                 print(f"sync: skipping unknown dataset {ds.get('name')!r}", file=sys.stderr)
                 continue

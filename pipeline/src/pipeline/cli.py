@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import functools
-import io
 import json
 import sys
 import tempfile
@@ -36,17 +35,15 @@ from pipeline import (
     store,
 )
 from pipeline import calendar as cal
-from pipeline.crosscheck import CrossCheckResult, compare_sources
+from pipeline.bootstrap import bootstrap_reference
 from pipeline.daily_update import RunStatus, run_daily
 from pipeline.errors import ReleaseError, UnexpectedFailure
-from pipeline.fetch import _BROWSER_UA, FetchResult, NseUdiffFetcher, _fetch_with_retry
-from pipeline.normalize import normalize_equity_bhavcopy
+from pipeline.fetch import FetchResult
 from pipeline.publish import publish_dataset
 from pipeline.release import GhReleaseClient, ReleaseClient
 from pipeline.restore import restore_from_tag
 from pipeline.snapshot import create_snapshot, prune_snapshots
 from pipeline.sources.classification_baseline import BaselineRun, run_approved_baseline
-from pipeline.sources.nse_secfull import build_secfull_url, secfull_to_udiff_shape
 from pipeline.sources.nse_universe import RegistryStatus, registry_needs_baseline_migration
 from pipeline.sources.screener_collector import CollectionDeferred, ScreenerClassificationCollector
 from pipeline.sync import sync_store
@@ -110,9 +107,6 @@ class ClassificationCollectionReport:
 builders.BUILDERS["reference"] = functools.partial(
     builders.build_reference, source_spec=datasets.DATASETS[datasets.DATASET_ORDER[0]]
 )
-builders.BUILDERS["ca_flags"] = functools.partial(
-    builders.build_ca_flags, source_spec=datasets.DATASETS[datasets.DATASET_ORDER[0]]
-)
 # sector_industry fetches its own external CSV (no store `source_spec` to bind);
 # registered directly. Its keyword-only fetch/TTL/floor args carry defaults, so
 # it still satisfies BUILDERS' `Callable[[DatasetSpec, date], RunStatus]`.
@@ -166,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     classification.add_argument("--date", default=None)
     pub = sub.add_parser("publish")
     # Operator opt-in for a DELIBERATE data-reducing correction (e.g. rebuilding
-    # ca_flags after fixing a bug that had inflated it). Off by default so the
+    # a dataset after fixing a bug that had inflated it). Off by default so the
     # nightly cron always keeps the full shrink-guard; downgrades only the
     # per-file row-shrink check to a warning (a missing file/dataset THIS
     # runner owns and a latest_trading_date-regression stay hard errors). See
@@ -189,8 +183,15 @@ def build_parser() -> argparse.ArgumentParser:
     # choices derived from the registry (populated by this module's broker
     # self-registration imports above) -- never a hardcoded broker-name list.
     r.add_argument("--via", choices=[*rebuild.REBUILDERS], default=None)
-    x = sub.add_parser("cross-check")
-    x.add_argument("--date", default=None)
+    # One-off: rebuild the reference symbol master from the price files left on
+    # a release (see bootstrap.py and RUNBOOK.md 'Reference bootstrap').
+    bs = sub.add_parser("bootstrap-reference")
+    bs.add_argument("--tag", default=config.RELEASE_TAG)
+    bs.add_argument(
+        "--ignore-prior",
+        action="store_true",
+        help="replace the synced instrument list instead of merging it in",
+    )
     return p
 
 
@@ -335,10 +336,11 @@ def cmd_rebuild_day(
 
     Deliberately does NOT run Phase 2 (derived builders, e.g. `reference`):
     those are built from the regular daily cadence's full multi-dataset run,
-    and a single manual equities rebuild is not that -- running them here
-    would rebuild `reference`/`ca_flags` from a store that may still be
-    missing surrounding days, which is out of scope for what this command is
-    for (getting one day's raw OHLCV back into the store)."""
+    and a single manual equities rebuild is not that.
+
+    Since 2026-10-13 the equities store is run-local and never published, so
+    a rebuilt day only reaches anything published if `daily` runs in the same
+    workspace afterwards (its `reference` merge reads the store)."""
     try:
         source = rebuild.resolve(via)
     except ValueError as e:
@@ -379,237 +381,6 @@ def cmd_rebuild_day(
     return 0 if status.status in ok else 1
 
 
-def _today_for_cli() -> date:
-    """Extracted so cross-check's --date default (and any future
-    default-to-today CLI path) can be monkeypatched in tests without faking
-    the whole `datetime` module."""
-    return datetime.now(UTC).date()
-
-
-def _cross_check_fetch_primary_raw(d: date) -> pd.DataFrame:
-    """Production primary fetch for `cross-check`: the SAME NseUdiffFetcher
-    used by the daily pipeline, but constructed WITHOUT fallbacks
-    (`fallbacks=()`) -- cross-check tests the primary NSE endpoint in total
-    isolation, never silently falling through to the secondary if the
-    primary is down (that fallthrough would defeat the entire point of an
-    independent cross-check)."""
-    result = NseUdiffFetcher(fallbacks=()).fetch_raw(d)
-    return result.frame
-
-
-def _cross_check_fetch_secondary_raw(d: date) -> pd.DataFrame:
-    """Production secondary fetch for `cross-check`: the sec_bhavdata_full
-    endpoint, fetched and shape-adapted independently of the primary chain
-    (mirrors `datasets._secfull_fallback`'s logic exactly, but is never
-    routed through the primary's fallback list here -- this IS the isolated
-    secondary source cross-check tests against). Uses the SAME isin_map
-    loader (`datasets._load_isin_map`) as the real fallback path, so
-    instrument_key values align with the primary side's ISIN keys."""
-    session = requests.Session()
-    session.headers.update({"User-Agent": _BROWSER_UA})
-    url = build_secfull_url(d)
-    raw = _fetch_with_retry(session, url, d, parse=_secfull_csv_to_df)
-    isin_map = datasets._load_isin_map()
-    return secfull_to_udiff_shape(raw, isin_map=isin_map)
-
-
-def _secfull_csv_to_df(csv_bytes: bytes) -> pd.DataFrame:
-    return pd.read_csv(io.BytesIO(csv_bytes))
-
-
-def _print_cross_check_table(result: CrossCheckResult) -> None:
-    # Explicit outcome marker (DIVERGENCE vs OK) so the summary line is
-    # unambiguous on its own -- previously distinguishable from the
-    # CANNOT-RUN path only by channel (stdout vs stderr) and prose wording,
-    # which is easy to miss when scanning CI/alert output quickly.
-    marker = "DIVERGENCE" if result.mismatched > 0 else "OK"
-    print(f"cross-check: {marker} compared={result.compared} mismatched={result.mismatched}")
-    if result.worst:
-        print(f"{'instrument_key':<20}{'primary_close':>16}{'secondary_close':>18}")
-        for key, primary_close, secondary_close in result.worst:
-            print(f"{key:<20}{primary_close:>16.4f}{secondary_close:>18.4f}")
-
-
-def cmd_cross_check(
-    target: date,
-    *,
-    fetch_primary_raw: Callable[[date], pd.DataFrame],
-    fetch_secondary_raw: Callable[[date], pd.DataFrame],
-    sample_n: int = 50,
-    tolerance: float = 0.001,
-) -> int:
-    """Weekly source cross-check: fetch `target` from BOTH independent NSE
-    endpoints (isolated -- no fallback chain on either side), normalize both
-    to canonical, and compare a deterministic sample of closes.
-
-    No store writes -- this command is pure detection, never ingestion.
-
-    Any fetch/normalize failure on EITHER source is itself alert-worthy (a
-    cross-check that can't run is a signal on its own weekly cadence) -- it
-    is caught here and reported as a clear, exit-1 error rather than
-    propagating a raw traceback.
-
-    Three distinguishable outcomes, each with an explicit prefix so a reader
-    scanning CI/alert output never has to infer which happened from channel
-    or wording alone: `cross-check: CANNOT-RUN — ...` (stderr, exit 1 -- a
-    source's fetch/normalize itself failed), `cross-check: DIVERGENCE
-    compared=N mismatched=M` (stdout, exit 1 -- both sources fetched fine but
-    disagree on `M` of the `N` sampled closes), `cross-check: OK compared=N
-    mismatched=0` (stdout, exit 0 -- both sources fetched fine and agreed).
-    """
-    try:
-        primary_raw = fetch_primary_raw(target)
-        primary_canon = normalize_equity_bhavcopy(primary_raw, source="nse-udiff")
-    except Exception as e:  # noqa: BLE001 - any primary failure is alert-worthy
-        # Explicit CANNOT-RUN marker: this path (stderr, exit 1) must read as
-        # unmistakably distinct from the DIVERGENCE/OK summary line (stdout)
-        # at a glance, not merely by which stream it landed on.
-        print(
-            f"cross-check: CANNOT-RUN — primary source failed for {target.isoformat()}: {e}",
-            file=sys.stderr,
-        )
-        return 1
-
-    try:
-        secondary_raw = fetch_secondary_raw(target)
-        secondary_canon = normalize_equity_bhavcopy(secondary_raw, source="nse-secfull")
-    except Exception as e:  # noqa: BLE001 - any secondary failure is alert-worthy
-        print(
-            f"cross-check: CANNOT-RUN — secondary source failed for {target.isoformat()}: {e}",
-            file=sys.stderr,
-        )
-        return 1
-
-    result = compare_sources(primary_canon, secondary_canon, sample_n=sample_n, tolerance=tolerance)
-    _print_cross_check_table(result)
-    return 1 if result.mismatched > 0 else 0
-
-
-def _continuity_window_years(
-    today: date, holidays: set[date], special_sessions: set[date] | None
-) -> list[int]:
-    """Which calendar year(s) the continuity window's baseline asset(s) must
-    be downloaded from. Same year-selection logic as
-    `store.read_trailing_window`: the window is computed exactly as
-    `freshness.missing_days` computes its own `expected` set, and if it
-    straddles Jan 1 both the previous and current year are needed (ascending,
-    de-duplicated, so a window fully inside one year downloads only that
-    one)."""
-    window = cal.trading_days_back(
-        cal.previous_trading_day(today, holidays, special_sessions),
-        10,
-        holidays,
-        special_sessions,
-    )
-    years = sorted({d.year for d in window})
-    return years
-
-
-def _dataset_manifest_entry(
-    manifest_obj: dict[str, Any], manifest_name: str
-) -> dict[str, Any] | None:
-    entries: list[dict[str, Any]] = manifest_obj.get("datasets", [])
-    for ds in entries:
-        if ds.get("name") == manifest_name:
-            return ds
-    return None
-
-
-@dataclass(frozen=True)
-class ContinuityResult:
-    """One fetched dataset's continuity outcome. `holes` empty means clean
-    (subject to the same clamp `freshness.missing_days` applies -- a hole
-    predating the dataset's own earliest stored day is never in here).
-
-    `clamp_note` is set only when the trailing window was actually truncated
-    to less than the full `window` size (i.e. `min(dates_present)` sits
-    AFTER the window's own start) -- a young/still-catching-up dataset, not
-    an error condition. `None` means the dataset's history already reaches
-    the full window (the common/steady-state case) and nothing needs
-    calling out beyond the normal hole report, if any."""
-
-    holes: list[date]
-    clamp_note: str | None
-
-
-def _check_dataset_continuity(
-    spec: datasets.DatasetSpec,
-    manifest_obj: dict[str, Any],
-    *,
-    client: ReleaseClient,
-    work_dir: Path,
-    today: date,
-    holidays: set[date],
-    special_sessions: set[date] | None,
-) -> ContinuityResult:
-    """Downloads whichever baseline asset(s) cover the continuity window for
-    one FETCHED dataset spec and returns its missing trading days (empty
-    when clean) plus an informational clamp note when the dataset's own
-    history is shallower than the full window. Raises `ReleaseError` if the
-    manifest names an asset that the release doesn't actually have (a real
-    inconsistency, distinct from the dataset being absent from the manifest
-    entirely -- see the absent-dataset grace rule in the caller)."""
-    ds = _dataset_manifest_entry(manifest_obj, spec.manifest_name)
-    if ds is None:
-        # Grace rule: a fetched dataset that has never appeared in the
-        # manifest is NOT a continuity failure -- see RUNBOOK ("a
-        # never-published dataset does not alert; first publish arms it").
-        # The caller treats an empty list here identically to "clean", but
-        # prints its own WARNING (it, not this function, knows the dataset
-        # NAME to name in that warning without re-deriving it).
-        raise _DatasetNotYetPublished(spec.manifest_name)
-
-    years = _continuity_window_years(today, holidays, special_sessions)
-    by_name = {f["name"]: f for f in manifest.dataset_files(ds)}
-    dates_present: set[date] = set()
-    for year in years:
-        name = f"{spec.file_prefix}_{year}.parquet"
-        entry = by_name.get(name)
-        if entry is None:
-            continue  # that year's baseline doesn't exist yet (e.g. brand-new dataset)
-        asset = entry.get("asset", entry["name"])
-        client.download([asset], work_dir)
-        got = work_dir / asset
-        col = pd.to_datetime(pd.read_parquet(got, columns=["date"])["date"])
-        dates_present.update(d.date() for d in col)
-
-    holes = freshness.missing_days(dates_present, today, holidays, special_sessions)
-
-    # Clamp note: re-derive the SAME full-size expected window `missing_days`
-    # itself computes, so this stays in lockstep with the pure function's own
-    # windowing rather than re-implementing/duplicating it -- only the
-    # comparison against `dates_present`'s floor is new here, purely for the
-    # informational message (never for the hole computation above, which
-    # `missing_days` already owns end-to-end).
-    clamp_note: str | None = None
-    if dates_present:
-        window_size = 10  # mirrors `missing_days`'s own default -- see its docstring
-        full_expected = cal.trading_days_back(
-            cal.previous_trading_day(today, holidays, special_sessions),
-            window_size,
-            holidays,
-            special_sessions,
-        )
-        floor = min(dates_present)
-        if floor > full_expected[0]:
-            n_verified = sum(1 for d in full_expected if d >= floor)
-            clamp_note = (
-                f"continuity: {spec.manifest_name} verified over {n_verified} "
-                f"of {window_size} days (history begins {floor.isoformat()})"
-            )
-
-    return ContinuityResult(holes=holes, clamp_note=clamp_note)
-
-
-class _DatasetNotYetPublished(Exception):
-    """Internal signal (never escapes cmd_check_freshness): the dataset has
-    no manifest entry at all yet -- the absent-from-manifest grace rule."""
-
-    def __init__(self, manifest_name: str) -> None:
-        super().__init__(manifest_name)
-        self.manifest_name = manifest_name
-
-
 def cmd_check_freshness(
     *,
     repo: str,
@@ -618,57 +389,26 @@ def cmd_check_freshness(
     today: date,
     runner: Runner,
     work_dir: Path,
-    client: ReleaseClient,
     special_sessions: set[date] | None = None,
 ) -> int:
-    """Freshness monitor: three independent checks, run in order.
+    """Freshness monitor: two independent checks, run in order.
 
-    1. STALENESS (unchanged from pre-G2 behavior): is the manifest's
-       `latest_trading_date` current as of `today`? This only ever looks at
-       a single date field -- it says nothing about holes further back.
-    2. CALENDAR HYGIENE (G2 task 8): is `market_calendar.json` (the `holidays` set
-       passed in by the caller) due for its yearly refresh? On/after
+    1. STALENESS: is the manifest's `latest_trading_date` current as of
+       `today`? Since 2026-10-13 that date is the `reference` symbol master's
+       latest session (the publish's primary, see datasets.published_specs),
+       which is also the session the desktop app judges freshness by.
+    2. CALENDAR HYGIENE (G2 task 8): is `market_calendar.json` (the `holidays`
+       set passed in by the caller) due for its yearly refresh? On/after
        December 1st, a `holidays` set with no entry dated in NEXT year is
-       flagged -- see `freshness.holidays_need_refresh` for the exact rule
-       and rationale. This is independent of dataset staleness/continuity:
-       it is about the trading-CALENDAR input going stale, not about
-       published data falling behind. Failing this prints a clear message
-       naming the missing year so an operator knows exactly what to refresh
-       (see the RUNBOOK's yearly holiday-refresh procedure and
-       `.github/workflows/holidays-refresh.yml`, which nags via a GitHub
-       issue on the same yearly cadence so this CLI-level check is a second,
-       independent tripwire rather than the only signal).
-    3. CONTINUITY (G2 task 7): for EVERY FETCHED dataset in the registry
-       (equities AND indices -- see the scope-amendment note at the top of
-       the continuity test suite in test_cli.py for why this covers more
-       than just the primary), are there any missing trading days inside the
-       trailing 10-trading-day window? A dataset can have a perfectly
-       current latest date while still hiding a hole a few sessions back
-       (e.g. a hole outside the daily catch-up loop's own 7-day reach, or a
-       secondary dataset's hole that the primary's own health never
-       reflects). Derived datasets (reference, ca_flags) are never checked
-       here -- they rebuild from the store, so a hole there is a symptom of
-       an underlying fetched-dataset hole, not an independent fact.
+       flagged -- see `freshness.holidays_need_refresh` for the exact rule.
+       This is about the trading-CALENDAR input going stale, not about
+       published data falling behind (see the RUNBOOK's yearly procedure and
+       `.github/workflows/holidays-refresh.yml`, which nags via an issue on
+       the same cadence, so this is a second, independent tripwire).
 
-       CLAMPED TO AVAILABLE HISTORY (Critical fix): the window is never
-       expected to reach further back than a dataset's own first stored
-       day -- a young/still-catching-up dataset (depth < 10 trading days)
-       is NEVER treated as having holes for the portion of the window that
-       predates its own earliest day; see `freshness.missing_days`'s
-       docstring for the exact rule. When a dataset's window is truncated
-       this way, an informational (non-failing) "verified over N of 10
-       days (history begins ...)" line is printed so reduced coverage stays
-       visible -- this line is never itself a failure signal, and full
-       10-day verification is armed automatically as the dataset's history
-       accumulates past 10 trading days, with no code change or manual step
-       required. A manifest-listed-but-missing release asset (a real
-       release/manifest inconsistency, not absence-from-manifest) is caught
-       as a clean per-dataset error, never a raw traceback.
-
-    ANY missing day in ANY fetched dataset exits 1, with each dataset's
-    holes printed on their own line(s). A fetched dataset with NO manifest
-    entry at all (never published yet) is a WARNING on stderr, not a
-    failure -- see `_check_dataset_continuity`'s grace rule."""
+    The trailing-window continuity check over the fetched price datasets is
+    gone with them: they are no longer published, so the release has no
+    per-session history left to find holes in."""
     work_dir.mkdir(parents=True, exist_ok=True)
     rc = runner(
         [
@@ -693,9 +433,7 @@ def cmd_check_freshness(
     if freshness.is_stale(latest, today, holidays, special_sessions):
         return 1
 
-    ok = True
     if freshness.holidays_need_refresh(holidays, today):
-        ok = False
         print(
             f"check-freshness: market_calendar.json needs its yearly refresh -- "
             f"today ({today.isoformat()}) is on/after December 1st and no "
@@ -703,48 +441,8 @@ def cmd_check_freshness(
             "market_calendar.json (closures and special sessions of every venue) from "
             "the NSE trading-holiday circular -- see RUNBOOK.md 'Yearly'"
         )
-
-    for key in datasets.DATASET_ORDER:
-        spec = datasets.DATASETS[key]
-        if spec.derived:
-            continue
-        try:
-            result = _check_dataset_continuity(
-                spec,
-                manifest_obj,
-                client=client,
-                work_dir=work_dir,
-                today=today,
-                holidays=holidays,
-                special_sessions=special_sessions,
-            )
-        except _DatasetNotYetPublished as e:
-            print(
-                f"check-freshness: WARNING dataset '{e.manifest_name}' has no "
-                "manifest entry yet (never published) -- not treated as stale; "
-                "holes will be enforced once it publishes for the first time",
-                file=sys.stderr,
-            )
-            continue
-        except ReleaseError as e:
-            # A manifest-listed-but-missing asset is a REAL alarm (a
-            # release/manifest consistency break), not a crash -- never let a
-            # raw traceback surface here. Distinct from the absent-from-
-            # manifest grace rule above: this is the dataset's entry naming
-            # an asset the release itself doesn't actually have.
-            ok = False
-            print(
-                f"check-freshness: cross-dataset consistency error for '{spec.manifest_name}': {e}",
-                file=sys.stderr,
-            )
-            continue
-        if result.clamp_note:
-            print(result.clamp_note)
-        if result.holes:
-            ok = False
-            days = ", ".join(d.isoformat() for d in result.holes)
-            print(f"check-freshness: dataset '{spec.manifest_name}' missing trading day(s): {days}")
-    return 0 if ok else 1
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1016,7 +714,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "check-freshness":
         holidays, special = cal.load_trading_calendar(config.META_DIR)
-        client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
         with tempfile.TemporaryDirectory() as tmp:
             return cmd_check_freshness(
                 repo=config.GITHUB_REPO,
@@ -1026,35 +723,40 @@ def main(argv: list[str] | None = None) -> int:
                 runner=_plain_runner,
                 work_dir=Path(tmp),
                 special_sessions=special,
-                client=client,
             )
     if args.cmd == "rebuild-day":
         holidays, special = cal.load_trading_calendar(config.META_DIR)
         target = date.fromisoformat(args.date)
         return cmd_rebuild_day(target, holidays=holidays, special_sessions=special, via=args.via)
-    if args.cmd == "cross-check":
-        holidays, special = cal.load_trading_calendar(config.META_DIR)
-        target = (
-            date.fromisoformat(args.date)
-            if args.date
-            else cal.previous_trading_day(_today_for_cli(), holidays, special)
-        )
-        return cmd_cross_check(
-            target,
-            fetch_primary_raw=_cross_check_fetch_primary_raw,
-            fetch_secondary_raw=_cross_check_fetch_secondary_raw,
-        )
+    if args.cmd == "bootstrap-reference":
+        client = GhReleaseClient(repo=config.GITHUB_REPO, tag=args.tag)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                status = bootstrap_reference(
+                    client,
+                    reference_spec=datasets.REFERENCE,
+                    source_spec=datasets.EQUITIES,
+                    work_dir=Path(tmp),
+                    target=datetime.now(UTC).date(),
+                    keep_prior=not args.ignore_prior,
+                )
+        except (ReleaseError, UnexpectedFailure) as e:
+            print(f"bootstrap-reference failed: {e}", file=sys.stderr)
+            return 1
+        print(manifest.status_to_dict(status))
+        return 0 if status.status == "success" else 1
     # publish
     client = GhReleaseClient(repo=config.GITHUB_REPO, tag=config.RELEASE_TAG)
     try:
         publish_dataset(
-            specs=datasets.all_specs(),
+            specs=datasets.published_specs(),
             meta_dir=config.META_DIR,
             stage_dir=config.DATA_DIR / "stage",
             client=client,
             generated_at=datetime.now(UTC).isoformat(),
             now=datetime.now(UTC),
             allow_shrink=getattr(args, "allow_shrink", False),
+            retired=datasets.RETIRED_MANIFEST_NAMES,
         )
     except (ReleaseError, UnexpectedFailure) as e:
         print(f"publish failed: {e}", file=sys.stderr)

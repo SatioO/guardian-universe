@@ -99,15 +99,17 @@ def check_no_shrink(
     belongs to another producer on the shared release and was never going to
     be rebuildable from this runner's store, so its absence from `new` is not
     a shrink: `carry_forward_foreign_datasets` owns that dataset's fate, not
-    this guard. Datasets INSIDE `owned` are unchanged -- one that vanishes
+    this guard. The same holds for a dataset this producer RETIRED (it is
+    outside `owned` by construction), which is how a retirement gets past this
+    guard. Datasets INSIDE `owned` are unchanged -- one that vanishes
     locally is exactly the accident this guard exists to catch. `owned=None`
     (the default) treats every live dataset as owned, i.e. the behaviour that
     predates the shared release; callers wanting the pure check keep it.
 
     `allow_shrink` (operator opt-in, default off) downgrades the per-file
     row-COUNT-shrink check to a stderr warning -- for a DELIBERATE correction
-    that legitimately reduces a dataset (e.g. rebuilding ca_flags after fixing
-    a bug that had inflated it with false rows). It never relaxes the two
+    that legitimately reduces a dataset (e.g. rebuilding one after fixing a
+    bug that had inflated it with false rows). It never relaxes the two
     almost-always-accidental checks: an owned file/dataset that vanishes
     locally, and a `latest_trading_date` regression, both stay hard errors
     regardless.
@@ -199,6 +201,7 @@ def carry_forward_foreign_datasets(
     *,
     owned: set[str],
     existing: set[str],
+    retired: frozenset[str] = frozenset(),
 ) -> None:
     """Preserve live datasets THIS runner does not produce (shared release).
 
@@ -236,12 +239,24 @@ def carry_forward_foreign_datasets(
 
     Every carried dataset is echoed to stderr on EVERY publish. A silently
     abandoned producer would otherwise freeze its `latest_date` on the release
-    forever with nothing to notice it."""
+    forever with nothing to notice it.
+
+    `retired` names datasets THIS producer used to publish and has stopped
+    (datasets.RETIRED_MANIFEST_NAMES). No spec claims them any more, so
+    without this they would read as foreign and be carried forever. They are
+    dropped instead, with a stderr note; their assets stay on the release."""
     if live is None:
         return
     for live_ds in live.get("datasets", []):
         name = str(live_ds.get("name", ""))
         if name in owned:
+            continue
+        if name in retired:
+            print(
+                f"publish: dropping retired dataset {name!r} from the manifest -- "
+                "its assets stay on the release until deleted by hand",
+                file=sys.stderr,
+            )
             continue
         # Nothing below may assume the entry is well-formed. This is the ONE
         # place another repo's JSON reaches our publish path, and an exception
@@ -429,10 +444,13 @@ def publish_dataset(
     generated_at: str,
     now: datetime,
     allow_shrink: bool = False,
+    retired: frozenset[str] = frozenset(),
 ) -> None:
-    # Empty-store guard: only the PRIMARY dataset (specs[0], equities) must
-    # have baseline files. Other specs may be legitimately empty (they are
-    # simply omitted from the manifest by build_manifest).
+    # Empty-store guard: only the PRIMARY dataset (specs[0]; in production
+    # `reference`, see datasets.published_specs) must have baseline files.
+    # Other specs may be legitimately empty (they are simply omitted from the
+    # manifest by build_manifest). The primary's latest date is also the
+    # manifest's top-level `latest_trading_date`.
     primary = specs[0]
     if not sorted(primary.base_dir.glob(f"{primary.file_prefix}_*.parquet")):
         raise UnexpectedFailure("refusing to publish: no data files (empty store)")
@@ -456,6 +474,8 @@ def publish_dataset(
     # rather than the dataset one: which release assets could WE have written?
     # `_gc` needs it because "unreferenced by our manifest" does not mean
     # "dead" on a release someone else also publishes into (see owns_asset).
+    # A retired dataset's prefix is in no spec passed here, so its assets are
+    # never collected.
     file_prefixes = frozenset(spec.file_prefix for spec in specs)
 
     if not client.exists():
@@ -475,7 +495,9 @@ def publish_dataset(
     check_cas(live, synced)
     check_no_shrink(new_manifest, live, owned=owned, allow_shrink=allow_shrink)
     carry_forward_deltas(new_manifest, live, existing=existing)
-    carry_forward_foreign_datasets(new_manifest, live, owned=owned, existing=existing)
+    carry_forward_foreign_datasets(
+        new_manifest, live, owned=owned, existing=existing, retired=retired
+    )
 
     # Upload new content-addressed data assets (immutable: no clobber).
     # Reconstruct real per-spec source paths: baseline files live at

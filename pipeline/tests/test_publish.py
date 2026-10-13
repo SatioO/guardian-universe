@@ -878,3 +878,132 @@ def test_gc_still_collects_our_own_superseded_assets_across_every_spec(tmp_path:
                     generated_at="g2", now=NOW)
 
     assert not (set(ours) & set(fake.assets))
+
+
+# ── Retiring our own datasets: the price datasets, 2026-10-13 ──
+
+RETIRED = frozenset({"ohlc", "indices", "ca_flags"})
+
+
+def test_carry_forward_drops_a_retired_dataset_instead_of_carrying_it(capsys):
+    """A retired name is ours no longer, so it is outside `owned` -- and
+    without `retired` it would read as another producer's dataset and be
+    carried forever. With it, dropped and announced; a real foreign dataset
+    beside it is still carried."""
+    live = {"datasets": [
+        {"name": "ohlc", "baseline": [{"name": "ohlc_2026.parquet",
+                                       "asset": "ohlc_2026.aaa.parquet",
+                                       "sha256": "o", "bytes": 9}], "deltas": []},
+        {"name": "earnings_results", "baseline": [{"name": "earnings_results_all.parquet",
+                                                   "asset": "er.abc.parquet",
+                                                   "sha256": "e", "bytes": 4}], "deltas": []},
+    ]}
+    existing = {"ohlc_2026.aaa.parquet", "er.abc.parquet"}
+
+    carried: dict[str, Any] = {"datasets": []}
+    carry_forward_foreign_datasets(carried, live, owned={"reference"}, existing=existing)
+    assert [ds["name"] for ds in carried["datasets"]] == ["ohlc", "earnings_results"]
+
+    dropped: dict[str, Any] = {"datasets": []}
+    carry_forward_foreign_datasets(
+        dropped, live, owned={"reference"}, existing=existing, retired=RETIRED
+    )
+    assert [ds["name"] for ds in dropped["datasets"]] == ["earnings_results"]
+    assert "dropping retired dataset 'ohlc'" in capsys.readouterr().err
+
+
+def test_shrink_guard_lets_a_retired_dataset_go():
+    live = {"latest_trading_date": "2026-10-12", "datasets": [
+        {"name": "ohlc", "baseline": [{"name": "ohlc_2026.parquet", "rows": 5000,
+                                       "sha256": "t", "bytes": 9, "asset": "b"}]},
+        {"name": "reference", "baseline": [{"name": "instruments_all.parquet", "rows": 10,
+                                            "sha256": "r", "bytes": 9, "asset": "r"}]},
+    ]}
+    new = {"latest_trading_date": "2026-10-12", "datasets": [
+        {"name": "reference", "baseline": [{"name": "instruments_all.parquet", "rows": 10,
+                                            "sha256": "r", "bytes": 9, "asset": "r"}],
+         "deltas": []},
+    ]}
+    check_no_shrink(new, live, owned={"reference"})
+
+
+def _publish_before_the_retirement(tmp_path: Path) -> tuple[FakeReleaseClient, Path, Path, Path]:
+    """The live release as it stood until 2026-10-13: ohlc, indices and
+    reference from this runner, a ca_flags entry, and another producer's
+    earnings_results -- every asset well past GC grace."""
+    eq = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc", published=True)
+    idx = dataclasses.replace(datasets.INDICES, base_dir=tmp_path / "indices", published=True)
+    ref_dir = tmp_path / "reference"
+    ref = dataclasses.replace(datasets.REFERENCE, base_dir=ref_dir)
+    meta, stage = tmp_path / "meta", tmp_path / "stage"
+    meta.mkdir()
+    _write_store(eq.base_dir, ["2026-10-09", "2026-10-12"])
+    _write_store(idx.base_dir, ["2026-10-09", "2026-10-12"], prefix="indices")
+    _write_store(ref_dir, ["2026-10-12"], prefix="instruments")
+    store.write_delta(pd.read_parquet(eq.base_dir / "ohlc_2026.parquet"), eq.base_dir,
+                      date(2026, 10, 12), prefix="ohlc")
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-15T00:00:00Z")
+    publish_dataset(specs=[eq, idx, ref], meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="before", now=NOW)
+    _seed_foreign_dataset(fake, name="ca_flags", generated_at="before",
+                          created_at="2026-07-15T00:00:00Z")
+    _seed_foreign_dataset(fake, name="earnings_results", generated_at="before",
+                          payload=b"earnings", created_at="2026-07-15T00:00:00Z")
+    _synced(meta, "before")
+    return fake, ref_dir, meta, stage
+
+
+def test_first_publish_after_the_retirement_drops_prices_and_keeps_their_assets(
+    tmp_path: Path, capsys
+):
+    """End to end on the shared release: the publish that follows the
+    retirement passes the shrink-guard, flips in a manifest with no price
+    dataset, keeps every other dataset (ours and the foreign one), dates the
+    manifest by the reference list, and deletes none of the price assets,
+    even though they are unreferenced and long past GC grace."""
+    fake, ref_dir, meta, stage = _publish_before_the_retirement(tmp_path)
+    before = json.loads(fake.assets["manifest.json"])
+    assert {ds["name"] for ds in before["datasets"]} == {
+        "ohlc", "indices", "reference", "ca_flags", "earnings_results"}
+    price_assets = {a for a in fake.assets
+                    if a.removeprefix("delta_").startswith(("ohlc_", "indices_", "ca_flags_"))}
+    assert len(price_assets) == 4  # ohlc, indices, delta_ohlc, ca_flags
+
+    ref = dataclasses.replace(datasets.REFERENCE, base_dir=ref_dir)
+    publish_dataset(specs=[ref], meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="after", now=datetime(2026, 10, 13, 16, 0, tzinfo=UTC),
+                    retired=RETIRED)
+
+    assert_release_consistent(fake)
+    live = json.loads(fake.assets["manifest.json"])
+    assert [ds["name"] for ds in live["datasets"]] == ["reference", "earnings_results"]
+    assert live["latest_trading_date"] == "2026-10-12"  # the reference list's session
+    assert price_assets <= set(fake.assets)  # orphaned, never deleted
+    err = capsys.readouterr().err
+    for name in ("ohlc", "indices", "ca_flags"):
+        assert f"dropping retired dataset '{name}'" in err
+
+
+def test_without_the_retired_list_the_prices_would_be_carried_forever(tmp_path: Path):
+    """Why `retired` exists: the same publish without it carries the price
+    datasets forward as if another producer owned them."""
+    fake, ref_dir, meta, stage = _publish_before_the_retirement(tmp_path)
+    ref = dataclasses.replace(datasets.REFERENCE, base_dir=ref_dir)
+    publish_dataset(specs=[ref], meta_dir=meta, stage_dir=stage, client=fake,
+                    generated_at="after", now=NOW)
+    live = json.loads(fake.assets["manifest.json"])
+    assert {"ohlc", "indices", "ca_flags"} <= {ds["name"] for ds in live["datasets"]}
+
+
+def test_publish_refuses_without_a_reference_list(tmp_path: Path):
+    """reference is the primary now: no instrument list, no publish (the
+    cold-start failure mode of the incremental reference build)."""
+    meta, stage = tmp_path / "meta", tmp_path / "stage"
+    meta.mkdir()
+    _synced(meta, None)
+    ref = dataclasses.replace(datasets.REFERENCE, base_dir=tmp_path / "reference")
+    with pytest.raises(UnexpectedFailure, match="no data files"):
+        publish_dataset(specs=[ref], meta_dir=meta, stage_dir=stage,
+                        client=FakeReleaseClient(exists=True), generated_at="g", now=NOW,
+                        retired=RETIRED)

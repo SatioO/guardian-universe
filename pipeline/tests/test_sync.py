@@ -14,9 +14,14 @@ from tests.fakes import FakeReleaseClient
 
 @pytest.fixture()
 def routed_equities(tmp_path, monkeypatch):
-    spec = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
+    """The sync MECHANICS tests below drive a stand-in published dataset that
+    happens to carry the old `ohlc` shape and names. The real equities spec is
+    unpublished and `ohlc` retired (see the retired-dataset tests at the end),
+    so the stand-in is marked published and the retired set emptied."""
+    spec = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc", published=True)
     monkeypatch.setattr(datasets, "DATASETS", {"equities": spec})
     monkeypatch.setattr(datasets, "DATASET_ORDER", ["equities"])
+    monkeypatch.setattr(datasets, "RETIRED_MANIFEST_NAMES", frozenset())
     return spec
 
 
@@ -205,12 +210,18 @@ def test_two_dataset_failure_rolls_back_everything(tmp_path: Path, monkeypatch):
     # corrupt on the release -- sync must raise UnexpectedFailure AND the
     # FIRST dataset's file must NOT be materialized (phase 1 verifies
     # everything before phase 2 touches any base_dir).
-    equities_spec = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
-    indices_spec = dataclasses.replace(datasets.INDICES, base_dir=tmp_path / "indices")
+    # Published stand-ins, as in the routed_equities fixture.
+    equities_spec = dataclasses.replace(
+        datasets.EQUITIES, base_dir=tmp_path / "ohlc", published=True
+    )
+    indices_spec = dataclasses.replace(
+        datasets.INDICES, base_dir=tmp_path / "indices", published=True
+    )
     monkeypatch.setattr(
         datasets, "DATASETS", {"equities": equities_spec, "indices": indices_spec}
     )
     monkeypatch.setattr(datasets, "DATASET_ORDER", ["equities", "indices"])
+    monkeypatch.setattr(datasets, "RETIRED_MANIFEST_NAMES", frozenset())
 
     good_data = b"GOODOHLCDATA"
     good_sha = hashlib.sha256(good_data).hexdigest()
@@ -246,3 +257,74 @@ def test_two_dataset_failure_rolls_back_everything(tmp_path: Path, monkeypatch):
     # have been materialized even though it verified fine on its own.
     assert not equities_spec.base_dir.exists()
     assert not indices_spec.base_dir.exists()
+
+
+# ── retired price datasets (2026-10-13) ─────────────────────────────────────
+
+
+def _manifest_entry(name: str, logical: str, data: bytes) -> dict:
+    sha = hashlib.sha256(data).hexdigest()
+    return {"name": name, "baseline": [{
+        "name": logical, "asset": asset_name(logical, sha),
+        "sha256": sha, "bytes": len(data), "rows": 1,
+    }], "deltas": []}
+
+
+def test_sync_never_downloads_retired_price_datasets(tmp_path: Path, monkeypatch, capsys):
+    """A live manifest that still lists ohlc / indices / ca_flags (the one
+    before the first publish after the retirement) must not pull ~100 MB of
+    price history into the run-local stores. The kept dataset beside them
+    syncs as usual."""
+    equities = dataclasses.replace(datasets.EQUITIES, base_dir=tmp_path / "ohlc")
+    indices = dataclasses.replace(datasets.INDICES, base_dir=tmp_path / "indices")
+    reference = dataclasses.replace(datasets.REFERENCE, base_dir=tmp_path / "reference")
+    monkeypatch.setattr(
+        datasets, "DATASETS",
+        {"equities": equities, "indices": indices, "reference": reference},
+    )
+    monkeypatch.setattr(datasets, "DATASET_ORDER", ["equities", "indices", "reference"])
+
+    manifest = {
+        "manifest_version": 2, "generated_at": "g", "latest_trading_date": "2026-10-12",
+        "datasets": [
+            _manifest_entry("ohlc", "ohlc_2026.parquet", b"PRICES"),
+            _manifest_entry("indices", "indices_2026.parquet", b"INDEXPRICES"),
+            _manifest_entry("ca_flags", "ca_flags_2026.parquet", b"FLAGS"),
+            _manifest_entry("reference", "instruments_all.parquet", b"INSTRUMENTS"),
+        ],
+    }
+    fake = FakeReleaseClient(exists=True)
+    fake.seed("manifest.json", json.dumps(manifest).encode())
+    # Only the kept dataset's asset is seeded: touching a price asset would
+    # raise "asset not found" in the fake.
+    sha = hashlib.sha256(b"INSTRUMENTS").hexdigest()
+    fake.seed(asset_name("instruments_all.parquet", sha), b"INSTRUMENTS")
+
+    got = sync_store(fake, meta_dir=tmp_path / "meta", work_dir=tmp_path / "work")
+
+    assert got is not None
+    assert (reference.base_dir / "instruments_all.parquet").read_bytes() == b"INSTRUMENTS"
+    assert not equities.base_dir.exists()
+    assert not indices.base_dir.exists()
+    err = capsys.readouterr().err
+    for name in ("ohlc", "indices", "ca_flags"):
+        assert f"skipping retired dataset '{name}'" in err
+
+
+def test_sync_skips_an_unpublished_spec_even_under_a_new_name(tmp_path: Path, monkeypatch):
+    """`published=False` alone keeps a dataset out of sync, whether or not
+    its name is on the retired list."""
+    spec = dataclasses.replace(
+        datasets.EQUITIES, base_dir=tmp_path / "px", manifest_name="px", published=False
+    )
+    monkeypatch.setattr(datasets, "DATASETS", {"equities": spec})
+    monkeypatch.setattr(datasets, "DATASET_ORDER", ["equities"])
+    manifest = {
+        "manifest_version": 2, "generated_at": "g", "latest_trading_date": "2026-10-12",
+        "datasets": [_manifest_entry("px", "ohlc_2026.parquet", b"PRICES")],
+    }
+    fake = FakeReleaseClient(exists=True)
+    fake.seed("manifest.json", json.dumps(manifest).encode())
+
+    assert sync_store(fake, meta_dir=tmp_path / "meta", work_dir=tmp_path / "work") is not None
+    assert not spec.base_dir.exists()
