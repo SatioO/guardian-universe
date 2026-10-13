@@ -76,6 +76,7 @@ def normalize_indices(raw: pd.DataFrame, source: str = "nse-indices") -> pd.Data
     df["isin"] = ""
     df["series"] = "INDEX"
     df["trades"] = 0
+    df["nse_token"] = pd.array([pd.NA] * len(df), dtype="Int64")
     df["source"] = source
 
     return df[config.CANON_COLUMNS].reset_index(drop=True)

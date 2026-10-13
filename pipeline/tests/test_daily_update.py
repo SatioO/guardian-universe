@@ -46,7 +46,7 @@ def _run(target: date, fetcher: Fetcher, base: Path) -> RunStatus:
 def test_normal_day_ingests_and_persists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
     st = _run(date(2026, 7, 3), StubFetcher(RAW), tmp_path)
-    assert st.status == "success"
+    assert st.status == "success", st.message
     # Spec change (G1b task 4): the BE row (HDFCBANK) now survives normalization
     # alongside RELIANCE + INFY (the SctySrs == "EQ" filter is dropped).
     assert st.symbol_count == 3
@@ -62,7 +62,7 @@ def test_fallback_served_day_stamps_fallback_source_everywhere(
     # in the stored rows' "source" column -- never the primary's label.
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
     st = _run(date(2026, 7, 3), StubFetcher(RAW, source="secondary-label"), tmp_path)
-    assert st.status == "success"
+    assert st.status == "success", st.message
     assert st.source == "secondary-label"
     out = pd.read_parquet(base_year(tmp_path))
     assert set(out["source"]) == {"secondary-label"}
@@ -112,13 +112,13 @@ def test_short_stored_day_reingests_and_tops_up_to_full(
         "date": pd.Timestamp(target.isoformat()), "instrument_key": "INE002A01018",
         "isin": "INE002A01018", "symbol": "RELIANCE", "series": "EQ",
         "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "prevclose": 1.0,
-        "volume": 1, "value": 1.0, "trades": 1, "source": "seed",
-    }])[config.CANON_COLUMNS]
+        "volume": 1, "value": 1.0, "trades": 1, "nse_token": None, "source": "seed",
+    }]).astype({"nse_token": "Int64"})[config.CANON_COLUMNS]
     store.append_day(truncated, tmp_path)
     assert sum(store.day_series_counts(tmp_path, target).values()) == 1
 
     st = _run(target, StubFetcher(RAW), tmp_path)  # RAW re-serves the full day
-    assert st.status == "success"
+    assert st.status == "success", st.message
     assert "re-ingested short day" in st.message
     assert "stored 1" in st.message
     counts = sum(store.day_series_counts(tmp_path, target).values())
@@ -204,8 +204,8 @@ def _eq_rows_matching_multi_series_raw(d: str, n: int) -> pd.DataFrame:
         "date": pd.Timestamp(d), "instrument_key": f"EQ{i:05d}", "isin": f"EQ{i:05d}",
         "symbol": f"EQS{i}", "series": "EQ",
         "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "prevclose": 100.0,
-        "volume": 1, "value": 1.0, "trades": 1, "source": "seed",
-    } for i in range(n)])[config.CANON_COLUMNS]
+        "volume": 1, "value": 1.0, "trades": 1, "nse_token": None, "source": "seed",
+    } for i in range(n)]).astype({"nse_token": "Int64"})[config.CANON_COLUMNS]
 
 
 def test_pre_widening_eq_only_day_vs_widened_trailing_skips_regression(
@@ -266,7 +266,7 @@ def test_truncated_eq_only_day_vs_widened_trailing_still_repairs(
 
     raw = _multi_series_raw(n_eq=2200, n_be=1247)  # fresh fetch re-serves the FULL day
     st = _run(target, StubFetcher(raw), tmp_path)
-    assert st.status == "success"
+    assert st.status == "success", st.message
     assert "re-ingested short day" in st.message
     assert "over shared series" in st.message
     counts = sum(store.day_series_counts(tmp_path, target).values())
@@ -290,18 +290,18 @@ def test_short_day_reingest_still_applies_quarantine(
     store.append_day(_canon_rows(target.isoformat(), 1), tmp_path)  # short: 1 < 0.85*2
 
     dirty_frame = pd.DataFrame([{
-        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE002A01018",
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "FinInstrmId": 1000, "ISIN": "INE002A01018",
         "TckrSymb": "RELIANCE", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 2990,
         "HghPric": 3010, "LwPric": 2985, "ClsPric": 3000, "PrvsClsgPric": 2980,
         "TtlTradgVol": 1000000, "TtlTrfVal": 3000000000, "TtlNbOfTxsExctd": 50000,
     }, {
-        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE009A01021",
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "FinInstrmId": 1000, "ISIN": "INE009A01021",
         "TckrSymb": "INFY", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 1500,
         "HghPric": 1480, "LwPric": 1510, "ClsPric": 1490, "PrvsClsgPric": 1495,
         "TtlTradgVol": 500000, "TtlTrfVal": 750000000, "TtlNbOfTxsExctd": 20000,
     }])
     st = _run(target, StubFetcher(dirty_frame), tmp_path)
-    assert st.status == "success"
+    assert st.status == "success", st.message
     assert st.quarantined_count == 1
     assert "re-ingested short day" in st.message
     qfile = tmp_path / "meta" / "quarantine" / "ohlc_2026-07-03.parquet"
@@ -383,7 +383,7 @@ def test_schema_failure_returns_failed_without_appending(tmp_path: Path, monkeyp
     # (symbol non-nullable) must reject. run_daily must return "failed" WITHOUT
     # appending (fail-closed) — not raise.
     bad_symbol = pd.DataFrame([{
-        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE002A01018",
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "FinInstrmId": 1000, "ISIN": "INE002A01018",
         "TckrSymb": None, "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 2990,
         "HghPric": 3010, "LwPric": 2985, "ClsPric": 3000, "PrvsClsgPric": 2980,
         "TtlTradgVol": 1000000, "TtlTrfVal": 3000000000, "TtlNbOfTxsExctd": 50000,
@@ -403,8 +403,8 @@ def _canon_rows(d: str, n: int) -> pd.DataFrame:
         "date": pd.Timestamp(d), "instrument_key": f"K{i:05d}", "isin": f"K{i:05d}",
         "symbol": f"S{i}", "series": "EQ",
         "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "prevclose": 100.0,
-        "volume": 1, "value": 1.0, "trades": 1, "source": "seed",
-    } for i in range(n)])[config.CANON_COLUMNS]
+        "volume": 1, "value": 1.0, "trades": 1, "nse_token": None, "source": "seed",
+    } for i in range(n)]).astype({"nse_token": "Int64"})[config.CANON_COLUMNS]
 
 
 def test_all_rows_quarantined_returns_failed(tmp_path: Path, monkeypatch):
@@ -413,7 +413,8 @@ def test_all_rows_quarantined_returns_failed(tmp_path: Path, monkeypatch):
     # Every row has open<=0 -> all quarantined -> clean empty. Must be "failed"
     # (not a success no-op) and nothing written, so the day can be retried.
     bad = pd.DataFrame([{
-        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": f"K{i}", "TckrSymb": f"S{i}",
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "FinInstrmId": 1000,
+        "ISIN": f"K{i}", "TckrSymb": f"S{i}",
         "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 0, "HghPric": 10, "LwPric": 0,
         "ClsPric": 5, "PrvsClsgPric": 5, "TtlTradgVol": 1, "TtlTrfVal": 1,
         "TtlNbOfTxsExctd": 1,
@@ -446,7 +447,7 @@ def test_store_error_is_reported_not_raised(tmp_path: Path, monkeypatch):
 def test_success_emits_delta_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
     st = _run(date(2026, 7, 3), StubFetcher(RAW), tmp_path)
-    assert st.status == "success"
+    assert st.status == "success", st.message
     deltas = store.list_deltas(tmp_path)
     assert [p.name for p in deltas] == ["ohlc_2026-07-03.parquet"]
 
@@ -468,14 +469,14 @@ def _multi_series_raw(n_eq: int, n_be: int) -> pd.DataFrame:
     rows = []
     for i in range(n_eq):
         rows.append({
-            "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": f"EQ{i:05d}",
+            "TradDt": "2026-07-03", "FinInstrmTp": "STK", "FinInstrmId": 1000, "ISIN": f"EQ{i:05d}",
             "TckrSymb": f"EQS{i}", "SctySrs": "EQ", "SsnId": "F1",
             "OpnPric": 100, "HghPric": 101, "LwPric": 99, "ClsPric": 100,
             "PrvsClsgPric": 100, "TtlTradgVol": 1, "TtlTrfVal": 1, "TtlNbOfTxsExctd": 1,
         })
     for i in range(n_be):
         rows.append({
-            "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": f"BE{i:05d}",
+            "TradDt": "2026-07-03", "FinInstrmTp": "STK", "FinInstrmId": 1000, "ISIN": f"BE{i:05d}",
             "TckrSymb": f"BES{i}", "SctySrs": "BE", "SsnId": "F1",
             "OpnPric": 100, "HghPric": 101, "LwPric": 99, "ClsPric": 100,
             "PrvsClsgPric": 100, "TtlTradgVol": 1, "TtlTrfVal": 1, "TtlNbOfTxsExctd": 1,
@@ -495,7 +496,7 @@ def test_widened_universe_day_passes_against_eq_only_trailing_history(
         store.append_day(_canon_rows(d, 2000), tmp_path)
     raw = _multi_series_raw(n_eq=2000, n_be=1800)
     st = _run(date(2026, 7, 3), StubFetcher(raw), tmp_path)
-    assert st.status == "success"
+    assert st.status == "success", st.message
     assert st.symbol_count == 3800
     assert store.has_day(tmp_path, date(2026, 7, 3))
 
@@ -520,8 +521,8 @@ def _be_rows(d: str, n: int) -> pd.DataFrame:
         "date": pd.Timestamp(d), "instrument_key": f"BEK{i:05d}", "isin": f"BEK{i:05d}",
         "symbol": f"BES{i}", "series": "BE",
         "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "prevclose": 100.0,
-        "volume": 1, "value": 1.0, "trades": 1, "source": "seed",
-    } for i in range(n)])[config.CANON_COLUMNS]
+        "volume": 1, "value": 1.0, "trades": 1, "nse_token": None, "source": "seed",
+    } for i in range(n)]).astype({"nse_token": "Int64"})[config.CANON_COLUMNS]
 
 
 def test_vanished_major_series_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -539,7 +540,8 @@ def test_vanished_major_series_fails(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 def _raw_row(trad_dt: str, isin: str, symbol: str, close: float = 100) -> dict[str, object]:
     return {
-        "TradDt": trad_dt, "FinInstrmTp": "STK", "ISIN": isin, "TckrSymb": symbol,
+        "TradDt": trad_dt, "FinInstrmTp": "STK", "FinInstrmId": 1000,
+        "ISIN": isin, "TckrSymb": symbol,
         "SctySrs": "EQ", "SsnId": "F1", "OpnPric": close, "HghPric": close + 1,
         "LwPric": close - 1, "ClsPric": close, "PrvsClsgPric": close,
         "TtlTradgVol": 1000, "TtlTrfVal": 100000, "TtlNbOfTxsExctd": 10,
@@ -610,18 +612,18 @@ def test_quarantined_rows_are_persisted(tmp_path: Path, monkeypatch):
     # Exactly one bad row among >=2 exercises the partial-success path (as
     # opposed to the all-corrupt "failed" path covered separately above).
     dirty_frame = pd.DataFrame([{
-        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE002A01018",
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "FinInstrmId": 1000, "ISIN": "INE002A01018",
         "TckrSymb": "RELIANCE", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 2990,
         "HghPric": 3010, "LwPric": 2985, "ClsPric": 3000, "PrvsClsgPric": 2980,
         "TtlTradgVol": 1000000, "TtlTrfVal": 3000000000, "TtlNbOfTxsExctd": 50000,
     }, {
-        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE009A01021",
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "FinInstrmId": 1000, "ISIN": "INE009A01021",
         "TckrSymb": "INFY", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 1500,
         "HghPric": 1480, "LwPric": 1510, "ClsPric": 1490, "PrvsClsgPric": 1495,
         "TtlTradgVol": 500000, "TtlTrfVal": 750000000, "TtlNbOfTxsExctd": 20000,
     }])
     st = _run(date(2026, 7, 3), StubFetcher(dirty_frame), tmp_path)
-    assert st.status == "success"
+    assert st.status == "success", st.message
     assert st.quarantined_count == 1
     qfile = tmp_path / "meta" / "quarantine" / "ohlc_2026-07-03.parquet"
     assert qfile.exists()
@@ -691,5 +693,5 @@ def test_run_daily_never_passes_cache_to_write_delta(
         datasets_spec(tmp_path), date(2026, 7, 3), fetcher=StubFetcher(RAW),
         holidays=HOLIDAYS, cache=cache,
     )
-    assert st.status == "success"
+    assert st.status == "success", st.message
     assert len(calls) == 1  # write_delta was still called (success path emits a delta)

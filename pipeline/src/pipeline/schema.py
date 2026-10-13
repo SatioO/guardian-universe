@@ -25,6 +25,9 @@ OHLC_SCHEMA = pa.DataFrameSchema(
         "volume": Column("int64", _non_neg, nullable=False, coerce=True),
         "value": Column(float, _non_neg, nullable=False, coerce=True),
         "trades": Column("int64", _non_neg, nullable=False, coerce=True),
+        # NSE's exchange-issued id (UDiFF FinInstrmId). Null where the source
+        # file has none (fallback sources, indices) or the value was malformed.
+        "nse_token": Column("Int64", Check.gt(0), nullable=True, coerce=True),
         "source": Column(str, nullable=False),
     },
     strict=True,

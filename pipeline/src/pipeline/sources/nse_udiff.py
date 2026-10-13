@@ -12,6 +12,7 @@ _BASE = "https://nsearchives.nseindia.com/content/cm"
 UDIFF_COLUMNS: list[str] = [
     "TradDt",       # trade date
     "FinInstrmTp",  # 'STK' for cash equity
+    "FinInstrmId",  # NSE's exchange-issued instrument token (a series change issues a new one)
     "ISIN",
     "TckrSymb",     # symbol
     "SctySrs",      # series (EQ/BE/...)

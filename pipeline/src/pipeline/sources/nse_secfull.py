@@ -134,5 +134,7 @@ def secfull_to_udiff_shape(
     # concept (it's always the final settled day file), so these are constant.
     out["SsnId"] = "F1"
     out["FinInstrmTp"] = "STK"
+    # The file carries no exchange token: record "unknown" (null), never a guess.
+    out["FinInstrmId"] = None
 
     return out.reset_index(drop=True)

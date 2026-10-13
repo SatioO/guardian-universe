@@ -21,12 +21,13 @@ def _row(d: str, key: str, symbol: str, series: str = "EQ", isin: str | None = N
         "symbol": symbol, "series": series,
         "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
         "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
+        "nse_token": None,
         "source": "nse-udiff",
     }
 
 
 def _seed_equities_store(base: Path, rows: list[dict]) -> None:
-    df = pd.DataFrame(rows)[config.CANON_COLUMNS]
+    df = pd.DataFrame(rows).astype({"nse_token": "Int64"})[config.CANON_COLUMNS]
     store.append_day(df, base, prefix="ohlc")
 
 

@@ -13,6 +13,7 @@ def _row(**over) -> dict:
         "symbol": "RELIANCE", "series": "EQ",
         "open": 2990.0, "high": 3010.0, "low": 2985.0, "close": 3000.0,
         "prevclose": 2980.0, "volume": 1000, "value": 1.0, "trades": 10,
+        "nse_token": None,
         "source": "nse-udiff",
     }
     base.update(over)

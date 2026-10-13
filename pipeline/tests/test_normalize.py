@@ -30,7 +30,8 @@ def test_filters_to_stk_and_maps_columns():
 
 def _stk_row(isin: str, symbol: str, series: str) -> dict:
     return {
-        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": isin, "TckrSymb": symbol,
+        "TradDt": "2026-07-03", "FinInstrmTp": "STK", "FinInstrmId": 1000,
+        "ISIN": isin, "TckrSymb": symbol,
         "SctySrs": series, "SsnId": "F1", "OpnPric": 100, "HghPric": 101, "LwPric": 99,
         "ClsPric": 100, "PrvsClsgPric": 100, "TtlTradgVol": 1, "TtlTrfVal": 1,
         "TtlNbOfTxsExctd": 1,
@@ -91,11 +92,11 @@ def test_drops_non_stk_instrument_type():
     # A non-STK instrument (e.g. a debenture) that passes the EQ + F-session
     # filters must still be dropped by the FinInstrmTp == 'STK' predicate.
     raw = pd.DataFrame([
-        {"TradDt": "2026-07-03", "FinInstrmTp": "STK", "ISIN": "INE002A01018",
+        {"TradDt": "2026-07-03", "FinInstrmTp": "STK", "FinInstrmId": 2885, "ISIN": "INE002A01018",
          "TckrSymb": "RELIANCE", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 2990,
          "HghPric": 3010, "LwPric": 2985, "ClsPric": 3000, "PrvsClsgPric": 2980,
          "TtlTradgVol": 1000000, "TtlTrfVal": 3000000000, "TtlNbOfTxsExctd": 50000},
-        {"TradDt": "2026-07-03", "FinInstrmTp": "DB", "ISIN": "INE000000001",
+        {"TradDt": "2026-07-03", "FinInstrmTp": "DB", "FinInstrmId": 1, "ISIN": "INE000000001",
          "TckrSymb": "SOMEBOND", "SctySrs": "EQ", "SsnId": "F1", "OpnPric": 100,
          "HghPric": 101, "LwPric": 99, "ClsPric": 100, "PrvsClsgPric": 100,
          "TtlTradgVol": 5, "TtlTrfVal": 500, "TtlNbOfTxsExctd": 2},
@@ -150,3 +151,60 @@ def test_null_series_row_survives_as_empty_string_and_passes_validate_ohlc():
     # NaN/dropped rows that would vanish from the groupby entirely.
     counts = {str(k): int(v) for k, v in out.groupby("series").size().items()}
     assert counts == {"EQ": 1, "": 2}
+
+
+# -- nse_token: NSE's exchange-issued FinInstrmId, kept beside ISIN and series --
+
+def test_nse_token_reaches_the_output_per_listing():
+    raw = pd.read_csv(FIX / "bhavcopy_normal.csv")
+    out = normalize_equity_bhavcopy(raw)
+    tokens = dict(zip(out["symbol"], out["nse_token"], strict=True))
+    assert tokens == {"RELIANCE": 2885, "INFY": 1594, "HDFCBANK": 1333}
+    assert str(out["nse_token"].dtype) == "Int64"
+
+
+def test_same_share_in_two_series_keeps_a_token_for_each():
+    # A series change (EQ -> BE) issues a new token: both must survive.
+    raw = pd.DataFrame([
+        {**_stk_row("INE001", "ABC", "EQ"), "FinInstrmId": 111},
+        {**_stk_row("INE001", "ABC", "BE"), "FinInstrmId": 222},
+    ])
+    out = normalize_equity_bhavcopy(raw)
+    assert dict(zip(out["series"], out["nse_token"], strict=True)) == {"EQ": 111, "BE": 222}
+
+
+@pytest.mark.parametrize("bad", ["abc", "1.5", 0, -7, "0", "-7", "1e3", "99999999999999999999"])
+def test_malformed_token_becomes_null_with_a_warning_and_a_count(bad, caplog):
+    raw = pd.DataFrame([
+        {**_stk_row("INE001", "GOOD", "EQ"), "FinInstrmId": "2885"},
+        {**_stk_row("INE002", "BAD", "EQ"), "FinInstrmId": bad},
+    ])
+    with caplog.at_level("WARNING", logger="pipeline.normalize"):
+        out = normalize_equity_bhavcopy(raw)  # never raises: the day survives
+    by = dict(zip(out["symbol"], out["nse_token"], strict=True))
+    assert by["GOOD"] == 2885
+    assert pd.isna(by["BAD"])
+    assert out.attrs["nse_token_nulled"] == 1
+    assert any("nse_token" in r.message and "1" in r.message for r in caplog.records)
+
+
+def test_blank_or_missing_token_is_null_without_a_warning(caplog):
+    raw = pd.DataFrame([
+        {**_stk_row("INE001", "A", "EQ"), "FinInstrmId": None},
+        {**_stk_row("INE002", "B", "EQ"), "FinInstrmId": " "},
+        # A NaN-bearing column reads as float:
+        {**_stk_row("INE003", "C", "EQ"), "FinInstrmId": 3003.0},
+    ])
+    with caplog.at_level("WARNING", logger="pipeline.normalize"):
+        out = normalize_equity_bhavcopy(raw)
+    by = dict(zip(out["symbol"], out["nse_token"], strict=True))
+    assert pd.isna(by["A"]) and pd.isna(by["B"]) and by["C"] == 3003
+    assert out.attrs["nse_token_nulled"] == 0
+    assert not caplog.records
+
+
+def test_token_column_missing_from_the_udiff_file_is_a_structural_failure():
+    from pipeline.errors import UnexpectedFailure
+    raw = pd.DataFrame([_stk_row("INE001", "A", "EQ")]).drop(columns=["FinInstrmId"])
+    with pytest.raises(UnexpectedFailure, match="FinInstrmId"):
+        normalize_equity_bhavcopy(raw)

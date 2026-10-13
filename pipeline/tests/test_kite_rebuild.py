@@ -146,7 +146,7 @@ def test_day_frame_shape_matches_udiff_raw_columns():
     expected = {
         "TradDt", "ISIN", "TckrSymb", "SctySrs", "OpnPric", "HghPric", "LwPric",
         "ClsPric", "PrvsClsgPric", "TtlTradgVol", "TtlTrfVal", "TtlNbOfTxsExctd",
-        "SsnId", "FinInstrmTp",
+        "SsnId", "FinInstrmTp", "FinInstrmId",
     }
     assert expected.issubset(set(df.columns))
     assert len(df) == 3
@@ -308,6 +308,7 @@ def test_day_frame_output_feeds_normalize_equity_bhavcopy_unchanged():
     assert row["instrument_key"] == "INE002A01018"
     assert row["close"] == 3000.0
     assert row["source"] == "kite-rebuild"
+    assert pd.isna(row["nse_token"])  # a broker candle has no NSE token
 
 
 def test_default_sleep_parameter_is_the_real_time_sleep():
@@ -504,7 +505,7 @@ def test_parser_rejects_unknown_via_id():
 _UDIFF_COLUMNS = [
     "TradDt", "ISIN", "TckrSymb", "SctySrs", "OpnPric", "HghPric", "LwPric",
     "ClsPric", "PrvsClsgPric", "TtlTradgVol", "TtlTrfVal", "TtlNbOfTxsExctd",
-    "SsnId", "FinInstrmTp",
+    "SsnId", "FinInstrmTp", "FinInstrmId",
 ]
 
 
@@ -621,6 +622,7 @@ def test_rebuild_day_end_to_end_lands_rows_with_derived_source_label(
         "SctySrs": "EQ", "OpnPric": 2990.0, "HghPric": 3010.0, "LwPric": 2985.0,
         "ClsPric": 3000.0, "PrvsClsgPric": 2990.0, "TtlTradgVol": 1000000,
         "TtlTrfVal": 0.0, "TtlNbOfTxsExctd": 0, "SsnId": "F1", "FinInstrmTp": "STK",
+        "FinInstrmId": None,
     }])
     monkeypatch.setattr(cli.rebuild, "REBUILDERS", {"acme": fake_source})
 
@@ -660,6 +662,7 @@ def test_rebuild_day_dispatches_with_zero_kite_specific_code(monkeypatch, tmp_pa
         "SctySrs": "EQ", "OpnPric": 2990.0, "HghPric": 3010.0, "LwPric": 2985.0,
         "ClsPric": 3000.0, "PrvsClsgPric": 2990.0, "TtlTradgVol": 1000000,
         "TtlTrfVal": 0.0, "TtlNbOfTxsExctd": 0, "SsnId": "F1", "FinInstrmTp": "STK",
+        "FinInstrmId": None,
     }])
     # Note: no "kite" key at all -- the registry holds ONLY the fake broker.
     monkeypatch.setattr(cli.rebuild, "REBUILDERS", {"acme": fake_source})
@@ -763,6 +766,7 @@ def test_rebuild_day_exits_per_run_status_failed(monkeypatch, tmp_path):
         "SctySrs": "EQ", "OpnPric": 3000.0, "HghPric": 3010.0, "LwPric": 2990.0,
         "ClsPric": 3000.0, "PrvsClsgPric": 3000.0, "TtlTradgVol": 1000,
         "TtlTrfVal": 0.0, "TtlNbOfTxsExctd": 0, "SsnId": "F1", "FinInstrmTp": "STK",
+        "FinInstrmId": None,
     }])
     monkeypatch.setattr(cli.rebuild, "REBUILDERS", {"fake": fake_source})
 
