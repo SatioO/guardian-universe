@@ -138,6 +138,12 @@ def run_daily(
     # OSError, ...) all map to a "failed" status so the scheduler never crashes.
     try:
         df = spec.normalizer(res.frame)
+        # Malformed exchange tokens were nulled by the normalizer (the day
+        # still lands); say how many, so a bad file is visible in the status.
+        nulled = int(df.attrs.get("nse_token_nulled", 0))
+        if nulled:
+            token_note = f"{nulled} malformed nse_token value(s) nulled"
+            topup_note = f"{topup_note}; {token_note}" if topup_note else token_note
         # Stamp ACTUAL provenance over the normalizer's partial-bound default:
         # a fallback-served day must never carry the primary's source label.
         df["source"] = res.source

@@ -695,3 +695,25 @@ def test_run_daily_never_passes_cache_to_write_delta(
     )
     assert st.status == "success", st.message
     assert len(calls) == 1  # write_delta was still called (success path emits a delta)
+
+
+def test_nse_tokens_reach_the_store_and_malformed_ones_are_counted_in_the_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    raw = RAW.astype({"FinInstrmId": object})
+    raw.loc[raw["TckrSymb"] == "INFY", "FinInstrmId"] = "abc"  # malformed: nulled, day survives
+    st = _run(date(2026, 7, 3), StubFetcher(raw), tmp_path)
+    assert st.status == "success", st.message
+    assert "1 malformed nse_token value(s) nulled" in st.message
+    out = pd.read_parquet(base_year(tmp_path)).set_index("symbol")["nse_token"]
+    assert out["RELIANCE"] == 2885 and out["HDFCBANK"] == 1333
+    assert pd.isna(out["INFY"])
+
+
+def test_a_clean_token_day_says_nothing_about_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(config, "ROWCOUNT_ABS_RANGE", (1, 9999))
+    st = _run(date(2026, 7, 3), StubFetcher(RAW), tmp_path)
+    assert st.status == "success" and "nse_token" not in st.message
