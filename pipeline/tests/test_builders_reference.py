@@ -9,19 +9,23 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from pipeline import config, datasets, store
 from pipeline.daily_update import RunStatus
 
 
-def _row(d: str, key: str, symbol: str, series: str = "EQ", isin: str | None = None) -> dict:
+def _row(
+    d: str, key: str, symbol: str, series: str = "EQ", isin: str | None = None,
+    nse_token: int | None = None,
+) -> dict:
     return {
         "date": pd.Timestamp(d), "instrument_key": key, "isin": isin or key,
         "symbol": symbol, "series": series,
         "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
         "prevclose": 1.0, "volume": 1, "value": 1.0, "trades": 1,
-        "nse_token": None,
+        "nse_token": nse_token,
         "source": "nse-udiff",
     }
 
@@ -55,7 +59,8 @@ def _legacy_full_rebuild(sessions: pd.DataFrame) -> pd.DataFrame:
     recent = sorted(sessions["date"].drop_duplicates(), reverse=True)[:10]
     active_dates = set(recent)
     grouped = sessions.groupby(["instrument_key", "symbol", "series"], as_index=False).agg(
-        first_seen=("date", "min"), last_seen=("date", "max"), isin=("isin", "last")
+        first_seen=("date", "min"), last_seen=("date", "max"), isin=("isin", "last"),
+        nse_token=("nse_token", "last"),
     )
     grouped["name"] = grouped["symbol"]
     grouped["status"] = grouped["last_seen"].apply(
@@ -66,7 +71,7 @@ def _legacy_full_rebuild(sessions: pd.DataFrame) -> pd.DataFrame:
     grouped["date"] = grouped["last_seen"]
     cols = [
         "instrument_key", "isin", "symbol", "name", "series", "first_seen",
-        "last_seen", "status", "valid_from", "valid_to", "date",
+        "last_seen", "status", "valid_from", "valid_to", "date", "nse_token",
     ]
     return grouped[cols].sort_values(["instrument_key", "first_seen"]).reset_index(drop=True)
 
@@ -153,7 +158,7 @@ def test_rebuild_reference_basic_row_shape_and_date_column(tmp_path: Path):
     out = pd.read_parquet(ref_base / "instruments_all.parquet")
     assert list(out.columns) == [
         "instrument_key", "isin", "symbol", "name", "series",
-        "first_seen", "last_seen", "status", "valid_from", "valid_to", "date",
+        "first_seen", "last_seen", "status", "valid_from", "valid_to", "date", "nse_token",
     ]
     row = out.iloc[0]
     assert row["instrument_key"] == "INE001"
@@ -277,7 +282,9 @@ def test_rebuild_reference_equals_the_legacy_full_build(tmp_path: Path):
         trading_calendar=_weekdays_only,
     )
 
-    sessions = pd.DataFrame(rows)[["date", "instrument_key", "isin", "symbol", "series"]]
+    sessions = pd.DataFrame(rows).astype({"nse_token": "Int64"})[
+        ["date", "instrument_key", "isin", "symbol", "series", "nse_token"]
+    ]
     pd.testing.assert_frame_equal(
         pd.read_parquet(ref_base / "instruments_all.parquet"), _legacy_full_rebuild(sessions)
     )
@@ -365,7 +372,9 @@ def test_build_reference_incremental_equals_full_rebuild(tmp_path: Path):
     )
     assert result.status == "success"
 
-    sessions = pd.DataFrame(rows)[["date", "instrument_key", "isin", "symbol", "series"]]
+    sessions = pd.DataFrame(rows).astype({"nse_token": "Int64"})[
+        ["date", "instrument_key", "isin", "symbol", "series", "nse_token"]
+    ]
     pd.testing.assert_frame_equal(
         pd.read_parquet(ref_base / "instruments_all.parquet"), _legacy_full_rebuild(sessions)
     )
@@ -562,3 +571,103 @@ def test_build_manifest_picks_up_reference_output(tmp_path: Path):
     assert ds["latest_date"] == "2026-07-02"
     (b,) = ds["baseline"]
     assert b["name"] == "instruments_all.parquet"
+
+
+# -- nse_token: the exchange-issued id, one per (instrument_key, symbol, series) version --
+
+
+def _token_of(out: pd.DataFrame, key: str, series: str) -> object:
+    row = out[(out["instrument_key"] == key) & (out["series"] == series)].iloc[0]
+    return row["nse_token"]
+
+
+def test_rebuild_reference_carries_the_token_of_each_series_version(tmp_path: Path):
+    """A share that moves EQ -> BE is issued a new token: both versions keep
+    their own, which is what links the old listing to the new one."""
+    import pyarrow.parquet as pq
+
+    from pipeline import builders
+
+    src_base = tmp_path / "ohlc"
+    ref_base = tmp_path / "reference"
+    _seed_equities_store(src_base, [
+        _row("2026-07-01", "INE001", "AAA", series="EQ", nse_token=111),
+        _row("2026-07-02", "INE001", "AAA", series="BE", nse_token=222),
+        _row("2026-07-02", "INE002", "BBB", series="EQ"),  # token unknown
+    ])
+    builders.rebuild_reference(
+        _target_spec(ref_base), date(2026, 7, 2), source_spec=_source_spec(src_base),
+        trading_calendar=_weekdays_only,
+    )
+    path = ref_base / "instruments_all.parquet"
+    out = pd.read_parquet(path)
+    assert _token_of(out, "INE001", "EQ") == 111
+    assert _token_of(out, "INE001", "BE") == 222
+    assert pd.isna(_token_of(out, "INE002", "EQ"))
+    # A published contract: a plain nullable int64, whatever the pandas version.
+    assert pq.read_schema(path).field("nse_token").type == pa.int64()
+
+
+def test_build_reference_adds_tokens_to_a_prior_that_has_none(tmp_path: Path):
+    """The list published before this column existed is a valid prior: versions
+    the run sees gain a token, the rest stay null, nothing else changes."""
+    from pipeline import builders
+
+    ref_base = _bootstrap_prior(tmp_path, [
+        _row("2026-06-29", "INE001", "AAA"), _row("2026-06-29", "INE_OLD", "OLD"),
+    ])
+    path = ref_base / "instruments_all.parquet"
+    pd.read_parquet(path).drop(columns=["nse_token"]).to_parquet(path, index=False)
+
+    run_store = tmp_path / "ohlc"
+    _seed_equities_store(run_store, [_row("2026-06-30", "INE001", "AAA", nse_token=111)])
+    result = builders.build_reference(
+        _target_spec(ref_base), date(2026, 6, 30), source_spec=_source_spec(run_store),
+        trading_calendar=_weekdays_only,
+    )
+    assert result.status == "success", result.message
+    out = pd.read_parquet(path)
+    assert _token_of(out, "INE001", "EQ") == 111
+    assert pd.isna(_token_of(out, "INE_OLD", "EQ"))
+
+
+def test_build_reference_keeps_a_recorded_token_when_a_day_has_none(tmp_path: Path):
+    """A fallback source has no token: that day must not erase one already
+    recorded, and a fresh token replaces a stale one (a re-issue)."""
+    from pipeline import builders
+
+    ref_base = _bootstrap_prior(tmp_path, [
+        _row("2026-06-29", "INE001", "AAA", nse_token=111),
+        _row("2026-06-29", "INE002", "BBB", nse_token=333),
+    ])
+    run_store = tmp_path / "ohlc"
+    _seed_equities_store(run_store, [
+        _row("2026-06-30", "INE001", "AAA"),  # fallback day: token unknown
+        _row("2026-06-30", "INE002", "BBB", nse_token=444),  # re-issued
+    ])
+    builders.build_reference(
+        _target_spec(ref_base), date(2026, 6, 30), source_spec=_source_spec(run_store),
+        trading_calendar=_weekdays_only,
+    )
+    out = pd.read_parquet(ref_base / "instruments_all.parquet")
+    assert _token_of(out, "INE001", "EQ") == 111
+    assert _token_of(out, "INE002", "EQ") == 444
+
+
+def test_bootstrap_rebuild_reads_price_files_that_predate_the_token(tmp_path: Path):
+    """The price files left on a release have no nse_token column; the
+    bootstrap rebuilds from them, with every token null."""
+    from pipeline import builders
+
+    src_base = tmp_path / "ohlc"
+    _seed_equities_store(src_base, [_row("2026-07-01", "INE001", "AAA")])
+    for f in src_base.glob("ohlc_*.parquet"):
+        pd.read_parquet(f).drop(columns=["nse_token"]).to_parquet(f, index=False)
+    ref_base = tmp_path / "reference"
+    result = builders.rebuild_reference(
+        _target_spec(ref_base), date(2026, 7, 1), source_spec=_source_spec(src_base),
+        trading_calendar=_weekdays_only,
+    )
+    assert result.status == "success", result.message
+    out = pd.read_parquet(ref_base / "instruments_all.parquet")
+    assert out["nse_token"].isna().all() and len(out) == 1
