@@ -18,6 +18,10 @@ on:
         description: "Optional trading date YYYY-MM-DD to ingest (default: today)"
         required: false
         default: ""
+      bootstrap_reference_from:
+        description: "One-off: rebuild the instrument list from the price files on this release tag first (e.g. data-latest or data-snapshot-202610). See RUNBOOK 'Reference bootstrap'."
+        required: false
+        default: ""
 
 permissions:
   contents: write   # gh needs release read+write
@@ -51,7 +55,20 @@ jobs:
       - name: Install
         run: pip install -r requirements.lock -e . --no-deps
       - name: Sync baseline from the data-latest release (fail-closed)
+        # Syncs the published reference lists only. The NSE price files are
+        # no longer published (2026-10-13): `daily` fetches its catch-up
+        # window into a store that lives only for this run, and `reference`
+        # merges those sessions onto the synced instrument list.
         run: python -m pipeline sync
+      - name: Bootstrap the instrument list (dispatch input only)
+        # The daily `reference` build refuses to run without a prior
+        # instrument list. This rebuilds one from the price files left on a
+        # release, under this workflow's publish lock; `daily` then merges
+        # the current window onto it and the usual publish follows.
+        if: github.event.inputs.bootstrap_reference_from != ''
+        env:
+          BOOTSTRAP_TAG: ${{ github.event.inputs.bootstrap_reference_from }}
+        run: python -m pipeline bootstrap-reference --tag "$BOOTSTRAP_TAG"
       - name: Ingest the trading day (today, or the dispatch date)
         env:
           DISPATCH_DATE: ${{ github.event.inputs.date }}
@@ -68,11 +85,13 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           echo "Ingest status: $status"
       - name: Publish the updated dataset
-        # `success` = today's primary (OHLC) ingested fresh. `skipped_idempotent`
-        # = OHLC already current, but a SECONDARY dataset (e.g. sector_industry,
-        # rebuilt from its committed seed) may still have changed — publish those
-        # too. Publish is diff-based against the release manifest, so a genuine
-        # no-op uploads nothing. Only not_yet/failed/skipped_holiday skip publish.
+        # `success` = today's bhavcopy (the fetched primary) ingested; it is not
+        # published itself, but every reference list built from it is.
+        # `skipped_idempotent` = already ingested, but a SECONDARY dataset (e.g.
+        # sector_industry, rebuilt from its committed seed) may still have
+        # changed — publish those too. Publish is diff-based against the release
+        # manifest, so a genuine no-op uploads nothing. Only
+        # not_yet/failed/skipped_holiday skip publish.
         if: steps.decide.outputs.status == 'success' || steps.decide.outputs.status == 'skipped_idempotent'
         run: python -m pipeline publish
       - name: Surface window (catch-up) failures
@@ -96,7 +115,9 @@ jobs:
       - name: Surface secondary-dataset failures
         # Also on skipped_idempotent: that is exactly the day-type where a
         # secondary dataset (e.g. sector_industry) can have changed/failed while
-        # OHLC is unchanged — the same day-type the publish gate now covers.
+        # the bhavcopy is unchanged — the same day-type the publish gate covers.
+        # A `reference` refusal (missing or broken prior instrument list) lands
+        # here as `failed` and reds the job; see RUNBOOK 'Reference bootstrap'.
         if: always() && (steps.decide.outputs.status == 'success' || steps.decide.outputs.status == 'skipped_idempotent')
         run: |
           bad=0

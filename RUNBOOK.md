@@ -1,7 +1,100 @@
 # RUNBOOK — guardian-universe
 
+## Price datasets retired (2026-10-13) — read first
+guardian-universe no longer publishes NSE prices. The desktop app builds price
+history on the trader's own device and never downloads them.
+
+- **Gone from `manifest.json`:** `ohlc` (`ohlc_*` year files and deltas),
+  `indices` (`indices_*`), and `ca_flags` (derived only from those prices).
+  `datasets.RETIRED_MANIFEST_NAMES` names them. The first publish after the
+  change drops them, printing `publish: dropping retired dataset '<name>'`.
+  They are never carried forward as another producer's dataset, and their
+  absence is not a shrink-guard fault.
+- **Still fetched, never published:** the equities and indices specs
+  (`DatasetSpec.published=False`). `daily` fetches the 7-session catch-up
+  window into `data/ohlc` and `data/indices`, stores that live only for the
+  run. `sync` skips them, so the stores start empty on every runner and each
+  rung re-fetches the window. The bhavcopy's status still gates the publish.
+  They feed two kept lists:
+  - `reference`: the window's sessions are merged onto the prior published
+    `instruments_all.parquet` (see the next section);
+  - `index_constituents`: the `IDX:` keys come from the latest indices
+    session in the run-local store.
+- **Manifest date:** `reference` is now the publish's primary
+  (`datasets.published_specs()[0]`). The empty-store guard and the top-level
+  `latest_trading_date` both read its latest session: the session the app
+  judges freshness by. The publish ladder (crons, gate, timings) is unchanged.
+- **Removed:** the `ca_flags` builder, the weekly `cross-check` command and
+  workflow (`data-crosscheck.yml`), and the trailing-window continuity half
+  of `check-freshness`. Staleness and the calendar nag remain.
+- **Rowcount gate:** the per-series rowcount gate's trailing history is now
+  only the sessions fetched earlier in the same run's window (up to 6).
+  - Still caught: a truncated day (the absolute bounds, plus a per-series
+    collapse against the window's earlier days) and a wrong-dated file.
+  - What changes: a window's oldest session is checked against the absolute
+    bounds alone.
+- **Orphaned assets (NOT deleted, by design):** GC claims assets only by a
+  published spec's prefix, so these stay until someone deletes them by hand:
+  - on `data-latest`: `ohlc_*`, `indices_*`, `ca_flags_*`, `delta_ohlc_*` and
+    `delta_indices_*`;
+  - inside every `data-snapshot-*` release taken before 2026-10-13.
+
+  They are the rollback and bootstrap source below. Delete them only once
+  nobody needs that path.
+
+## Reference bootstrap (cold start, broken prior, rollback)
+`daily` builds `reference` by merging the run's sessions onto the PRIOR
+published instrument list. It refuses (`failed`, nothing written, job red)
+when that prior is:
+- missing, unreadable, missing a column, empty, or undated;
+- truncated: it lacks more than `config.REFERENCE_PRIOR_MAX_NEW_SHARE` (25%)
+  of the versions the run fetched. The historical worst 7-session churn is
+  10.3%.
+
+A list built from the window alone would drop every listing that did not trade
+that week and reset every `first_seen`. The way back is a full rebuild from the
+price files still on a release:
+
+- **From CI (preferred, under the publish lock):** dispatch `data-daily` with
+  `bootstrap_reference_from` set to a tag, e.g. `data-latest` or
+  `data-snapshot-202610`, and `date` set to the last trading day if today is
+  not one. It runs sync → `bootstrap-reference` → `daily` → publish.
+- **Locally:**
+  ```
+  cd pipeline
+  python -m pipeline sync
+  python -m pipeline bootstrap-reference --tag data-latest   # or a data-snapshot-* tag
+  python -m pipeline daily [--date YYYY-MM-DD]
+  python -m pipeline publish
+  ```
+
+How it works:
+- **Which files:** a release whose manifest still lists `ohlc` (a snapshot)
+  is read through that manifest, each file sha256-verified. `data-latest`
+  (whose manifest no longer lists it) is read from its asset list: per year,
+  the newest `ohlc_{YYYY}.{sha8}.parquet`, verified against the sha8 in its
+  name.
+- **What it writes:** only the local `instruments_all.parquet`; it never
+  uploads.
+- **The prior:** by default, a well-shaped prior is merged in, so listings
+  first seen after the price files end survive. `--ignore-prior` replaces it.
+- **The gap:** sessions between the price files' last day and the catch-up
+  window are not in either source. If that gap is longer than 7 sessions, run
+  `python -m pipeline backfill --days N --dataset equities` before `daily`, in
+  the same local workspace.
+- **Proof** (2026-10-13, real data): the incremental merge (prior ≤
+  2026-10-09, plus 2026-10-12) and this full rebuild both reproduce the
+  published `instruments_all` byte for byte (sha256 `078501a5…`).
+
+**Rollback of the retirement:** revert the change. Then put the orphaned
+history back: either `restore-from-snapshot` from the last snapshot, or a
+manifest reinstatement by hand from the orphaned `data-latest` assets. Then
+backfill the gap since then. This is why no price asset was deleted.
+
 ## Bootstrap the historical baseline (local, one-time)
-NSE blocks datacenter IPs, so run backfill from a residential machine:
+Historical: the price store is run-local since 2026-10-13 (see above), so a
+backfill only matters inside a reference bootstrap. NSE blocks datacenter IPs,
+so run backfill from a residential machine:
 ```
 cd pipeline && uv run python -m pipeline backfill --days 300
 ```
@@ -12,8 +105,10 @@ Requires `gh` authenticated with write access to `SatioO/guardian-universe`:
 ```
 cd pipeline && uv run python -m pipeline publish
 ```
-Uploads `data/ohlc/ohlc_*.parquet` + `data/meta/manifest.json` to the `data-latest`
-release. Clients read `manifest.json`, verify each file's `sha256`, then download.
+Uploads the published reference lists (`datasets.published_specs()`) +
+`data/meta/manifest.json` to the `data-latest` release. No price file is
+published since 2026-10-13. Clients read `manifest.json`, verify each file's
+`sha256`, then download.
 
 ## Manual daily run (single day)
 Ingest one trading day (defaults to today) — the same pipeline as backfill, one date:
@@ -244,22 +339,25 @@ history. The absolute total-rowcount bounds are `config.ROWCOUNT_ABS_RANGE =
 client-visible change to `ohlc`'s multi-series semantics, hence
 `EQUITIES.schema_version` bumped `1 -> 2` (see `datasets.py`).
 
-### Derived datasets: `reference/instruments` and `ca_flags/`
-Two more registry entries, `REFERENCE` and `CA_FLAGS`, both `derived=True`.
+### Derived datasets: `reference/instruments` (and the retired `ca_flags/`)
+Two more registry entries, `REFERENCE` and `CA_FLAGS` (retired 2026-10-13,
+see the top of this file), both `derived=True`.
 Derived specs have **no fetcher** — `daily`'s CLI loop runs in two phases:
 first the fetched specs (equities, indices) as before, then — only for a
 full `--dataset all` run, and only when the primary (equities) status came
 back healthy — the derived specs, built from the local store via
 `builders.BUILDERS[key](spec, target)`:
 
-- **`reference/instruments`** (`builders.build_reference`) — a full-rewrite
-  SCD2 symbol master: one row per distinct `(instrument_key, symbol, series)`
-  version seen in the equities store, with `first_seen`/`last_seen`/
+- **`reference/instruments`** (`builders.build_reference`) — the SCD2
+  symbol master, rewritten whole each run. Since 2026-10-13 it is built by
+  merging the run's sessions onto the prior published list; see "Reference
+  bootstrap". One row per distinct `(instrument_key, symbol, series)`
+  version seen in the equities sessions, with `first_seen`/`last_seen`/
   `valid_from`/`valid_to` and a v1 `status` (`active` if seen within the last
   10 trading days, else `inactive`; `suspended`/`delisted` need an exchange
   reference feed and are deferred to P4a).
-- **`ca_flags/`** (`builders.build_ca_flags`) — corporate-action ex-date
-  detector: for each trading day, joins today's `prevclose` against the
+- **`ca_flags/`** (retired 2026-10-13; was `builders.build_ca_flags`) —
+  corporate-action ex-date detector: for each trading day, joins today's `prevclose` against the
   previous trading day's stored `close` per `instrument_key` and flags a
   discontinuity beyond `config.CA_DISCONTINUITY_THRESHOLD` (a split, bonus,
   or other ex-date event — not ordinary price movement). Appended
@@ -314,28 +412,10 @@ re-run `daily` (all, or at least `equities`) before trusting the gate again**
 whenever a manual non-primary run has intervened. This is a monitoring/trust
 gap, not a data-integrity one.
 
-### ca_flags: dual-key limitation (until reference-remap linking, P4a)
-`build_ca_flags` joins today's and the previous trading day's rows **by
-`instrument_key`**. An instrument that switches its key between those two
-days — most commonly the `"NSE:" + symbol` sentinel resolving to the
-instrument's real ISIN once one appears in the bhavcopy — has no matching
-row on the other side of the join *on the day of the switch*, so if a
-corporate action happens to coincide with that same-day key switch, it is
-**silently missed** that day (no flag emitted, no error either — this is not
-distinguishable from "new listing, nothing to compare against" in v1).
-This is a known, accepted gap until `reference/`'s remap-linking work lands
-(P4a wires the ISIN-appears event back into the detector's join). It affects
-only the rare day where a sentinel-to-ISIN remap and a real corporate action
-land on the exact same day for the exact same instrument.
-
-### ca_flags: what a flag means for clients
-A flagged instrument (`ca_flags` row for a given `(date, instrument_key)`)
-signals a probable ex-date discontinuity (split, bonus, or similar) in the
-`ohlc` series, not a genuine price move. **Clients should exclude flagged
-instruments from level-based scans** (support/resistance, breakout,
-%-from-52w-high, and similar absolute-price criteria) for that date until
-P4b's adjustment-factor machinery (`raw | split | total_return`) is in place
-to properly rebase the series across the ex-date.
+### ca_flags (retired 2026-10-13)
+`ca_flags` was derived from the published prices only, and went with them.
+The client's ex-date signal is the `corporate_actions` dataset (NSE's
+book-closure list, below).
 
 ### Migration note (G0 -> G1a manifest v2)
 The first G1a publish reads the live G0 manifest (v1, `files` key) via
@@ -464,6 +544,11 @@ not an artifact of comparing against series the day never had.*
 
 ## G2: manual day-rebuild (recovery)
 
+Since 2026-10-13 the equities store is run-local and never published, so a
+rebuilt day only reaches anything published (the `reference` merge) if
+`daily` and `publish` run in the same workspace afterwards. Retiring
+`rebuild-day` and `backfill` is a planned follow-up.
+
 ### When to use this
 Last resort ONLY: both NSE sources (the UDiFF primary and the
 `sec_bhavdata_full` fallback) are down for a trading day, or a data hole
@@ -556,250 +641,15 @@ package as a whole and never names a broker; `--via`'s choices and
 provenance labels (`"<id>-rebuild"`) are derived from the registry
 automatically. Proof: `grep -i kite src/pipeline/cli.py` returns nothing.
 
-## G2: weekly source cross-check (silent-divergence detector)
-
-### Why this exists
-Both NSE sources (the UDiFF primary and the `sec_bhavdata_full` fallback)
-individually pass their own gates (rowcount deviation, quarantine, schema),
-so a source that is **subtly, silently wrong** — a corrupted/stale bhavcopy
-file that is still well-formed and within normal rowcount range — produces
-no signal today: two "healthy" sources agreeing with themselves each is not
-the same as the two sources agreeing with *each other*. The weekly
-cross-check closes exactly this gap by comparing a deterministic sample of
-`close` prices between the two **independent** endpoints, fetched **in
-isolation** (each constructed with no fallback chain — see
-`cli._cross_check_fetch_primary_raw` / `_cross_check_fetch_secondary_raw`),
-so a divergence can only mean the two sources actually disagree, not that
-one silently fell back to the other.
-
-### What it compares
-`pipeline/src/pipeline/crosscheck.py`'s `compare_sources(primary_df,
-secondary_df, *, sample_n=50, tolerance=0.001)` joins the two CANONICAL
-frames on `instrument_key` (inner join — see coverage limitation below),
-samples deterministically (sorted keys, every k-th where `k = max(1,
-len(joined) // sample_n)` — **no randomness anywhere in this path**, so the
-same two inputs always produce the identical sampled set and result), and
-flags a pair as a mismatch when its relative divergence (`|primary_close -
-secondary_close| / |primary_close|`) exceeds `tolerance`. The result
-(`CrossCheckResult`) reports `compared` (sample size), `mismatched` (count
-over tolerance), and `worst` (up to 5 worst mismatches by relative
-divergence, descending, as `(instrument_key, primary_close,
-secondary_close)` tuples).
-
-**Coverage limitation — read before trusting a "clean" (mismatched=0)
-result.** The secondary (secfull) side has no ISIN column of its own; its
-`instrument_key` is resolved via the same `isin_map`
-(`datasets._load_isin_map`, symbol → ISIN from the `reference/instruments`
-store) used by the real secfull fallback path, so keys align with the
-primary side's real-ISIN keys. A symbol **missing from that map** gets an
-`"NSE:" + symbol` **sentinel** key instead — which essentially never equals
-the primary side's real-ISIN key for the same instrument, so that row
-**silently drops out of the inner join**. It is not "compared and found to
-agree" — it is simply never compared. The cross-check therefore only
-covers the **mapped intersection** of the two sources (whatever
-`reference/instruments` currently maps to a real ISIN); that is the
-meaningful set for this check, but a clean result says nothing about
-instruments outside that mapped intersection.
-
-### Weekly cadence
-`.github/workflows/data-crosscheck.yml` runs Saturday 03:00 UTC (+
-`workflow_dispatch` for on-demand runs), invoking `python -m pipeline
-cross-check` against the previous trading day. No store writes — this is
-pure detection, never ingestion, and never touches `data/`.
-
-### What a divergence alert means
-The CLI prints one of three explicit, prefixed outcome markers, so an
-operator scanning CI/alert output never has to infer which happened from
-stdout-vs-stderr or prose wording alone:
-
-- **`cross-check: CANNOT-RUN — ...`** (stderr, exit 1) — one of the two
-  sources' fetch/normalize itself failed; the comparison never ran at all.
-  This is itself alert-worthy on its own weekly cadence, since it means the
-  safety net wasn't actually checked that week.
-- **`cross-check: DIVERGENCE compared=N mismatched=M`** (stdout, exit 1) —
-  both sources fetched fine, but `M` of the `N` sampled closes disagreed
-  beyond tolerance (a small table of the worst divergences prints
-  immediately after this line).
-- **`cross-check: OK compared=N mismatched=0`** (stdout, exit 0) — both
-  sources fetched fine and agreed on every sampled close.
-
-The workflow's alert-on-failure step opens/appends to the standard
-`pipeline-failure`-labeled issue on any non-zero exit (same dedupe shape as
-`data-monitor.yml`/`data-daily.yml`), so both `CANNOT-RUN` and `DIVERGENCE`
-page the same way — the marker text in the issue body is what tells you
-which one happened and drives which of the two operator actions below
-applies.
-
-**`CANNOT-RUN` → check source availability/connectivity.** The printed
-message names which source failed (primary/UDiFF or secondary/secfull) and
-the underlying exception. Start there: is the NSE endpoint reachable right
-now (a manual curl/browser check), is this a transient anti-bot/rate-limit
-block (the same class of failure the daily pipeline's own retry+fallback
-chain already handles for that source in normal ingest), or has the
-endpoint's URL/format changed? This is a tooling/connectivity failure of
-the cross-check itself, not evidence that the two sources disagree — do
-not treat a `CANNOT-RUN` as a data-quality signal on its own.
-
-**`DIVERGENCE` → investigate BOTH sources before trusting either.** A
-divergence alone does not tell you which source is wrong — it only tells
-you they disagree. Do not assume the primary (UDiFF) is automatically
-correct just because it's the primary in the daily ingest chain;
-cross-check both against a third reference (e.g. the exchange's own
-website for a couple of the flagged symbols, or a manual `rebuild-day --via
-kite` comparison) before deciding which source to trust or route around.
-If a real divergence is confirmed, treat the daily pipeline's
-currently-stored days for the affected instrument(s) as suspect until the
-root cause is identified.
-
-### Running manually
-```
-cd pipeline && uv run python -m pipeline cross-check [--date YYYY-MM-DD]
-```
-`--date` defaults to the previous trading day (via the same trading
-calendar + special-sessions logic used elsewhere). Exit 0 pairs with the
-`OK` marker (agreement); exit 1 pairs with either the `DIVERGENCE` marker
-(comparison ran, disagreement found — see the printed table) or the
-`CANNOT-RUN` marker (comparison never ran — see the printed error naming
-which source failed and why).
-
-## G2: continuity monitor (holes, not just staleness) + cron keep-alive
-
-### Why this exists
-`check-freshness`'s pre-existing staleness check only ever asks one
-question: "is the manifest's `latest_trading_date` current as of today?"
-That question is blind to a hole sitting a few sessions BEHIND the latest
-date — e.g. a day the daily catch-up loop's own 7-trading-day reach never
-covered (see the G2 catch-up-loop section above, "Holes older than the
-window"), or a day that was present, silently corrupted/deleted on the
-release side, and never re-checked because the latest date kept advancing
-normally on top of it. A dataset can look perfectly healthy by the
-staleness check alone while quietly missing a day. The continuity check
-closes this gap by re-deriving which trading days SHOULD be present over a
-trailing window and diffing that against what's actually in the published
-baseline.
-
-### Scope: every FETCHED dataset, not just the primary
-**Continuity covers every dataset the registry resolves as fetched
-(`not spec.derived`) — today that's both `equities` (primary) AND `indices`
-(secondary) — not only the primary dataset.** This was a controller-level
-scope amendment during implementation: the original design considered
-checking only the primary, but that leaves a secondary dataset's hole
-completely invisible to every other layer. Concretely: the primary's own
-staleness AND continuity can both read perfectly clean while `indices` is
-sitting on a hole several sessions back, because nothing else in the
-monitoring stack ever looks at a secondary dataset's day-level completeness
-— `last_run_status.json` (the publish-gate signal) is written only from the
-primary's status (see the G1b "Primary-status contract" section above), and
-the daily workflow's "Surface secondary-dataset failures" step only checks
-the TARGET day's status, not day-level history. A hole confined to
-`indices` would otherwise go undetected indefinitely. **Derived datasets
-(`reference`, `ca_flags`) are deliberately NOT continuity-checked** — they
-are rebuilt wholesale from the store on every full `daily --dataset all`
-run, so a hole in a derived dataset is always a downstream symptom of an
-underlying fetched-dataset hole (which continuity already catches), never
-an independent fact worth alerting on by itself.
-
-### What it checks
-For each fetched spec, `check-freshness` resolves that dataset's entry in
-the downloaded release manifest by `spec.manifest_name` (e.g. `"ohlc"`,
-`"indices"`), downloads whichever baseline asset(s) cover the trailing
-10-trading-day window (both the current- and previous-year asset when the
-window straddles Jan 1 — the same year-selection logic
-`store.read_trailing_window` uses), reads just the `date` column, and calls
-`freshness.missing_days(dates_present, today, holidays, special_sessions)`
-— a pure function that re-derives the expected trading days ending at the
-last COMPLETED trading day before `today`, clamps that window to the
-dataset's own available history (see below), and returns
-`sorted(clamped_expected - dates_present)`. **Any missing day in ANY
-fetched dataset** fails the check (exit 1), and each affected dataset's
-missing day(s) are printed on their own line so an operator can see
-immediately which dataset(s) and which day(s) are involved without digging
-through logs.
-
-### Clamped to available history (Critical fix — never expect days before a dataset's first stored day)
-**The 10-trading-day window is intersected with days `>= min(dates_present)`
-before it is diffed against what's actually stored — a dataset is never
-expected to have data from before its own earliest stored day.** Without
-this clamp, a young or still-catching-up dataset (fewer than 10 trading
-days of history — e.g. right after a fresh bootstrap, or a new dataset a
-few days into its first week) reports every pre-existence day as a false
-"hole": a live store with only 3 days on record ({2026-07-01..03}) would
-report the 7 trading days *before* 2026-07-01 as missing every single
-morning — a false exit-1 alert with no real problem to fix, persisting for
-roughly two weeks until depth reaches 10 (or until a backfill runs). The
-exact same defect shows up a second way at a year boundary: a dataset less
-than a year old simply has no previous-year baseline asset at all (it
-didn't exist yet), and the pre-clamp window would treat that entire
-previous-year portion as missing too.
-
-**This clamp never hides a REAL hole inside a dataset's own available
-depth** — only days strictly *before* the dataset's earliest stored day are
-excused; a gap sitting between two stored days (e.g. day 3 present, day 5
-present, day 4 silently missing) still fails the check by name exactly as
-before. An empty `dates_present` (nothing stored/verifiable at all) has no
-floor to clamp against, so it reports zero holes — this is by design, not a
-blind spot: lag in that state is independently governed by the STALENESS
-check above (`is_stale`, driven off the manifest's own
-`latest_trading_date`), which stays exit-1 until the manifest's latest date
-itself catches up.
-
-**When the window is actually truncated this way** (the dataset's own
-history doesn't yet reach the full 10 trading days), `check-freshness`
-prints an informational, NON-failing note so the reduced-coverage state
-stays visible instead of looking identical to a full pass:
-```
-continuity: ohlc verified over 3 of 10 days (history begins 2026-07-01)
-```
-This line never affects the exit code by itself. As the dataset's history
-accumulates past 10 trading days, the clamp becomes a no-op automatically
-(the same behavior as before this fix) and the note stops appearing — full
-10-day verification arms itself with no code change or manual step
-required.
-
-**A manifest-listed-but-missing release asset** (the manifest names a
-baseline file that the release itself doesn't actually have — a real
-release/manifest consistency break, distinct from the dataset being absent
-from the manifest entirely) is caught and reported as a clean, named
-per-dataset error on stderr and fails the check (exit 1) — it is never
-allowed to crash the monitor with a raw traceback.
-
-### The arming rule (read before panicking about a "missing" brand-new dataset)
-**A fetched dataset with NO entry in the manifest at all is a WARNING, not
-a failure — it does not fail the check.** This matters for the exact moment
-a new dataset is registered in code but hasn't published for the first
-time yet (e.g. the window between `indices` landing in `DATASET_ORDER` and
-its first successful `daily`+`publish` cycle): a dataset that has never
-published isn't meaningfully "stale" or "full of holes" — there's nothing
-to compare against yet. Without this grace rule, a hard exit-1 here would
-false-alarm on every monitor run from the moment new dataset code merges
-until its first real publish, which is exactly backwards (alerting on the
-system working as designed, before it's had a chance to run once).
-
-**Once a dataset's first baseline lands in the manifest, this grace period
-ends permanently — from that point on, holes in that dataset are enforced
-exactly like any other fetched dataset.** In short: *a never-published
-dataset does not alert; its first publish arms continuity checking for it.*
-There is no way back into the grace period once armed — do not expect a
-dataset that publishes once and then goes dark to fall back to a warning
-instead of an alert; a dataset with a manifest entry but a hole inside it is
-always a hard failure, never a warning, regardless of how that hole came
-to exist.
-
-### Running manually
-```
-cd pipeline && uv run python -m pipeline check-freshness
-```
-Exit 0: both the staleness check and every fetched dataset's continuity
-check passed (or a not-yet-armed dataset only produced a warning; or a
-young/still-catching-up dataset only produced the informational "verified
-over N of 10 days" note — neither a warning nor a note affects the exit
-code). Exit 1: either the staleness check failed (the manifest's
-`latest_trading_date` is behind the last completed trading day), the
-release/manifest couldn't be downloaded at all, at least one ARMED fetched
-dataset is missing at least one trading day inside its (possibly clamped)
-trailing window (printed explicitly, per-dataset), or a dataset's manifest
-entry names a release asset that doesn't actually exist (printed as a
-clean per-dataset error, never a traceback).
+## G2: weekly source cross-check and continuity monitor (retired 2026-10-13)
+Both checked the published price datasets: the weekly cross-check compared
+closes between the two NSE sources, and the continuity half of
+`check-freshness` looked for missing sessions in the published `ohlc` and
+`indices` files. With prices no longer published, neither guards anything a
+client reads, so `data-crosscheck.yml`, the `cross-check` command and the
+continuity check are gone. `check-freshness` (data-monitor) keeps its
+staleness check on the manifest's `latest_trading_date` (now the reference
+list's session) and the yearly calendar nag.
 
 ### Cron keep-alive (`.github/workflows/keepalive.yml`)
 GitHub automatically disables a scheduled workflow's cron trigger after 60
@@ -809,7 +659,7 @@ bootstrapping problem (crons stop firing, so there's no more activity, so
 they never get a chance to re-trigger). `keepalive.yml` runs monthly (1st,
 05:00 UTC, plus `workflow_dispatch` for an on-demand check) and:
 1. Runs `gh workflow enable data-daily.yml data-monitor.yml
-   data-crosscheck.yml || true` — a no-op if all three are already active,
+   data-snapshot.yml || true` — a no-op if all three are already active,
    and idempotently re-enables any that GitHub auto-disabled.
 2. Prints the name of any workflow still NOT in the `active` state (via
    `gh api repos/{repo}/actions/workflows --jq '.workflows[] | select(.state
@@ -830,7 +680,7 @@ Actions-API write, not a repo-content or issue write.
 Every workflow step that uses a third-party GitHub Action (`actions/checkout`,
 `actions/setup-python`) is pinned to a full commit SHA, not a mutable tag
 (`@v7`), across all five workflows that have any `uses:` steps
-(`data-daily.yml`, `data-monitor.yml`, `data-crosscheck.yml`,
+(`data-daily.yml`, `data-monitor.yml`, `data-snapshot.yml`,
 `pipeline-ci.yml`; `keepalive.yml` and `holidays-refresh.yml` have no
 `uses:` steps at all — both are pure `gh`-CLI jobs with nothing to check
 out, so there is nothing to pin in either):
@@ -917,7 +767,7 @@ installed extras. Workflows install from whichever lock matches what that
 job actually does:
 
 - **Runtime jobs** (`data-daily.yml`, `data-monitor.yml`,
-  `data-crosscheck.yml` — these only ever run `python -m pipeline <cmd>`,
+  `data-snapshot.yml` — these only ever run `python -m pipeline <cmd>`,
   never pytest/mypy/ruff): `pip install -r requirements.lock -e . --no-deps`.
   `--no-deps` is required here — without it, `pip install -e .` would
   re-resolve `pyproject.toml`'s dependency ranges itself (ignoring the lock
@@ -1104,7 +954,7 @@ pipeline snapshot` — which runs `create_snapshot` against the live
 `data-latest` release, then `prune_snapshots`, printing what was created and
 what was pruned. Exits 1 (and opens/appends the standard
 `pipeline-failure`-labeled issue, same dedupe pattern as
-`data-daily.yml`/`data-monitor.yml`/`data-crosscheck.yml`) on any
+`data-daily.yml`/`data-monitor.yml`) on any
 `ReleaseError`/`UnexpectedFailure` — e.g. a transient `gh` failure, or (should
 it ever happen) an attempt to recreate an existing month's tag.
 
