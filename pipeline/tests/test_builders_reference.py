@@ -103,7 +103,8 @@ def test_reference_spec_fields():
     assert s.source_label == "derived"
     assert s.abs_rowcount_range == (0, 10**9)
     assert s.manifest_name == "reference"
-    assert s.schema_version == 1
+    # v2 adds the nullable nse_token column (additive; v1 readers still work).
+    assert s.schema_version == 2
     assert s.derived is True
     assert s.published is True
     assert datasets.DATASETS["reference"] is s

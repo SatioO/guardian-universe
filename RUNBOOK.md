@@ -91,6 +91,42 @@ history back: either `restore-from-snapshot` from the last snapshot, or a
 manifest reinstatement by hand from the orphaned `data-latest` assets. Then
 backfill the gap since then. This is why no price asset was deleted.
 
+## NSE token on the instrument list (2026-10-14)
+`reference/instruments_all.parquet` (manifest `schema_version` 1 -> 2) gains
+`nse_token`: nullable int64, appended as the last column, NSE's exchange-issued
+`FinInstrmId`. A share gets a new token when it changes series (EQ -> BE), so
+the token is per version row, beside `isin` and `series`. The app uses it to
+link a listing's old and new versions.
+
+- **Source:** only the UDiFF CM bhavcopy carries `FinInstrmId`. The
+  `sec_bhavdata_full` fallback, the legacy CM bhavcopy and the broker rebuild
+  have no token, so a day they serve records null. A null never erases a token
+  already recorded; a new non-null one replaces it (a re-issue).
+- **Malformed value** (not an integer, zero, negative, over 18 digits): set to
+  null, a `nse_token:` warning in the run log, and the count in the status
+  message (`N malformed nse_token value(s) nulled`, visible in
+  `last_run_status.json`). It never fails the day: null only means lineage
+  unknown.
+- **Structural change fails the run:** a UDiFF file with no `FinInstrmId`
+  column stops that day (`bhavcopy missing required columns`), because it
+  would silently null every token.
+- **History starts 2026-10-14.** The first run fills every version that traded
+  in its 7-session window; older versions stay null. No backfill was run. To
+  fill more, from a residential machine (NSE blocks datacenter IPs; UDiFF
+  files exist from 2024-01-01, earlier days come from sources without tokens):
+  ```
+  cd pipeline
+  python -m pipeline sync
+  python -m pipeline backfill --days 300 --dataset equities   # N sessions back
+  python -m pipeline daily
+  python -m pipeline publish
+  ```
+  `daily` rebuilds `reference` from every session in that local store, merged
+  onto the synced prior.
+- **Old prior and old price files:** a prior without the column is still valid
+  (it gains the column); `bootstrap-reference` reads price files that predate
+  it, with every token null.
+
 ## Bootstrap the historical baseline (local, one-time)
 Historical: the price store is run-local since 2026-10-13 (see above), so a
 backfill only matters inside a reference bootstrap. NSE blocks datacenter IPs,

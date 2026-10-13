@@ -165,7 +165,8 @@ REFERENCE = DatasetSpec(
     normalizer=lambda df: df,  # identity: builders.build_reference shapes rows itself
     make_fetcher=_no_fetcher,
     abs_rowcount_range=(0, 10**9),
-    manifest_name="reference", schema_version=1,
+    # v2 adds the nullable nse_token column (additive; v1 readers still work).
+    manifest_name="reference", schema_version=2,
     derived=True,
 )
 
