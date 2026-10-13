@@ -117,10 +117,12 @@ COMPLETENESS_SHORTFALL: float = 0.15
 # Project root = the pipeline/ directory (two parents up from this file's src/pipeline/).
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 DATA_DIR: Path = PROJECT_ROOT / "data"
+# The fetched price stores. Run-local since 2026-10-13: filled by `daily` and
+# read by the reference and index-constituents builders, but never synced or
+# published (see datasets.DatasetSpec.published).
 OHLC_DIR: Path = DATA_DIR / "ohlc"
 INDICES_DIR: Path = DATA_DIR / "indices"
 REFERENCE_DIR: Path = DATA_DIR / "reference"
-CA_FLAGS_DIR: Path = DATA_DIR / "ca_flags"
 SECTOR_DIR: Path = DATA_DIR / "sector"
 # P5 fundamentals: produced by the EXTERNAL Rust producer
 # (fundamentals/fundamentals-producer) into this directory; the pipeline
@@ -207,10 +209,14 @@ FNO_CONTRACT_LOOKBACK_DAYS: int = 7
 FNO_FREEZE_LIMITS_MAX_CHURN: int = 3
 FNO_FREEZE_LIMITS_MAX_CHURN_SHARE: float = 0.03
 
-# Corporate-action ex-date detector (G1b task 7): flag an instrument when
-# abs(prevclose_today / close_prev - 1) exceeds this fraction -- a split,
-# bonus, or other ex-date discontinuity, not ordinary price movement.
-CA_DISCONTINUITY_THRESHOLD: float = 0.005
+# Reference (instruments) is merged onto the PRIOR published file each run,
+# since no price history is kept between runs (builders.build_reference). A
+# prior missing more than this share of the instrument versions this run
+# fetched is a truncated or broken file, not listing churn, and is refused.
+# Calibrated on the published store (2021-06 to 2026-10): the share of a
+# 7-session window's versions absent from all earlier history has a median of
+# 1.2% and peaked at 10.3% (May 2024); 0.2% on 2026-10-12.
+REFERENCE_PRIOR_MAX_NEW_SHARE: float = 0.25
 
 
 def dataset_path(year: int, base: Path, *, prefix: str = "ohlc") -> Path:

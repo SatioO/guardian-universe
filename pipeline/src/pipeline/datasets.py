@@ -1,10 +1,11 @@
-"""DatasetSpec registry: identity for each ingested dataset (equities, indices
-today, more later). Shared code (run_daily/backfill) threads a spec instead of
-hardcoding a dataset name.
+"""DatasetSpec registry: identity for each ingested dataset. Shared code
+(run_daily/backfill) threads a spec instead of hardcoding a dataset name.
 
-Reserved manifest dataset names for future phases: breadth, fundamentals,
-reference, ca_flags. Client adjustment enum (P4b): raw | split |
-total_return."""
+The two FETCHED price datasets (equities, indices) are internal inputs only:
+the daily run fills them into a run-local store that the reference and
+index-constituents builders read, and they are never synced or published
+(`published=False`). Their old manifest names, and the retired `ca_flags`,
+are in RETIRED_MANIFEST_NAMES."""
 from __future__ import annotations
 
 import functools
@@ -57,6 +58,10 @@ class DatasetSpec:
     # continuity check), and additionally skipped by the daily Phase-2
     # builders loop. sync/publish handle them exactly like any other dataset.
     external: bool = False
+    # Published datasets go into manifest.json and are synced back each run.
+    # An unpublished one is an internal input: built or fetched into a
+    # run-local store, read by builders, then discarded with the runner.
+    published: bool = True
 
 
 def _load_isin_map() -> dict[tuple[str, str], str]:
@@ -130,6 +135,10 @@ EQUITIES = DatasetSpec(
     # ISIN rows get an "NSE:"+symbol sentinel key -- a client-visible change to
     # the ohlc dataset's multi-series semantics.
     manifest_name="ohlc", schema_version=2,
+    # Not published since 2026-10-13 (the desktop app builds price history on
+    # the trader's device). Still fetched every run: its sessions feed the
+    # `reference` symbol master and its status gates the publish.
+    published=False,
 )
 
 INDICES = DatasetSpec(
@@ -138,6 +147,9 @@ INDICES = DatasetSpec(
     normalizer=functools.partial(normalize_indices, source="nse-indices"),
     make_fetcher=NseIndicesFetcher, abs_rowcount_range=config.INDICES_ROWCOUNT_ABS_RANGE,
     manifest_name="indices", schema_version=1,
+    # Not published since 2026-10-13. Still fetched: index_constituents keys
+    # its baskets by the `IDX:` keys of the latest indices session.
+    published=False,
 )
 
 def _no_fetcher() -> Fetcher:
@@ -154,16 +166,6 @@ REFERENCE = DatasetSpec(
     make_fetcher=_no_fetcher,
     abs_rowcount_range=(0, 10**9),
     manifest_name="reference", schema_version=1,
-    derived=True,
-)
-
-CA_FLAGS = DatasetSpec(
-    key="ca_flags", file_prefix="ca_flags", base_dir=config.CA_FLAGS_DIR,
-    source_label="derived",
-    normalizer=lambda df: df,  # identity: builders.build_ca_flags shapes rows itself
-    make_fetcher=_no_fetcher,
-    abs_rowcount_range=(0, 10**9),
-    manifest_name="ca_flags", schema_version=1,
     derived=True,
 )
 
@@ -321,7 +323,7 @@ CORPORATE_ACTIONS = DatasetSpec(
 
 DATASETS: dict[str, DatasetSpec] = {
     "equities": EQUITIES, "indices": INDICES, "reference": REFERENCE,
-    "ca_flags": CA_FLAGS, "sector_industry": SECTOR_INDUSTRY,
+    "sector_industry": SECTOR_INDUSTRY,
     "classification_registry": CLASSIFICATION_REGISTRY,
     "classification_observations": CLASSIFICATION_OBSERVATIONS,
     "fundamentals": FUNDAMENTALS,
@@ -332,11 +334,19 @@ DATASETS: dict[str, DatasetSpec] = {
     "corporate_actions": CORPORATE_ACTIONS,
 }
 DATASET_ORDER: list[str] = [
-    "equities", "indices", "reference", "ca_flags", "sector_industry",
+    "equities", "indices", "reference", "sector_industry",
     "classification_registry", "classification_observations",
     "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
     "market_calendar", "corporate_actions",
 ]
+
+# Manifest names this producer published once and has since retired: the price
+# datasets (ohlc, indices) and ca_flags, which was derived only from them.
+# publish drops a retired name from the live manifest (it is never carried
+# forward as another producer's dataset, and its absence is not a shrink), and
+# GC never claims its assets, so the files already on the release stay until
+# someone deletes them by hand.
+RETIRED_MANIFEST_NAMES: frozenset[str] = frozenset({"ohlc", "indices", "ca_flags"})
 
 # publish.py resolves specs by manifest_name (by_manifest_name); manifest_name
 # must be unique across the registry or that resolution would be ambiguous.
@@ -353,3 +363,10 @@ def by_manifest_name(name: str) -> DatasetSpec | None:
 
 def all_specs() -> list[DatasetSpec]:
     return [DATASETS[k] for k in DATASET_ORDER]
+
+
+def published_specs() -> list[DatasetSpec]:
+    """The specs that go into manifest.json, in registry order. `reference`
+    comes first, so it is the publish's primary: the empty-store guard and
+    the manifest's top-level `latest_trading_date` read its latest session."""
+    return [spec for spec in all_specs() if spec.published]

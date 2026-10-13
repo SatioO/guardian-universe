@@ -17,8 +17,11 @@ def test_equities_spec_fields():
     # NSE: sentinel keys introduced -- a client-visible ohlc dataset change.
     assert s.manifest_name == "ohlc" and s.schema_version == 2
     assert datasets.DATASETS["equities"] is s
+    # Still the fetched primary (DATASET_ORDER[0]) whose status gates the
+    # publish, but never published itself since 2026-10-13.
+    assert s.published is False
     assert datasets.DATASET_ORDER == [
-        "equities", "indices", "reference", "ca_flags", "sector_industry",
+        "equities", "indices", "reference", "sector_industry",
         "classification_registry", "classification_observations",
         "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
         "market_calendar", "corporate_actions",
@@ -45,6 +48,7 @@ def test_indices_spec_fields():
     assert s.normalizer.keywords == {"source": "nse-indices"}
     assert s.make_fetcher is NseIndicesFetcher
     assert datasets.DATASETS["indices"] is s
+    assert s.published is False
 
 
 def test_sector_industry_schema_version_tracks_four_tier_contract():
@@ -65,12 +69,43 @@ def test_manifest_names_are_unique():
 
 def test_all_specs_follows_dataset_order():
     assert datasets.all_specs() == [
-        datasets.EQUITIES, datasets.INDICES, datasets.REFERENCE, datasets.CA_FLAGS,
+        datasets.EQUITIES, datasets.INDICES, datasets.REFERENCE,
         datasets.SECTOR_INDUSTRY, datasets.CLASSIFICATION_REGISTRY,
         datasets.CLASSIFICATION_OBSERVATIONS, datasets.FUNDAMENTALS,
         datasets.INDEX_CONSTITUENTS, datasets.CAS_ELIGIBLE, datasets.FNO_FREEZE_LIMITS,
         datasets.MARKET_CALENDAR, datasets.CORPORATE_ACTIONS,
     ]
+
+
+def test_published_specs_are_every_kept_list_and_no_price_dataset():
+    """The manifest carries the reference lists only: reference first (the
+    publish's primary), no price dataset, nothing retired."""
+    specs = datasets.published_specs()
+    prices = (datasets.EQUITIES, datasets.INDICES)
+    assert specs == [s for s in datasets.all_specs() if s not in prices]
+    assert specs[0] is datasets.REFERENCE
+    assert [s.manifest_name for s in specs] == [
+        "reference", "sector_industry", "classification_registry",
+        "classification_observations", "fundamentals", "index_constituents",
+        "cas_eligible", "fno_freeze_limits", "market_calendar", "corporate_actions",
+    ]
+    assert not {s.manifest_name for s in specs} & datasets.RETIRED_MANIFEST_NAMES
+
+
+def test_retired_manifest_names_are_the_price_datasets_and_ca_flags():
+    assert {"ohlc", "indices", "ca_flags"} == datasets.RETIRED_MANIFEST_NAMES
+    assert "ca_flags" not in datasets.DATASETS
+    # No published spec's file prefix claims a retired dataset's assets, so
+    # publish's GC can never delete them (publish.owns_asset).
+    from pipeline.publish import owns_asset
+
+    prefixes = frozenset(s.file_prefix for s in datasets.published_specs())
+    for asset in (
+        "ohlc_2026.3a0c9899.parquet", "delta_ohlc_2026-10-12.b8aea44a.parquet",
+        "indices_2026.0964d75d.parquet", "delta_indices_2026-10-12.e9a9239a.parquet",
+        "ca_flags_2026.57a24e6a.parquet",
+    ):
+        assert not owns_asset(asset, file_prefixes=prefixes), asset
 
 
 def test_sector_industry_spec_fields():
@@ -136,7 +171,7 @@ def test_derived_defaults_false_for_existing_specs():
 
 
 def test_external_defaults_false_for_existing_specs():
-    for key in ("equities", "indices", "reference", "ca_flags", "sector_industry"):
+    for key in ("equities", "indices", "reference", "sector_industry"):
         assert datasets.DATASETS[key].external is False, key
 
 

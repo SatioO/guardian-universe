@@ -1,7 +1,6 @@
 """Registry of derived-dataset builders, keyed by DatasetSpec.key.
 
-Populated by later G1b tasks (6: reference/instruments, 7: ca_flags). This
-module intentionally imports daily_update.RunStatus and datasets.DatasetSpec
+This module intentionally imports daily_update.RunStatus and datasets.DatasetSpec
 only for typing -- builders themselves must stay name-free (no hardcoded
 dataset-key lookups); the CLI is the allowed edge that resolves specs by name
 and passes them in.
@@ -16,7 +15,7 @@ signature -- `source_spec` is filled in, leaving exactly the two positional
 parameters (`spec`, `target`) the registry and `_run_builder` expect.
 
 WARNING (carried in from the task-6/task-7 review): the `cli.py` BUILDERS
-bindings (`BUILDERS["reference"]`, `BUILDERS["ca_flags"]`) bind `source_spec`
+bindings (e.g. `BUILDERS["reference"]`) bind `source_spec`
 to the REAL registry spec (`datasets.DATASETS[datasets.DATASET_ORDER[0]]`) at
 CLI *import time* -- not at call time. Monkeypatching `datasets.DATASETS`
 alone in a test does NOT redirect the `source_spec` a bound partial already
@@ -40,7 +39,7 @@ import pyarrow as pa
 import requests
 
 from pipeline import calendar as cal
-from pipeline import config, market_calendar, store
+from pipeline import config, market_calendar
 from pipeline.daily_update import RunStatus
 from pipeline.datasets import DatasetSpec
 from pipeline.errors import NotYetPublished
@@ -64,13 +63,30 @@ from pipeline.sources.nse_universe import (
 
 BUILDERS: dict[str, Callable[[DatasetSpec, date], RunStatus]] = {}
 
-# 10 most-recent DISTINCT trading dates present in the source store. v1 keeps
-# this holiday-free and calendar-free (builders have no `holidays` input,
-# unlike run_daily): "trading day" here means "a date that actually appears
-# in the store", which by construction only ever contains trading days.
+# A version counts as `active` when its last_seen falls among the 10 most
+# recent trading sessions (of the daily run's own calendar) ending at the
+# newest last_seen in the list.
 _ACTIVE_WINDOW = 10
 
 _REFERENCE_COLUMNS = ["date", "instrument_key", "isin", "symbol", "series"]
+_REFERENCE_KEY = ["instrument_key", "symbol", "series"]
+_REFERENCE_VERSION_COLUMNS = [*_REFERENCE_KEY, "first_seen", "last_seen", "isin"]
+_REFERENCE_OUTPUT_COLUMNS = [
+    "instrument_key",
+    "isin",
+    "symbol",
+    "name",
+    "series",
+    "first_seen",
+    "last_seen",
+    "status",
+    "valid_from",
+    "valid_to",
+    "date",
+]
+_REFERENCE_BOOTSTRAP_HINT = (
+    "run `python -m pipeline bootstrap-reference` (RUNBOOK.md 'Reference bootstrap')"
+)
 
 _LEGACY_V1_SECTOR_COLUMNS = frozenset(
     {
@@ -96,7 +112,7 @@ class _PriorClassificationArtifact:
 def _read_all_years(source_spec: DatasetSpec) -> pd.DataFrame:
     """Column-pruned read of every `{prefix}_{year}.parquet` file under the
     source spec's base_dir. Missing/empty store -> empty frame (a legitimate
-    state, e.g. the very first backfill day)."""
+    state, e.g. a run that fetched no session)."""
     base = source_spec.base_dir
     if not base.exists():
         return pd.DataFrame(columns=_REFERENCE_COLUMNS)
@@ -110,86 +126,192 @@ def _read_all_years(source_spec: DatasetSpec) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def build_reference(spec: DatasetSpec, target: date, *, source_spec: DatasetSpec) -> RunStatus:
-    """Build the `reference/instruments` SCD2 symbol master from the source
-    (equities) store's own presence -- one row per distinct
-    `(instrument_key, symbol, series)` version.
+def _reference_calendar() -> tuple[set[date], set[date]]:
+    """(holidays, special_sessions): the daily run's own NSE calendar."""
+    return cal.load_trading_calendar(config.META_DIR)
 
-    v1 status subset: only `active`/`inactive` are ever emitted. `active`
-    means `last_seen` falls among the store's own 10 most recent distinct
-    dates (no holiday calendar dependency -- the store's date values ARE
-    trading days by construction). `suspended`/`delisted` need an external
-    exchange feed and are deferred to a later phase.
 
-    Full rewrite each run: `instruments_all.parquet` is atomically replaced
-    (tmp+rename) under `spec.base_dir`, never appended to -- idempotent at
-    the scale of a few thousand rows.
-    """
-    df = _read_all_years(source_spec)
-
-    spec.base_dir.mkdir(parents=True, exist_ok=True)
-    out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
-
-    if df.empty:
-        out = _empty_reference_frame()
-        _write_atomic(out, out_path)
-        return RunStatus("success", target, symbol_count=0, source="derived")
-
-    recent_dates = sorted(df["date"].drop_duplicates(), reverse=True)[:_ACTIVE_WINDOW]
-    active_dates = set(recent_dates)
-
-    grouped = df.groupby(["instrument_key", "symbol", "series"], as_index=False).agg(
+def _reference_versions(sessions: pd.DataFrame) -> pd.DataFrame:
+    """One row per distinct `(instrument_key, symbol, series)` version in the
+    stored sessions, with the first and last session it traded in."""
+    return sessions.groupby(_REFERENCE_KEY, as_index=False).agg(
         first_seen=("date", "min"), last_seen=("date", "max"), isin=("isin", "last")
     )
-    grouped["name"] = grouped["symbol"]
-    grouped["status"] = grouped["last_seen"].apply(
+
+
+def _merge_versions(prior: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
+    """Fold freshly seen versions into the prior list: earliest first_seen,
+    latest last_seen, and the fresh ISIN where both have one."""
+    both = pd.concat(
+        [prior[_REFERENCE_VERSION_COLUMNS], fresh[_REFERENCE_VERSION_COLUMNS]],
+        ignore_index=True,
+    )
+    return both.groupby(_REFERENCE_KEY, as_index=False).agg(
+        first_seen=("first_seen", "min"), last_seen=("last_seen", "max"), isin=("isin", "last")
+    )
+
+
+def _shape_reference(
+    versions: pd.DataFrame, trading_calendar: Callable[[], tuple[set[date], set[date]]]
+) -> pd.DataFrame:
+    holidays, special = trading_calendar()
+    latest = pd.Timestamp(versions["last_seen"].max()).date()
+    active_dates = {
+        pd.Timestamp(d) for d in cal.trading_days_back(latest, _ACTIVE_WINDOW, holidays, special)
+    }
+    out = versions.copy()
+    out["name"] = out["symbol"]
+    out["status"] = out["last_seen"].apply(
         lambda d: "active" if d in active_dates else "inactive"
     )
-    grouped["valid_from"] = grouped["first_seen"]
-    grouped["valid_to"] = grouped["last_seen"]
-    grouped["date"] = grouped["last_seen"]
-
-    out = (
-        grouped[
-            [
-                "instrument_key",
-                "isin",
-                "symbol",
-                "name",
-                "series",
-                "first_seen",
-                "last_seen",
-                "status",
-                "valid_from",
-                "valid_to",
-                "date",
-            ]
-        ]
+    out["valid_from"] = out["first_seen"]
+    out["valid_to"] = out["last_seen"]
+    out["date"] = out["last_seen"]
+    return (
+        out[_REFERENCE_OUTPUT_COLUMNS]
         .sort_values(["instrument_key", "first_seen"])
         .reset_index(drop=True)
     )
 
+
+def _reference_prior(out_path: Path) -> tuple[pd.DataFrame | None, str]:
+    """The prior published instrument list, or None and why it is unusable.
+
+    Only its shape is judged here (readable, the version columns present,
+    non-empty, dated). Whether it is complete is judged against what the run
+    fetched, in build_reference."""
+    if not out_path.exists():
+        return None, f"no prior instrument list at {out_path}"
+    try:
+        prior = pd.read_parquet(out_path)
+    except Exception as e:  # noqa: BLE001 - an unreadable prior is unusable, not a crash
+        return None, f"prior instrument list unreadable: {e}"
+    missing = [c for c in _REFERENCE_VERSION_COLUMNS if c not in prior.columns]
+    if missing:
+        return None, f"prior instrument list lacks columns {missing}"
+    if prior.empty:
+        return None, "prior instrument list is empty"
+    if prior[["first_seen", "last_seen"]].isna().any().any():
+        return None, "prior instrument list has undated rows"
+    return prior, ""
+
+
+def build_reference(
+    spec: DatasetSpec,
+    target: date,
+    *,
+    source_spec: DatasetSpec,
+    trading_calendar: Callable[[], tuple[set[date], set[date]]] = _reference_calendar,
+    max_new_share: float = config.REFERENCE_PRIOR_MAX_NEW_SHARE,
+) -> RunStatus:
+    """Update the `reference/instruments` SCD2 symbol master: one row per
+    distinct `(instrument_key, symbol, series)` version, with the sessions it
+    first and last traded in.
+
+    Incremental since 2026-10-13. The equities store no longer outlives a run
+    (no price history is published or synced), so it holds only the sessions
+    this run fetched (its catch-up window). The full history lives in the
+    prior published `instruments_all.parquet`, which sync brings down: this
+    merges the run's sessions into it. Same columns, same rows as the old
+    rebuild from the whole price history (RUNBOOK.md 'Reference bootstrap').
+
+    Fail-closed on the prior, because a list built from the run's sessions
+    alone would drop every listing that did not trade in the window and reset
+    every first_seen:
+      - a missing, unreadable, mis-shaped, empty or undated prior is `failed`
+        and nothing is written (the bootstrap rebuilds it from price files);
+      - a prior that lacks more than `max_new_share` of the versions this run
+        fetched is truncated or broken, not listing churn: `failed`, nothing
+        written, so a bad file never compounds day after day.
+    A run that fetched no session keeps the prior untouched.
+
+    `active` means last_seen falls among the latest `_ACTIVE_WINDOW` trading
+    sessions of the run's calendar, ending at the newest last_seen in the
+    list. `suspended`/`delisted` need an exchange feed and are not emitted.
+    Full rewrite each run, atomically (tmp+rename).
+    """
+    spec.base_dir.mkdir(parents=True, exist_ok=True)
+    out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
+
+    prior, why = _reference_prior(out_path)
+    if prior is None:
+        return RunStatus(
+            "failed", target, source="derived",
+            message=f"{why}; refusing to build it from this run's sessions alone -- "
+            f"{_REFERENCE_BOOTSTRAP_HINT}",
+        )
+
+    sessions = _read_all_years(source_spec)
+    if sessions.empty:
+        return RunStatus(
+            "skipped_idempotent", target, symbol_count=len(prior), source="derived",
+            message="no session fetched this run; prior instrument list kept",
+        )
+
+    fresh = _reference_versions(sessions)
+    known = pd.MultiIndex.from_frame(prior[_REFERENCE_KEY])
+    unseen = int((~pd.MultiIndex.from_frame(fresh[_REFERENCE_KEY]).isin(known)).sum())
+    if unseen > max_new_share * len(fresh):
+        return RunStatus(
+            "failed", target, symbol_count=len(prior), source="derived",
+            message=(
+                f"prior instrument list lacks {unseen} of the {len(fresh)} versions "
+                f"this run fetched (over the {max_new_share:.0%} limit): truncated or "
+                f"broken; refusing to merge -- {_REFERENCE_BOOTSTRAP_HINT}"
+            ),
+        )
+
+    out = _shape_reference(_merge_versions(prior, fresh), trading_calendar)
     _write_atomic(out, out_path)
-
-    return RunStatus("success", target, symbol_count=len(out), source="derived")
-
-
-def _empty_reference_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        columns=[
-            "instrument_key",
-            "isin",
-            "symbol",
-            "name",
-            "series",
-            "first_seen",
-            "last_seen",
-            "status",
-            "valid_from",
-            "valid_to",
-            "date",
-        ]
+    return RunStatus(
+        "success", target, symbol_count=len(out), source="derived",
+        message=f"{unseen} new versions",
     )
+
+
+def rebuild_reference(
+    spec: DatasetSpec,
+    target: date,
+    *,
+    source_spec: DatasetSpec,
+    keep_prior: bool = True,
+    trading_calendar: Callable[[], tuple[set[date], set[date]]] = _reference_calendar,
+) -> RunStatus:
+    """Rebuild the symbol master from EVERY session in the source store: the
+    one-off bootstrap and rollback path (`pipeline bootstrap-reference`, which
+    fills the store from the price files left on a release).
+
+    With `keep_prior`, a well-shaped prior instrument list is merged in too,
+    so versions first seen after the price files end are kept; pass False
+    when the prior itself is what needs replacing. An empty source store is
+    `failed`, never an empty list.
+    """
+    sessions = _read_all_years(source_spec)
+    if sessions.empty:
+        return RunStatus(
+            "failed", target, source="derived",
+            message=f"no stored sessions under {source_spec.base_dir}",
+        )
+    spec.base_dir.mkdir(parents=True, exist_ok=True)
+    out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
+
+    versions = _reference_versions(sessions)
+    note = (
+        f"rebuilt from {sessions['date'].nunique()} sessions "
+        f"({pd.Timestamp(sessions['date'].min()).date()} to "
+        f"{pd.Timestamp(sessions['date'].max()).date()})"
+    )
+    if keep_prior:
+        prior, why = _reference_prior(out_path)
+        if prior is None:
+            note += f"; no prior merged ({why})"
+        else:
+            versions = _merge_versions(prior, versions)
+            note += f"; merged the prior list ({len(prior)} rows)"
+
+    out = _shape_reference(versions, trading_calendar)
+    _write_atomic(out, out_path)
+    return RunStatus("success", target, symbol_count=len(out), source="derived", message=note)
 
 
 def _write_atomic(df: pd.DataFrame, target: Path) -> None:
@@ -210,98 +332,6 @@ def _write_atomic_typed(df: pd.DataFrame, target: Path, schema: pa.Schema) -> No
     tmp = target.with_suffix(".parquet.tmp")
     df.to_parquet(tmp, compression="zstd", index=False, schema=schema)
     tmp.replace(target)
-
-
-_CA_FLAGS_JOIN_COLUMNS = ["date", "instrument_key", "close", "prevclose"]
-_CA_FLAGS_OUTPUT_COLUMNS = [
-    "date",
-    "instrument_key",
-    "close_prev",
-    "prevclose_today",
-    "implied_ratio",
-]
-
-
-def build_ca_flags(spec: DatasetSpec, target: date, *, source_spec: DatasetSpec) -> RunStatus:
-    """Corporate-action ex-date detector: flag instruments whose today's
-    prevclose implies a discontinuity vs the previous trading day's close --
-    a split, bonus, or other ex-date event, not ordinary price movement.
-
-    "Previous trading day" = the max date present in the source store that is
-    strictly less than `target` (store dates ARE trading days by
-    construction -- no holiday calendar dependency, same v1 posture as the
-    reference builder). Only instrument_keys present on BOTH days are joined;
-    a key with no prior day (new listing, or the very first backfill day
-    overall) is simply never flagged. Zero flags, or no previous day at all,
-    are both a clean `success` with `symbol_count=0` -- not a failure.
-
-    Appends (never overwrites) via `store.append_keyed`, deduped on
-    (date, instrument_key) -- idempotent re-runs for the same target date
-    replace that date's flags rather than duplicating them.
-
-    Known limitation (dual-key join, until reference-remap linking lands in
-    P4a): an instrument that switches its `instrument_key` between days (e.g.
-    the `NSE:{symbol}` sentinel resolving to its real ISIN once one appears)
-    is absent from the same-key join on the day of the switch, so a
-    corporate action coinciding with that switch is silently missed that day.
-    """
-    df = _read_all_years_for_ca_flags(source_spec)
-
-    if df.empty:
-        return RunStatus("success", target, symbol_count=0, source="derived")
-
-    target_ts = pd.Timestamp(target)
-    prior_dates = df.loc[df["date"] < target_ts, "date"]
-    if prior_dates.empty:
-        return RunStatus("success", target, symbol_count=0, source="derived")
-    prev_day = prior_dates.max()
-
-    today = df[df["date"] == target_ts][["instrument_key", "prevclose"]]
-    prev = df[df["date"] == prev_day][["instrument_key", "close"]]
-    if today.empty or prev.empty:
-        return RunStatus("success", target, symbol_count=0, source="derived")
-
-    joined = today.merge(prev, on="instrument_key", how="inner", suffixes=("_today", "_prev"))
-    if joined.empty:
-        return RunStatus("success", target, symbol_count=0, source="derived")
-
-    joined["implied_ratio"] = joined["close"] / joined["prevclose"]
-    deviation = (joined["prevclose"] / joined["close"] - 1).abs()
-    flagged = joined[deviation > config.CA_DISCONTINUITY_THRESHOLD]
-
-    if flagged.empty:
-        return RunStatus("success", target, symbol_count=0, source="derived")
-
-    out = pd.DataFrame(
-        {
-            "date": target_ts,
-            "instrument_key": flagged["instrument_key"].to_numpy(),
-            "close_prev": flagged["close"].to_numpy(),
-            "prevclose_today": flagged["prevclose"].to_numpy(),
-            "implied_ratio": flagged["implied_ratio"].to_numpy(),
-        }
-    )[_CA_FLAGS_OUTPUT_COLUMNS]
-
-    store.append_keyed(out, spec.base_dir, prefix=spec.file_prefix)
-
-    return RunStatus("success", target, symbol_count=len(out), source="derived")
-
-
-def _read_all_years_for_ca_flags(source_spec: DatasetSpec) -> pd.DataFrame:
-    """Column-pruned read of the source store restricted to the columns
-    build_ca_flags needs. Missing/empty store -> empty frame (a legitimate
-    state, e.g. the very first backfill day)."""
-    base = source_spec.base_dir
-    if not base.exists():
-        return pd.DataFrame(columns=_CA_FLAGS_JOIN_COLUMNS)
-    frames = [
-        pd.read_parquet(p, columns=_CA_FLAGS_JOIN_COLUMNS)
-        for p in sorted(base.glob(f"{source_spec.file_prefix}_*.parquet"))
-    ]
-    frames = [f for f in frames if not f.empty]
-    if not frames:
-        return pd.DataFrame(columns=_CA_FLAGS_JOIN_COLUMNS)
-    return pd.concat(frames, ignore_index=True)
 
 
 # ---------------------------------------------------------------------------
