@@ -129,6 +129,9 @@ builders.BUILDERS["cas_eligible"] = functools.partial(
 # fno_freeze_limits fetches NSE's daily F&O contract file itself; registered
 # bare, its keyword-only fetch/calendar/floor args carry defaults.
 builders.BUILDERS["fno_freeze_limits"] = builders.build_fno_freeze_limits
+# bse_fno_freeze_limits fetches BSE's rolling contract master itself; registered
+# bare, its keyword-only fetch/calendar/floor args carry defaults.
+builders.BUILDERS["bse_fno_freeze_limits"] = builders.build_bse_fno_freeze_limits
 # market_calendar reads the curated meta files (config.META_DIR); registered bare.
 builders.BUILDERS["market_calendar"] = builders.build_market_calendar
 # corporate_actions fetches NSE's PR bundle itself; registered bare, its

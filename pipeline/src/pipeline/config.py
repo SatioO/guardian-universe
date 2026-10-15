@@ -220,6 +220,11 @@ FNO_CONTRACT_LOOKBACK_DAYS: int = 7
 # or partial file. NSE exits stocks a handful at a time.
 FNO_FREEZE_LIMITS_MAX_CHURN: int = 3
 FNO_FREEZE_LIMITS_MAX_CHURN_SHARE: float = 0.03
+# BSE's single-order limits, per underlying and product, from its daily
+# contract master (builders.build_bse_fno_freeze_limits), in the same
+# directory as NSE's. 217 underlyings on 2026-10-14 (4 indices, 213 stocks);
+# under 100 is a truncated file. Churn is the NSE leg's, counted in rows.
+BSE_FNO_FREEZE_LIMITS_MIN_ROWS: int = 100
 
 # Reference (instruments) is merged onto the PRIOR published file each run,
 # since no price history is kept between runs (builders.build_reference). A

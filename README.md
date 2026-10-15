@@ -3,7 +3,8 @@
 Serverless EOD reference-data producer for the traderview app. Publishes versioned,
 checksummed reference lists over CDN for the app to consume: the instrument list,
 index constituents, sector/classification, fundamentals, the market calendar,
-corporate actions, CAS eligibility and F&O freeze limits.
+corporate actions, CAS eligibility and F&O freeze limits (NSE's, and BSE's per
+product in their own file).
 
 It still fetches and validates NSE's daily bhavcopy, because the instrument list is
 built from it, but since 2026-10-13 it no longer publishes prices: the app builds

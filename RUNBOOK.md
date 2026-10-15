@@ -1388,6 +1388,74 @@ and run `daily`, then `publish --allow-shrink`, as for `cas_eligible`). A run
 that fails on churn names the symbols: if they really changed (a large F&O
 exit), accept the same way.
 
+## BSE F&O freeze limits (`bse_fno_freeze_limits`)
+
+`bse_fno_freeze_limits_all.parquet` (manifest name `bse_fno_freeze_limits`,
+schema v1, in `data/fno` beside NSE's file) holds, per BSE F&O underlying AND
+product, the largest single order BSE takes (its "Single Order Quantity
+Limit"; notices 20230526-54, 20230621-48, 20231201-16). It is a separate file
+on purpose: installed apps read `fno_freeze_limits` as one NSE limit per
+symbol, so BSE rows there would hand NSE contracts BSE's limits. Never change
+that file's shape for BSE.
+
+Columns: `symbol` (BSE's `TckrSymb`), `kind` (`index` | `stock`), `product`
+(`futures` | `options`), `underlying_id` (BSE's code for the underlying,
+`UndrlygFinInstrmId`: SENSEX 1, BANKEX 12, SENSEX50 47, FOCIT 75, a stock's
+scrip code; 0 when unreadable), `lot_size`, `max_order_quantity` (units, AS
+BSE GIVES IT: often not a whole number of lots, e.g. ADANIENT lot 309, limit
+9,000; the app rounds down to its own contract's lot), `basis`, `date` (the
+day the contract file names; file D serves session D+1), `source`
+(`bse-eqd-contract`). The key is (`symbol`, `product`). One current snapshot,
+rewritten whole. **`ISIN` is blank in every row of BSE's file**, so match an
+underlying by `underlying_id` (or symbol), never by ISIN.
+
+The source is the rolling zip
+`https://www.bseindia.com/downloads1/Live_Masters_for_Equity_Derivatives.zip`
+(about 2.4 MB, written around 17:40 IST; there is no dated archive), member
+`BSE_EQD_CONTRACT_<ddmmyyyy>.csv`, column `MaxTradQty`. Fetching: bseindia.com
+answers python-requests' own User-Agent with **HTTP 403**; a browser User-Agent
+gets the file. No Referer or cookie is needed (measured 2026-10-15; curl's own
+User-Agent also gets 200).
+
+How it differs from NSE's leg:
+- `MaxTradQty` is the largest order BSE TAKES (orders "more than" it are
+  rejected), so nothing is subtracted. NSE's is the first quantity that freezes.
+- Futures and options keep their own limits (SENSEX 500/1000, BANKEX 600/900,
+  FOCIT 900/1350 on 2026-10-14); they are never merged by keeping the smaller.
+- BSE's "not set" value (100,000,000 on 75 stocks on 2026-10-14; anything from
+  10,000,000 up) is never a limit: the product is published at one lot with
+  `basis` = `no_exchange_limit`. Those rows are not stand-ins and do not count
+  against churn. The run names how many underlyings show it.
+- `PrtdToTrad` is not read (0 on every future and most options), and BSE lists
+  no test series.
+
+Within a product the same doubts resolve smaller as on NSE: two limits keep the
+smaller, two lots take the larger, and a product with an unreadable row, a
+limit below one lot, an unknown instrument code on the underlying (either
+product) or a missing or split `underlying_id` stands in at one lot
+(`basis` = `stand_in`).
+
+`builders.build_bse_fno_freeze_limits` runs in the daily Phase-2 loop, right
+after `fno_freeze_limits`, under the same guards (`_build_freeze_limits`),
+with churn counted in rows (underlying × product). The NSE table above applies,
+except that a missing or refused file is a fetch failure (there is no
+walk-back), and `BSE_FNO_FREEZE_LIMITS_MIN_ROWS` (100 underlyings; 217 on
+2026-10-14) is the floor. The file holds one row per (`underlying_id`,
+`product`), since consumers match by it: a row the file no longer lists is
+never carried forward when its `underlying_id` and product are listed under
+another symbol (BSE renamed the `TckrSymb`; the run names them), so an old,
+possibly higher limit never sits beside the new one. Three more refusals
+(**`failed`**, nothing written, prior kept):
+
+| Anomaly | Why |
+|---|---|
+| an index shows the "not set" value | an index always has a limit: a broken file |
+| more products newly show "not set" than churn allows (vs. the published file) | a broken file must not read as "no limits" |
+| two rows share an `underlying_id` (> 0) and product | a consumer could pick either limit (0 is "unreadable" and may repeat) |
+
+If BSE really did clear many limits at once, accept it as for a churn failure:
+remove `bse_fno_freeze_limits_all.parquet`, run `daily`, then publish.
+
 ## Market calendar (`market_calendar`)
 
 `market_calendar_all.parquet` (manifest name `market_calendar`, schema v1) is the

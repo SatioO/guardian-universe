@@ -112,7 +112,8 @@ def test_reference_spec_fields():
         "equities", "indices", "reference", "sector_industry",
         "classification_registry", "classification_observations",
         "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
-        "market_calendar", "corporate_actions", "corporate_actions_history",
+        "bse_fno_freeze_limits", "market_calendar", "corporate_actions",
+        "corporate_actions_history",
     ]
     # reference leads the published specs: it is the publish's primary.
     assert datasets.published_specs()[0] is s
