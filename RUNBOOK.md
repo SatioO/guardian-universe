@@ -1440,13 +1440,18 @@ after `fno_freeze_limits`, under the same guards (`_build_freeze_limits`),
 with churn counted in rows (underlying × product). The NSE table above applies,
 except that a missing or refused file is a fetch failure (there is no
 walk-back), and `BSE_FNO_FREEZE_LIMITS_MIN_ROWS` (100 underlyings; 217 on
-2026-10-14) is the floor. Two more refusals (**`failed`**, nothing written,
-prior kept):
+2026-10-14) is the floor. The file holds one row per (`underlying_id`,
+`product`), since consumers match by it: a row the file no longer lists is
+never carried forward when its `underlying_id` and product are listed under
+another symbol (BSE renamed the `TckrSymb`; the run names them), so an old,
+possibly higher limit never sits beside the new one. Three more refusals
+(**`failed`**, nothing written, prior kept):
 
 | Anomaly | Why |
 |---|---|
 | an index shows the "not set" value | an index always has a limit: a broken file |
 | more products newly show "not set" than churn allows (vs. the published file) | a broken file must not read as "no limits" |
+| two rows share an `underlying_id` (> 0) and product | a consumer could pick either limit (0 is "unreadable" and may repeat) |
 
 If BSE really did clear many limits at once, accept it as for a churn failure:
 remove `bse_fno_freeze_limits_all.parquet`, run `daily`, then publish.

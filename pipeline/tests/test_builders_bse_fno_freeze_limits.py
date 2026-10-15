@@ -517,6 +517,85 @@ def test_not_set_rows_within_churn_publish(spec: datasets.DatasetSpec):
     assert (row["max_order_quantity"], row["basis"]) == (309, "no_exchange_limit")
 
 
+# A consumer matches an underlying by underlying_id (ISIN is blank), so the
+# file never holds two rows for one (underlying_id, product).
+
+
+def _renamed(text: str, old: str, new: str) -> str:
+    def rename(_n: int, row: dict[str, str]) -> None:
+        row["TckrSymb"] = new
+
+    return _edit(text, old, rename)
+
+
+def test_a_renamed_underlying_never_publishes_its_old_limit_beside_the_new(
+    spec: datasets.DatasetSpec,
+):
+    # BSE renames RELIANCE's TckrSymb, keeping UndrlygFinInstrmId 500325, and
+    # lowers its limit at the same time: the old 10,000 must not be carried.
+    _first(spec)
+    renamed = _set(_renamed(_csv(), "RELIANCE", "RELIND"), "RELIND", "MaxTradQty", "8000")
+    status = _build(spec, renamed)
+    assert status.status == "success", status.message
+    assert "RELIANCE/futures" in status.message and "carried" not in status.message
+    out = _out(spec)
+    assert "RELIANCE" not in out.index.get_level_values("symbol")
+    ids = out[out["underlying_id"] == 500325]
+    assert len(ids) == 2 and set(ids["max_order_quantity"]) == {8000}
+
+
+def test_a_gone_row_whose_underlying_is_still_listed_is_never_carried_even_in_part(
+    spec: datasets.DatasetSpec,
+):
+    # Only the futures of the renamed underlying are listed (its options
+    # gone): the old options row has no listed twin, so it is carried.
+    _first(spec)
+
+    def futures_only(text: str) -> str:
+        lines = text.splitlines()
+        header = lines[0].split(",")
+        symbol, code = header.index("TckrSymb"), header.index("FinInstrmNm")
+        keep = [lines[0]] + [
+            line
+            for line in lines[1:]
+            if not (line.split(",")[symbol] == "RELIANCE" and line.split(",")[code] == "SO")
+        ]
+        return "\n".join(keep) + "\n"
+
+    status = _build(spec, _renamed(futures_only(_csv()), "RELIANCE", "RELIND"))
+    assert status.status == "success", status.message
+    out = _out(spec)
+    assert ("RELIANCE", "futures") not in out.index
+    assert out.loc[("RELIANCE", "options"), "max_order_quantity"] == 10000  # carried
+    assert out.loc[("RELIND", "futures"), "max_order_quantity"] == 10000
+
+
+def test_two_listed_underlyings_sharing_an_underlying_id_fail_the_run(spec: datasets.DatasetSpec):
+    _first(spec)
+    shared = _set(_csv(), "BAJFINANCE", "UndrlygFinInstrmId", "512599")  # ADANIENT's
+    status = _build(spec, shared)
+    assert status.status == "failed", status.message
+    assert "512599" in status.message
+    assert _out(spec).loc[("BAJFINANCE", "options"), "underlying_id"] == 500034  # nothing written
+
+
+def test_unknown_underlying_ids_never_clash():
+    # 0 is "unreadable", not an underlying: two stand-ins may both carry it.
+    rows = pd.DataFrame(
+        {
+            "symbol": ["AAA", "BBB", "CCC", "CCC"],
+            "product": ["options", "options", "futures", "options"],
+            "underlying_id": [0, 0, 7, 7],
+        }
+    )
+    assert builders._bse_clash(rows) is None
+    clash = pd.concat([rows, rows.iloc[[2]].assign(symbol="DDD")], ignore_index=True)
+    assert "7" in (builders._bse_clash(clash) or "")
+    # Nor does a gone stand-in count as listed again: it is carried as usual.
+    gone = pd.DataFrame({"symbol": ["OLD"], "product": ["options"], "underlying_id": [0]})
+    assert not builders._bse_replaced(gone, rows).any()
+
+
 def test_a_run_never_touches_nse_s_file(tmp_path: Path):
     # Both live in data/fno; the NSE file's bytes and manifest entry stay its own.
     from pipeline import manifest

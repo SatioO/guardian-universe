@@ -1432,6 +1432,14 @@ def _allowed(prior_rows: int) -> int:
     return max(config.FNO_FREEZE_LIMITS_MAX_CHURN, share)
 
 
+def _nothing_replaced(gone: pd.DataFrame, _listed: pd.DataFrame) -> pd.Series:
+    return pd.Series(False, index=gone.index)
+
+
+def _no_clash(_out: pd.DataFrame) -> str | None:
+    return None
+
+
 @dataclass(frozen=True)
 class _FreezeLeg:
     """What one venue's freeze-limit file does its own way. The guards that
@@ -1449,6 +1457,11 @@ class _FreezeLeg:
     refuse: Callable[[pd.DataFrame, pd.DataFrame | None, int], str | None]
     # The run's summary head, e.g. "12 underlyings (6 indices)".
     describe: Callable[[pd.DataFrame], str]
+    # Which rows absent from the file the file still lists under another key
+    # (gone rows, listed rows): those are never carried forward.
+    replaced: Callable[[pd.DataFrame, pd.DataFrame], pd.Series] = _nothing_replaced
+    # A reason the file about to be written is inconsistent, or None.
+    clash: Callable[[pd.DataFrame], str | None] = _no_clash
 
 
 def _key_labels(frame: pd.DataFrame, key: tuple[str, ...]) -> list[str]:
@@ -1579,10 +1592,17 @@ def _build_freeze_limits(
     out = out[leg.columns]
 
     carried: list[str] = []
+    replaced: list[str] = []
     carriable = set(leg.columns) - {"basis", "source"}
     if prior is not None and carriable <= set(prior.columns):
         listed = pd.MultiIndex.from_frame(out[key])
         gone = prior[~pd.MultiIndex.from_frame(prior[key]).isin(listed)].copy()
+        if not gone.empty:
+            # Listed again under another key: its old limit must not sit
+            # beside the new one.
+            superseded = leg.replaced(gone, out)
+            replaced = sorted(_key_labels(gone[superseded], leg.key))
+            gone = gone[~superseded]
         if not gone.empty:
             carried = sorted(_key_labels(gone, leg.key))
             # Only the ones the last file listed are new: rows carried before
@@ -1601,11 +1621,16 @@ def _build_freeze_limits(
             out = pd.concat([out, gone[leg.columns]], ignore_index=True)
 
     out = out.sort_values(key, kind="mergesort").reset_index(drop=True)
+    inconsistent = leg.clash(out)
+    if inconsistent:
+        return refused(inconsistent)
     _write_atomic_typed(out, out_path, leg.schema)
 
     notes = ""
     if stand_ins:
         notes += f"; {len(stand_ins)} stand in at one lot: {', '.join(stand_ins[:15])}"
+    if replaced:
+        notes += f"; {len(replaced)} listed again under another symbol: {', '.join(replaced[:15])}"
     if carried:
         more = f" (+{len(carried) - 15} more)" if len(carried) > 15 else ""
         named = ", ".join(carried[:15]) + more
@@ -1751,6 +1776,35 @@ def _bse_describe(limits: pd.DataFrame) -> str:
     )
 
 
+# A consumer matches a BSE underlying by underlying_id (ISIN is blank in BSE's
+# file), so the published file holds one row per (underlying_id, product).
+_BSE_UNDERLYING = ["underlying_id", "product"]
+
+
+def _bse_replaced(gone: pd.DataFrame, listed: pd.DataFrame) -> pd.Series:
+    """Rows absent from the file whose underlying the file still lists (BSE
+    renamed its TckrSymb and kept UndrlygFinInstrmId): their old limit is
+    never carried beside the new one. 0 is "unreadable", never a match."""
+    known = listed[listed["underlying_id"] > 0]
+    still_listed = pd.MultiIndex.from_frame(gone[_BSE_UNDERLYING]).isin(
+        pd.MultiIndex.from_frame(known[_BSE_UNDERLYING])
+    )
+    return pd.Series(still_listed, index=gone.index) & (gone["underlying_id"] > 0)
+
+
+def _bse_clash(out: pd.DataFrame) -> str | None:
+    """Two rows for one (underlying_id, product) would let a consumer pick
+    either limit: the run fails instead."""
+    known = out[out["underlying_id"] > 0]
+    twins = known[known.duplicated(_BSE_UNDERLYING, keep=False)]
+    if twins.empty:
+        return None
+    named = sorted(
+        f"{row.symbol}/{row.product} ({row.underlying_id})" for row in twins.itertuples()
+    )
+    return f"{len(twins)} rows share an underlying_id and product: {', '.join(named[:15])}"
+
+
 _BSE_FREEZE_LEG = _FreezeLeg(
     key=("symbol", "product"),
     columns=_BSE_FNO_LIMIT_COLUMNS,
@@ -1759,6 +1813,8 @@ _BSE_FREEZE_LEG = _FreezeLeg(
     admit=lambda limits, _prior: limits,  # BSE lists no test series
     refuse=_bse_refuse,
     describe=_bse_describe,
+    replaced=_bse_replaced,
+    clash=_bse_clash,
 )
 
 
