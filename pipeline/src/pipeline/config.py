@@ -193,6 +193,17 @@ MARKET_CALENDAR_DIR: Path = DATA_DIR / "calendar"
 # trading days back, so ex-dates listed before it are not missed.
 CORPORATE_ACTIONS_DIR: Path = DATA_DIR / "corporate_actions"
 CORPORATE_ACTIONS_SEED_DAYS: int = 20
+# Every NSE corporate action on an equity share since CA_HISTORY_START, by
+# ex-date year (corporate_actions_history.py): backfilled and topped up from
+# NSE's corporate-actions API on a residential machine, refreshed daily from
+# the book-closure file. API requests are spaced this many seconds apart.
+CORPORATE_ACTIONS_HISTORY_DIR: Path = DATA_DIR / "ca_history"
+CA_HISTORY_START: date = date(2021, 10, 1)
+CA_HISTORY_REQUEST_SPACING_S: float = 3.0
+# The daily refresh reads this many trading days' book-closure files ending at
+# the run's day, so a day or two of missed runs loses no action: the file lists
+# an action from as little as two days before its ex-date.
+CA_HISTORY_CATCHUP_DAYS: int = 5
 
 # F&O quantity-freeze limits: the largest single order NSE takes per
 # underlying, from the daily contract file. A daily current snapshot.

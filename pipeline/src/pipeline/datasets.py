@@ -322,6 +322,25 @@ CORPORATE_ACTIONS = DatasetSpec(
     derived=True,
 )
 
+CORPORATE_ACTIONS_HISTORY = DatasetSpec(
+    key="corporate_actions_history", file_prefix="ca_history",
+    base_dir=config.CORPORATE_ACTIONS_HISTORY_DIR,
+    source_label="nse-corporate-actions",
+    normalizer=lambda df: df,  # identity: corporate_actions_history shapes rows itself
+    make_fetcher=_no_fetcher,  # fetched inside the builder / the backfill command
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="corporate_actions_history", schema_version=1,
+    # Every NSE corporate action on an equity share since 2021-10 (dividends,
+    # meetings and buy-backs too), one row per action, with the ISIN that
+    # traded on its ex-date: the app joins a stock's history across a break
+    # that an action explains. Year-partitioned by ex-date and ACCUMULATED
+    # (never shrinks). Backfilled from NSE's API on a residential machine
+    # (`backfill-corporate-actions`); the Phase-2 BUILDERS loop adds the
+    # book-closure file's rows each trading day. Not `corporate_actions`, whose
+    # every row pauses a price alert.
+    derived=True,
+)
+
 DATASETS: dict[str, DatasetSpec] = {
     "equities": EQUITIES, "indices": INDICES, "reference": REFERENCE,
     "sector_industry": SECTOR_INDUSTRY,
@@ -333,12 +352,13 @@ DATASETS: dict[str, DatasetSpec] = {
     "fno_freeze_limits": FNO_FREEZE_LIMITS,
     "market_calendar": MARKET_CALENDAR,
     "corporate_actions": CORPORATE_ACTIONS,
+    "corporate_actions_history": CORPORATE_ACTIONS_HISTORY,
 }
 DATASET_ORDER: list[str] = [
     "equities", "indices", "reference", "sector_industry",
     "classification_registry", "classification_observations",
     "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
-    "market_calendar", "corporate_actions",
+    "market_calendar", "corporate_actions", "corporate_actions_history",
 ]
 
 # Manifest names this producer published once and has since retired: the price
