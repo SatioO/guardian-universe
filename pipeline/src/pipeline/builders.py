@@ -1350,6 +1350,9 @@ def build_market_calendar(
 # ── F&O freeze limits ───────────────────────────────────────────────────────
 
 _FNO_LIMIT_COLUMNS: list[str] = [*nse_fo_contract.LIMIT_COLUMNS, "date", "source"]
+# Every venue's parser marks its rows with the same basis words.
+_BASIS_EXCHANGE = nse_fo_contract.BASIS_EXCHANGE
+_BASIS_STAND_IN = nse_fo_contract.BASIS_STAND_IN
 # The types the client reads (see _write_atomic_typed). `date` keeps the
 # millisecond unit every published file in this pipeline carries.
 _FNO_LIMIT_SCHEMA = pa.schema(
@@ -1427,36 +1430,59 @@ def _allowed(prior_rows: int) -> int:
     return max(config.FNO_FREEZE_LIMITS_MAX_CHURN, share)
 
 
-def build_fno_freeze_limits(
+@dataclass(frozen=True)
+class _FreezeLeg:
+    """What one venue's freeze-limit file does its own way. The guards that
+    keep a limit from ever reading too high are `_build_freeze_limits`'s,
+    shared by every venue."""
+
+    key: tuple[str, ...]  # a published row's identity, e.g. ("symbol",)
+    columns: list[str]  # published, in order (`date` and `source` included)
+    schema: pa.Schema  # the types the client reads
+    source: str  # provenance stamped on every row
+    # Which parsed rows publish, given the prior file (if any).
+    admit: Callable[[pd.DataFrame, pd.DataFrame | None], pd.DataFrame]
+    # An anomaly only this venue can see (limits, prior, churn allowance):
+    # the reason to refuse the run, or None.
+    refuse: Callable[[pd.DataFrame, pd.DataFrame | None, int], str | None]
+    # The run's summary head, e.g. "12 underlyings (6 indices)".
+    describe: Callable[[pd.DataFrame], str]
+
+
+def _key_labels(frame: pd.DataFrame, key: tuple[str, ...]) -> list[str]:
+    """Each row's key as one readable label ("NIFTY", "SENSEX/options")."""
+    if frame.empty:
+        return []
+    return list(frame[list(key)].astype(str).agg("/".join, axis=1))
+
+
+def _build_freeze_limits(
     spec: DatasetSpec,
     target: date,
+    leg: _FreezeLeg,
     *,
-    fetch_limits: Callable[[date], tuple[date, pd.DataFrame]] = _fetch_freeze_limits,
-    trading_day: Callable[[date], bool] = _cas_trading_day,
-    min_rows: int = config.FNO_FREEZE_LIMITS_MIN_ROWS,
+    fetch_limits: Callable[[date], tuple[date, pd.DataFrame]],
+    trading_day: Callable[[date], bool],
+    min_rows: int,
 ) -> RunStatus:
-    """Full-rewrite `fno_freeze_limits_all.parquet`: per F&O underlying, its
-    kind (index or stock), lot size, the largest single order NSE takes
-    (`max_order_quantity`, a whole number of lots) and its `basis`. `date` is
-    the day of the contract file the limits come from (NSE's file D, for
-    session D+1).
+    """Full-rewrite `<file_prefix>_all.parquet` from one venue's contract
+    file, under the guards every venue's limits share.
 
     A limit too high is the failure that matters (the app sizes orders and
     protective stops by it), so:
       - an OLDER file never replaces a newer one (a back-dated run keeps the
         published file); the same day's file read again is published again,
         so an evening correction lands;
-      - an underlying the file still lists never gets an old limit back: one
-        whose limit cannot be trusted stands in at one lot (parser), and only
-        one ABSENT from the file is carried forward, so a routine F&O exit
-        never shrinks the file and never withholds a lowered limit elsewhere;
+      - a row the file still lists never gets an old limit back: one whose
+        limit cannot be trusted stands in at one lot (parser), and only one
+        ABSENT from the file is carried forward, so a routine F&O exit never
+        shrinks the file and never withholds a lowered limit elsewhere;
       - more stand-ins or carried rows than routine churn allows means a
-        broken or partial file: nothing is written, `failed`;
+        broken or partial file: nothing is written, `failed`; so does any
+        anomaly the venue's own `refuse` names;
       - limits a trading day or more behind are `failed`, loudly, whatever
         the cause (no file, a wrong document, a format change): file D
-        serves session D+1, so a run on D+1 holding file D is current;
-      - an underlying with no option series is published only if it was
-        before (a real one that lost its options), never NSE's test series.
+        serves session D+1, so a run on D+1 holding file D is current.
     Otherwise fail-closed like cas_eligible: a fetch error or wrong document,
     or fewer than `min_rows` underlyings, keeps the prior file
     (`skipped_idempotent`; `failed` on a first run with nothing to keep).
@@ -1466,9 +1492,7 @@ def build_fno_freeze_limits(
     prior = _constituents_prior(out_path)
     prior_rows = None if prior is None else len(prior)
     prior_day = _prior_file_day(prior)
-    prior_symbols: set[str] = set()
-    if prior is not None and "symbol" in prior.columns:
-        prior_symbols = set(prior["symbol"].astype(str))
+    key = list(leg.key)
 
     if not trading_day(target):
         return RunStatus(
@@ -1528,63 +1552,63 @@ def build_fno_freeze_limits(
             f"{prior_day.isoformat()}"
         )
 
-    # NSE's test series (futures-only) never enter; a real underlying that
-    # lost its options keeps its row.
-    limits = limits[limits["has_options"] | limits["symbol"].isin(prior_symbols)]
+    limits = leg.admit(limits, prior)
+    underlyings = limits["symbol"].nunique()
     if limits.empty:
         return kept("parsed 0 underlyings")
-    if len(limits) < min_rows:
-        return kept(f"parsed {len(limits)} underlyings < floor {min_rows} (suspected truncation)")
+    if underlyings < min_rows:
+        return kept(f"parsed {underlyings} underlyings < floor {min_rows} (suspected truncation)")
 
     churn = _allowed(prior_rows or 0)
-    stand_ins = sorted(limits.loc[limits["basis"] == nse_fo_contract.BASIS_STAND_IN, "symbol"])
+    stand_ins = sorted(_key_labels(limits[limits["basis"] == _BASIS_STAND_IN], leg.key))
     if len(stand_ins) > churn:
         return refused(
             f"{len(stand_ins)} underlyings without a trustworthy limit (over {churn}; "
             f"format change?): {', '.join(stand_ins[:15])}"
         )
+    anomaly = leg.refuse(limits, prior, churn)
+    if anomaly:
+        return refused(anomaly)
 
-    out = limits.drop(columns=["has_options"]).copy()
+    out = limits.copy()
     # REQUIRED for the manifest: build_manifest reads columns=["date"].
     out["date"] = pd.Timestamp(file_day)
-    out["source"] = nse_fo_contract.SOURCE
-    out = out[_FNO_LIMIT_COLUMNS]
+    out["source"] = leg.source
+    out = out[leg.columns]
 
     carried: list[str] = []
-    carriable = {"symbol", "kind", "lot_size", "max_order_quantity", "date"}
+    carriable = set(leg.columns) - {"basis", "source"}
     if prior is not None and carriable <= set(prior.columns):
-        gone = prior[~prior["symbol"].isin(out["symbol"])].copy()
+        listed = pd.MultiIndex.from_frame(out[key])
+        gone = prior[~pd.MultiIndex.from_frame(prior[key]).isin(listed)].copy()
         if not gone.empty:
-            carried = sorted(gone["symbol"].astype(str))
+            carried = sorted(_key_labels(gone, leg.key))
             # Only the ones the last file listed are new: rows carried before
             # keep their older date, and must not count again on every run.
             new_dates = pd.to_datetime(gone["date"], errors="coerce").dt.date
-            leaving = sorted(gone.loc[new_dates == prior_day, "symbol"].astype(str))
+            leaving = sorted(_key_labels(gone[new_dates == prior_day], leg.key))
             if len(leaving) > churn:
                 return refused(
                     f"{len(leaving)} underlyings missing from the file (over {churn}; "
                     f"partial file?): {', '.join(leaving[:15])}"
                 )
             if "basis" not in gone.columns:
-                gone["basis"] = nse_fo_contract.BASIS_EXCHANGE
+                gone["basis"] = _BASIS_EXCHANGE
             if "source" not in gone.columns:
-                gone["source"] = nse_fo_contract.SOURCE
-            out = pd.concat([out, gone[_FNO_LIMIT_COLUMNS]], ignore_index=True)
+                gone["source"] = leg.source
+            out = pd.concat([out, gone[leg.columns]], ignore_index=True)
 
-    out = out.sort_values("symbol", kind="mergesort").reset_index(drop=True)
-    _write_atomic_typed(out, out_path, _FNO_LIMIT_SCHEMA)
+    out = out.sort_values(key, kind="mergesort").reset_index(drop=True)
+    _write_atomic_typed(out, out_path, leg.schema)
 
     notes = ""
     if stand_ins:
         notes += f"; {len(stand_ins)} stand in at one lot: {', '.join(stand_ins[:15])}"
     if carried:
         more = f" (+{len(carried) - 15} more)" if len(carried) > 15 else ""
-        listed = ", ".join(carried[:15]) + more
-        notes += f"; {len(carried)} no longer listed, carried forward: {listed}"
-    summary = (
-        f"{len(limits)} underlyings ({int((limits['kind'] == 'index').sum())} indices) "
-        f"from the {file_day.isoformat()} contract file{notes}"
-    )
+        named = ", ".join(carried[:15]) + more
+        notes += f"; {len(carried)} no longer listed, carried forward: {named}"
+    summary = f"{leg.describe(limits)} from the {file_day.isoformat()} contract file{notes}"
     missed = behind(file_day)
     if missed >= 1:
         return RunStatus(
@@ -1596,6 +1620,57 @@ def build_fno_freeze_limits(
         )
     return RunStatus(
         "success", target, symbol_count=len(out), source=spec.source_label, message=summary
+    )
+
+
+def _nse_admit(limits: pd.DataFrame, prior: pd.DataFrame | None) -> pd.DataFrame:
+    """NSE's test series (futures-only) never enter; a real underlying that
+    lost its options keeps its row."""
+    prior_symbols: set[str] = set()
+    if prior is not None and "symbol" in prior.columns:
+        prior_symbols = set(prior["symbol"].astype(str))
+    admitted = limits[limits["has_options"] | limits["symbol"].isin(prior_symbols)]
+    return admitted.drop(columns=["has_options"])
+
+
+_NSE_FREEZE_LEG = _FreezeLeg(
+    key=("symbol",),
+    columns=_FNO_LIMIT_COLUMNS,
+    schema=_FNO_LIMIT_SCHEMA,
+    source=nse_fo_contract.SOURCE,
+    admit=_nse_admit,
+    refuse=lambda _limits, _prior, _churn: None,
+    describe=lambda limits: (
+        f"{len(limits)} underlyings ({int((limits['kind'] == 'index').sum())} indices)"
+    ),
+)
+
+
+def build_fno_freeze_limits(
+    spec: DatasetSpec,
+    target: date,
+    *,
+    fetch_limits: Callable[[date], tuple[date, pd.DataFrame]] = _fetch_freeze_limits,
+    trading_day: Callable[[date], bool] = _cas_trading_day,
+    min_rows: int = config.FNO_FREEZE_LIMITS_MIN_ROWS,
+) -> RunStatus:
+    """Full-rewrite `fno_freeze_limits_all.parquet`: per NSE F&O underlying,
+    its kind (index or stock), lot size, the largest single order NSE takes
+    (`max_order_quantity`, a whole number of lots) and its `basis`. `date` is
+    the day of the contract file the limits come from (NSE's file D, for
+    session D+1).
+
+    The guards are `_build_freeze_limits`'s. NSE's own rule: an underlying
+    with no option series is published only if it was before (a real one
+    that lost its options), never NSE's test series.
+    """
+    return _build_freeze_limits(
+        spec,
+        target,
+        _NSE_FREEZE_LEG,
+        fetch_limits=fetch_limits,
+        trading_day=trading_day,
+        min_rows=min_rows,
     )
 
 
