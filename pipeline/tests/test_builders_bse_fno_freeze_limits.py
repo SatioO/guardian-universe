@@ -11,15 +11,23 @@ fetch keeps the list we had. NSE's fno_freeze_limits file is never touched.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import io
 import zipfile
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
+import responses
 
-from pipeline.sources import bse_eqd_contract
+from pipeline import builders, datasets, fetch
+from pipeline.errors import UnexpectedFailure
+from pipeline.sources import bse_eqd_contract, nse_fo_contract
 
 FIXTURE = Path(__file__).parent / "fixtures" / "bse_eqd_contract_sample.csv"
 
@@ -277,3 +285,349 @@ def test_an_unreadable_or_split_underlying_id_stands_in():
 def test_anything_but_the_contract_file_is_refused(payload: bytes):
     with pytest.raises(bse_eqd_contract.MalformedContractFile):
         bse_eqd_contract.parse_freeze_limits(payload)
+
+
+# ── builder ─────────────────────────────────────────────────────────────────
+
+# File D is written around 17:40 IST on D, for the next session.
+FILE_DAY = date(2026, 10, 14)
+TARGET = date(2026, 10, 15)
+OUT_NAME = "bse_fno_freeze_limits_all.parquet"
+
+
+@pytest.fixture
+def spec(tmp_path: Path) -> datasets.DatasetSpec:
+    return dataclasses.replace(datasets.BSE_FNO_FREEZE_LIMITS, base_dir=tmp_path / "fno")
+
+
+@pytest.fixture(autouse=True)
+def _no_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fetch.time, "sleep", lambda *_a, **_k: None)
+
+
+def _build(
+    spec: datasets.DatasetSpec,
+    text: str | bytes | None = None,
+    *,
+    file_day: date = FILE_DAY,
+    target: date = TARGET,
+    min_rows: int = 5,
+    trading: bool = True,
+):
+    body = text if isinstance(text, bytes) else _zip(text)
+
+    def fetch_limits(_d: date) -> tuple[date, pd.DataFrame]:
+        _named_day, limits = bse_eqd_contract.parse_freeze_limits(body)
+        return file_day, limits
+
+    return builders.build_bse_fno_freeze_limits(
+        spec,
+        target,
+        fetch_limits=fetch_limits,
+        trading_day=lambda d: trading and d.weekday() < 5,
+        min_rows=min_rows,
+    )
+
+
+def _out(spec: datasets.DatasetSpec) -> pd.DataFrame:
+    return pd.read_parquet(spec.base_dir / OUT_NAME).set_index(["symbol", "product"])
+
+
+def _quantity(spec: datasets.DatasetSpec, symbol: str, product: str) -> int:
+    return int(_out(spec).loc[(symbol, product), "max_order_quantity"])
+
+
+def _first(spec: datasets.DatasetSpec) -> None:
+    """A published file from the day before (file 13 Oct, for 14 Oct)."""
+    status = _build(spec, file_day=date(2026, 10, 13), target=date(2026, 10, 14))
+    assert status.status == "success", status.message
+
+
+def test_a_good_run_publishes_a_row_per_underlying_and_product_dated_by_its_file(
+    spec: datasets.DatasetSpec,
+):
+    status = _build(spec)
+    assert status.status == "success", status.message
+    out = pd.read_parquet(spec.base_dir / OUT_NAME)
+    assert list(out.columns) == [
+        "symbol",
+        "kind",
+        "product",
+        "underlying_id",
+        "lot_size",
+        "max_order_quantity",
+        "basis",
+        "date",
+        "source",
+    ]
+    assert len(out) == 16 and not out.duplicated(["symbol", "product"]).any()
+    assert (out["date"] == pd.Timestamp(FILE_DAY)).all()
+    assert set(out["source"]) == {"bse-eqd-contract"}
+    # The run says how many underlyings BSE shows no limit for.
+    assert "1 underlying with no exchange limit" in status.message, status.message
+
+
+def test_the_published_file_is_typed_for_the_client(spec: datasets.DatasetSpec):
+    _build(spec)
+    schema = pq.read_schema(spec.base_dir / OUT_NAME)
+    for name in ("symbol", "kind", "product", "basis", "source"):
+        assert schema.field(name).type == pa.string(), name
+    for name in ("underlying_id", "lot_size", "max_order_quantity"):
+        assert schema.field(name).type == pa.int64(), name
+    assert schema.field("date").type == pa.timestamp("ms")
+
+
+def test_a_holiday_does_not_restamp_the_list(spec: datasets.DatasetSpec):
+    assert _build(spec, trading=False).status == "skipped_holiday"
+    assert not (spec.base_dir / OUT_NAME).exists()
+
+
+def test_an_older_file_never_replaces_a_newer_one(spec: datasets.DatasetSpec):
+    assert _build(spec).status == "success"
+    higher = _set(_csv(), "SENSEX", "MaxTradQty", "1500", product="F")
+    older = _build(spec, higher, file_day=date(2026, 10, 13))
+    assert older.status == "skipped_idempotent", older.message
+    assert _quantity(spec, "SENSEX", "futures") == 500
+
+
+def test_the_same_day_s_file_posted_again_is_read_again(spec: datasets.DatasetSpec):
+    assert _build(spec).status == "success"
+    corrected = _set(_csv(), "SENSEX", "MaxTradQty", "400", product="F")
+    status = _build(spec, corrected)
+    assert status.status == "success", status.message
+    assert _quantity(spec, "SENSEX", "futures") == 400
+
+
+def test_a_failed_fetch_keeps_the_list_we_had(spec: datasets.DatasetSpec):
+    assert _build(spec).status == "success"
+    status = _build(spec, b"<html>Access Denied</html>")
+    assert status.status == "skipped_idempotent", status.message
+    assert len(_out(spec)) == 16
+
+
+def test_a_first_run_with_nothing_to_keep_fails(spec: datasets.DatasetSpec):
+    assert _build(spec, b"<html>Access Denied</html>").status == "failed"
+    assert not (spec.base_dir / OUT_NAME).exists()
+
+
+def test_a_truncated_file_is_not_published(spec: datasets.DatasetSpec):
+    status = _build(spec, _without(_csv(), *STOCK_SYMBOLS), min_rows=8)
+    assert status.status == "failed" and "floor" in status.message
+
+
+def test_an_underlying_that_left_is_carried_forward_and_the_rest_still_publish(
+    spec: datasets.DatasetSpec,
+):
+    _first(spec)
+    lowered = _set(_without(_csv(), "RELIANCE"), "BANKEX", "MaxTradQty", "450", product="O")
+    status = _build(spec, lowered)
+    assert status.status == "success", status.message
+    assert "RELIANCE/futures" in status.message
+    assert _quantity(spec, "BANKEX", "options") == 450  # the lower limit is not withheld
+    assert _quantity(spec, "RELIANCE", "options") == 10000  # carried, so no row is lost
+    assert len(_out(spec)) == 16
+
+
+def test_an_underlying_still_listed_never_gets_its_old_limit_back(spec: datasets.DatasetSpec):
+    _first(spec)
+
+    def lowered_with_a_blank(n: int, row: dict[str, str]) -> None:
+        if row["FinInstrmNm"] == "IO":
+            row["MaxTradQty"] = "" if n == 0 else "800"
+
+    status = _build(spec, _edit(_csv(), "BANKEX", lowered_with_a_blank))
+    assert status.status == "success", status.message
+    row = _out(spec).loc[("BANKEX", "options")]
+    assert (row["max_order_quantity"], row["basis"]) == (30, "stand_in")
+
+
+def test_many_stand_ins_mean_the_format_changed_and_fail(spec: datasets.DatasetSpec):
+    _first(spec)
+    text = _csv()
+    for symbol in ["SENSEX", "BANKEX"]:
+        text = _set(text, symbol, "MinLot", "")
+    status = _build(spec, text)
+    assert status.status == "failed", status.message
+    assert _quantity(spec, "SENSEX", "options") == 1000
+
+
+def test_many_rows_missing_is_a_partial_file_not_an_exit(spec: datasets.DatasetSpec):
+    _first(spec)
+    status = _build(spec, _without(_csv(), "RELIANCE", "BAJFINANCE"), min_rows=5)
+    assert status.status == "failed", status.message
+    assert len(_out(spec)) == 16
+
+
+def test_limits_a_trading_day_behind_are_loud_whatever_the_cause(spec: datasets.DatasetSpec):
+    # File D serves session D+1: a run on D+1 holding file D is current.
+    _first(spec)
+    stale = _build(spec, file_day=date(2026, 10, 13), target=date(2026, 10, 15))
+    assert stale.status == "failed", stale.message
+    unreachable = _build(spec, b"<html>Access Denied</html>", target=date(2026, 10, 15))
+    assert unreachable.status == "failed", unreachable.message
+    assert len(_out(spec)) == 16
+
+
+# BSE's "not set" value: one lot, never a limit, and never a broken file
+# passed off as "no limits".
+
+
+def test_not_set_rows_are_not_stand_ins_so_bse_s_75_never_trip_the_churn_guard(
+    spec: datasets.DatasetSpec,
+):
+    text = _csv()
+    for symbol in ["ADANIENT", "BAJFINANCE", "RELIANCE"]:
+        text = _set(text, symbol, "MaxTradQty", "100000000")
+    status = _build(spec, text)  # a first run: 8 not-set rows, churn allows 3
+    assert status.status == "success", status.message
+    assert "4 underlyings with no exchange limit" in status.message
+    assert _quantity(spec, "RELIANCE", "futures") == 500
+
+
+def test_an_index_showing_the_not_set_value_fails_the_run(spec: datasets.DatasetSpec):
+    _first(spec)
+    status = _build(spec, _set(_csv(), "SENSEX", "MaxTradQty", "100000000", product="F"))
+    assert status.status == "failed", status.message
+    assert "SENSEX" in status.message
+    assert _quantity(spec, "SENSEX", "futures") == 500  # nothing written
+
+
+def test_an_index_showing_the_not_set_value_fails_even_a_first_run(spec: datasets.DatasetSpec):
+    status = _build(spec, _set(_csv(), "SENSEX50", "MaxTradQty", "100000000", product="O"))
+    assert status.status == "failed", status.message
+    assert not (spec.base_dir / OUT_NAME).exists()
+
+
+def test_a_jump_in_not_set_rows_past_churn_fails_the_run(spec: datasets.DatasetSpec):
+    _first(spec)
+    text = _csv()
+    for symbol in ["ADANIENT", "BAJFINANCE"]:  # 4 rows newly not set; churn allows 3
+        text = _set(text, symbol, "MaxTradQty", "100000000")
+    status = _build(spec, text)
+    assert status.status == "failed", status.message
+    assert "no exchange limit" in status.message
+    assert _quantity(spec, "ADANIENT", "options") == 9000
+
+
+def test_not_set_rows_within_churn_publish(spec: datasets.DatasetSpec):
+    _first(spec)
+    status = _build(spec, _set(_csv(), "ADANIENT", "MaxTradQty", "100000000"))
+    assert status.status == "success", status.message
+    row = _out(spec).loc[("ADANIENT", "options")]
+    assert (row["max_order_quantity"], row["basis"]) == (309, "no_exchange_limit")
+
+
+def test_a_run_never_touches_nse_s_file(tmp_path: Path):
+    # Both live in data/fno; the NSE file's bytes and manifest entry stay its own.
+    from pipeline import manifest
+
+    base = tmp_path / "fno"
+    nse = dataclasses.replace(datasets.FNO_FREEZE_LIMITS, base_dir=base)
+    bse = dataclasses.replace(datasets.BSE_FNO_FREEZE_LIMITS, base_dir=base)
+    nse_body = (Path(__file__).parent / "fixtures" / "nse_fo_contract_sample.csv.gz").read_bytes()
+    nse_status = builders.build_fno_freeze_limits(
+        nse,
+        date(2026, 10, 1),
+        fetch_limits=lambda _d: (date(2026, 10, 1), nse_fo_contract.parse_freeze_limits(nse_body)),
+        trading_day=lambda _d: True,
+        min_rows=5,
+    )
+    assert nse_status.status == "success", nse_status.message
+    nse_path = base / "fno_freeze_limits_all.parquet"
+    before = hashlib.sha256(nse_path.read_bytes()).hexdigest()
+    assert _build(bse).status == "success"
+    assert hashlib.sha256(nse_path.read_bytes()).hexdigest() == before
+    m = manifest.build_manifest([nse, bse], latest_trading_date=TARGET, generated_at="t")
+    files = {e["name"]: [f["name"] for f in e["baseline"]] for e in m["datasets"]}
+    assert files == {
+        "fno_freeze_limits": ["fno_freeze_limits_all.parquet"],
+        "bse_fno_freeze_limits": [OUT_NAME],
+    }
+
+
+def test_both_venues_mark_rows_with_the_same_basis_words():
+    assert bse_eqd_contract.BASIS_EXCHANGE == nse_fo_contract.BASIS_EXCHANGE
+    assert bse_eqd_contract.BASIS_STAND_IN == nse_fo_contract.BASIS_STAND_IN
+
+
+# ── fetch ───────────────────────────────────────────────────────────────────
+
+
+@responses.activate
+def test_the_fetch_reads_the_rolling_zip_as_a_browser_and_dates_it_by_its_csv():
+    # python-requests' own User-Agent gets 403 from bseindia.com (2026-10-15).
+    responses.add(responses.GET, bse_eqd_contract.URL, body=_zip(), status=200)
+    day, limits = builders._fetch_bse_freeze_limits(date(2026, 10, 15))
+    assert day == FILE_DAY
+    assert len(limits) == 16
+    (call,) = responses.calls
+    assert call.request.headers["User-Agent"] == fetch._BROWSER_UA
+
+
+@responses.activate
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [(403, b"<HTML>Access Denied</HTML>"), (404, b"gone"), (500, b"oops")],
+)
+def test_a_refused_fetch_raises_after_its_retries(status: int, body: bytes):
+    responses.add(responses.GET, bse_eqd_contract.URL, body=body, status=status)
+    with pytest.raises(UnexpectedFailure):
+        builders._fetch_bse_freeze_limits(date(2026, 10, 15))
+    assert len(responses.calls) == 3
+
+
+@responses.activate
+def test_a_wrong_document_served_with_200_is_refused():
+    responses.add(responses.GET, bse_eqd_contract.URL, body=b"<html>maint</html>", status=200)
+    with pytest.raises(bse_eqd_contract.MalformedContractFile):
+        builders._fetch_bse_freeze_limits(date(2026, 10, 15))
+
+
+# ── registration ────────────────────────────────────────────────────────────
+
+
+def test_bse_fno_freeze_limits_spec_fields():
+    s = datasets.BSE_FNO_FREEZE_LIMITS
+    assert (s.key, s.file_prefix, s.manifest_name, s.schema_version) == (
+        "bse_fno_freeze_limits",
+        "bse_fno_freeze_limits",
+        "bse_fno_freeze_limits",
+        1,
+    )
+    assert s.source_label == bse_eqd_contract.SOURCE
+    assert s.derived is True and s.external is False and s.published is True
+    assert datasets.DATASETS["bse_fno_freeze_limits"] is s
+    assert datasets.by_manifest_name("bse_fno_freeze_limits") is s
+    assert s in datasets.all_specs()
+    with pytest.raises(RuntimeError, match="derived dataset has no fetcher"):
+        s.make_fetcher()
+    # NSE's spec is unchanged: same file, schema v1.
+    n = datasets.FNO_FREEZE_LIMITS
+    assert (n.file_prefix, n.manifest_name, n.schema_version) == (
+        "fno_freeze_limits",
+        "fno_freeze_limits",
+        1,
+    )
+
+
+def test_bse_fno_freeze_limits_is_built_by_the_daily_loop():
+    from pipeline import cli
+
+    built = cli.builders.BUILDERS["bse_fno_freeze_limits"]
+    assert built is cli.builders.build_bse_fno_freeze_limits
+    order = datasets.DATASET_ORDER
+    assert order.index("bse_fno_freeze_limits") == order.index("fno_freeze_limits") + 1
+
+
+def test_the_manifest_lists_the_published_file(spec: datasets.DatasetSpec):
+    from pipeline import manifest, publish
+
+    _build(spec)
+    m = manifest.build_manifest([spec], latest_trading_date=TARGET, generated_at="t")
+    (entry,) = m["datasets"]
+    assert entry["name"] == "bse_fno_freeze_limits"
+    assert entry["latest_date"] == FILE_DAY.isoformat()
+    (f,) = entry["baseline"]
+    assert f["name"] == OUT_NAME and f["rows"] == 16
+    prefixes = frozenset(s.file_prefix for s in datasets.all_specs())
+    assert publish.owns_asset(f["asset"], file_prefixes=prefixes)

@@ -29,6 +29,7 @@ tmp dirs via the registered `BUILDERS` entries must monkeypatch
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -43,9 +44,10 @@ from pipeline import calendar as cal
 from pipeline import config, market_calendar
 from pipeline.daily_update import RunStatus
 from pipeline.datasets import DatasetSpec
-from pipeline.errors import NotYetPublished
-from pipeline.fetch import _BROWSER_UA, _fetch_with_retry
+from pipeline.errors import NotYetPublished, UnexpectedFailure
+from pipeline.fetch import _BROWSER_UA, _MAX_RETRIES, _TIMEOUT, _fetch_with_retry
 from pipeline.sources import (
+    bse_eqd_contract,
     classification_publication,
     nse_constituents,
     nse_corporate_actions,
@@ -1668,6 +1670,121 @@ def build_fno_freeze_limits(
         spec,
         target,
         _NSE_FREEZE_LEG,
+        fetch_limits=fetch_limits,
+        trading_day=trading_day,
+        min_rows=min_rows,
+    )
+
+
+# BSE's limits, per (underlying, product), in their own file: NSE's file and
+# its readers stay as they are.
+_BSE_FNO_LIMIT_COLUMNS: list[str] = [*bse_eqd_contract.LIMIT_COLUMNS, "date", "source"]
+_BSE_FNO_LIMIT_SCHEMA = pa.schema(
+    [
+        ("symbol", pa.string()),
+        ("kind", pa.string()),
+        ("product", pa.string()),
+        ("underlying_id", pa.int64()),
+        ("lot_size", pa.int64()),
+        ("max_order_quantity", pa.int64()),
+        ("basis", pa.string()),
+        ("date", pa.timestamp("ms")),
+        ("source", pa.string()),
+    ]
+)
+
+
+def _fetch_bse_freeze_limits(_target: date) -> tuple[date, pd.DataFrame]:
+    """BSE's rolling contract master and the day it is for (named in the
+    zip, not by the run: there is no dated archive to walk back through).
+
+    bseindia.com refuses python-requests' own User-Agent (403) and serves the
+    file to a browser's; nothing else is needed. Anything but HTTP 200 is
+    retried, then raised: the builder keeps the published file.
+    """
+    last = ""
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": _BROWSER_UA})
+        for attempt in range(_MAX_RETRIES):
+            resp = session.get(bse_eqd_contract.URL, timeout=_TIMEOUT)
+            if resp.status_code == 200:
+                return bse_eqd_contract.parse_freeze_limits(resp.content)
+            last = f"HTTP {resp.status_code}"
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(2**attempt)
+    raise UnexpectedFailure(f"BSE contract master: {last}")
+
+
+def _not_set(frame: pd.DataFrame) -> pd.DataFrame:
+    if "basis" not in frame.columns:
+        return frame.iloc[0:0]
+    return frame[frame["basis"] == bse_eqd_contract.BASIS_NOT_SET]
+
+
+def _bse_refuse(limits: pd.DataFrame, prior: pd.DataFrame | None, churn: int) -> str | None:
+    """BSE's "not set" value must never pass off a broken file as "no limits":
+      - an index always has a limit, so one showing the value fails the run;
+      - more products newly showing it than routine churn fails the run."""
+    unset = _not_set(limits)
+    indices = sorted(_key_labels(unset[unset["kind"] == "index"], ("symbol", "product")))
+    if indices:
+        return f"an index shows BSE's no-limit value: {', '.join(indices)}"
+    if prior is None or not {"symbol", "product"} <= set(prior.columns):
+        return None
+    before = set(_key_labels(_not_set(prior), ("symbol", "product")))
+    newly = sorted(set(_key_labels(unset, ("symbol", "product"))) - before)
+    if len(newly) > churn:
+        return (
+            f"{len(newly)} products newly show no exchange limit (over {churn}; "
+            f"broken file?): {', '.join(newly[:15])}"
+        )
+    return None
+
+
+def _bse_describe(limits: pd.DataFrame) -> str:
+    unset = _not_set(limits)["symbol"].nunique()
+    indices = limits.loc[limits["kind"] == "index", "symbol"].nunique()
+    noun = "underlying" if unset == 1 else "underlyings"
+    return (
+        f"{len(limits)} limits for {limits['symbol'].nunique()} underlyings "
+        f"({indices} indices; {unset} {noun} with no exchange limit, at one lot)"
+    )
+
+
+_BSE_FREEZE_LEG = _FreezeLeg(
+    key=("symbol", "product"),
+    columns=_BSE_FNO_LIMIT_COLUMNS,
+    schema=_BSE_FNO_LIMIT_SCHEMA,
+    source=bse_eqd_contract.SOURCE,
+    admit=lambda limits, _prior: limits,  # BSE lists no test series
+    refuse=_bse_refuse,
+    describe=_bse_describe,
+)
+
+
+def build_bse_fno_freeze_limits(
+    spec: DatasetSpec,
+    target: date,
+    *,
+    fetch_limits: Callable[[date], tuple[date, pd.DataFrame]] = _fetch_bse_freeze_limits,
+    trading_day: Callable[[date], bool] = _cas_trading_day,
+    min_rows: int = config.BSE_FNO_FREEZE_LIMITS_MIN_ROWS,
+) -> RunStatus:
+    """Full-rewrite `bse_fno_freeze_limits_all.parquet`: per BSE F&O
+    underlying and product (futures, options), its kind, BSE's underlying
+    code, lot size, the largest single order BSE takes (`max_order_quantity`,
+    as the exchange gives it) and its `basis`. `date` is the day the contract
+    file names (file D, written around 17:40 IST, for session D+1).
+
+    The guards are `_build_freeze_limits`'s, NSE's too. BSE's own: its "not
+    set" value is published as one lot (`basis` no_exchange_limit), not
+    counted as a stand-in, and fails the run on an index or when more
+    products newly show it than churn allows.
+    """
+    return _build_freeze_limits(
+        spec,
+        target,
+        _BSE_FREEZE_LEG,
         fetch_limits=fetch_limits,
         trading_day=trading_day,
         min_rows=min_rows,

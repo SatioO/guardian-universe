@@ -238,6 +238,22 @@ FNO_FREEZE_LIMITS = DatasetSpec(
     derived=True,
 )
 
+BSE_FNO_FREEZE_LIMITS = DatasetSpec(
+    key="bse_fno_freeze_limits", file_prefix="bse_fno_freeze_limits",
+    base_dir=config.FNO_FREEZE_LIMITS_DIR,
+    source_label="bse-eqd-contract",
+    normalizer=lambda df: df,  # identity: build_bse_fno_freeze_limits shapes rows itself
+    make_fetcher=_no_fetcher,  # fetched inside the builder, not via run_daily
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="bse_fno_freeze_limits", schema_version=1,
+    # The largest single order BSE takes per F&O underlying AND product
+    # (futures and options differ: SENSEX 500/1000), from BSE's daily
+    # contract master. Its own file rather than rows in fno_freeze_limits:
+    # installed apps read that one as one NSE limit per symbol. A current
+    # SNAPSHOT refreshed on every daily run, like fno_freeze_limits.
+    derived=True,
+)
+
 MARKET_CALENDAR = DatasetSpec(
     key="market_calendar", file_prefix="market_calendar",
     base_dir=config.MARKET_CALENDAR_DIR,
@@ -331,6 +347,7 @@ DATASETS: dict[str, DatasetSpec] = {
     "index_constituents": INDEX_CONSTITUENTS,
     "cas_eligible": CAS_ELIGIBLE,
     "fno_freeze_limits": FNO_FREEZE_LIMITS,
+    "bse_fno_freeze_limits": BSE_FNO_FREEZE_LIMITS,
     "market_calendar": MARKET_CALENDAR,
     "corporate_actions": CORPORATE_ACTIONS,
 }
@@ -338,7 +355,7 @@ DATASET_ORDER: list[str] = [
     "equities", "indices", "reference", "sector_industry",
     "classification_registry", "classification_observations",
     "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
-    "market_calendar", "corporate_actions",
+    "bse_fno_freeze_limits", "market_calendar", "corporate_actions",
 ]
 
 # Manifest names this producer published once and has since retired: the price
