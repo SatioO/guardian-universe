@@ -37,6 +37,7 @@ import json
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 FILENAME = "market_calendar.json"
 
@@ -166,7 +167,7 @@ def _seconds(raw: object, where: str) -> int:
     return seconds
 
 
-def _session(raw: dict, venue_source: str, where: str) -> Session:
+def _session(raw: dict[str, Any], venue_source: str, where: str) -> Session:
     day = _day(raw.get("date"), where)
     label = str(raw.get("label", "")).strip() or "session"
     source = str(raw.get("source", "")).strip() or venue_source
@@ -185,7 +186,7 @@ def _session(raw: dict, venue_source: str, where: str) -> Session:
     return Session(day, label, source, pre_open, open_, close)
 
 
-def _venue(venue_id: str, raw: dict) -> Venue:
+def _venue(venue_id: str, raw: dict[str, Any]) -> Venue:
     where = f"{FILENAME} {venue_id}"
     source = str(raw.get("source", "")).strip()
     if not source:
@@ -229,7 +230,7 @@ def _venue(venue_id: str, raw: dict) -> Venue:
     return Venue(venue_id, source, frozenset(closures), sessions, frozenset(covered))
 
 
-def parse(doc: dict) -> MarketCalendar:
+def parse(doc: dict[str, Any]) -> MarketCalendar:
     """Validate and type the calendar document."""
     venues = doc.get("venues")
     if not isinstance(venues, dict):
