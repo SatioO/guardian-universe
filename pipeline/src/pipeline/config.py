@@ -205,6 +205,17 @@ CA_HISTORY_REQUEST_SPACING_S: float = 3.0
 # an action from as little as two days before its ex-date.
 CA_HISTORY_CATCHUP_DAYS: int = 5
 
+# Securities NSE opens through a Special Pre-Open Session, by the session
+# they open in, accumulated from its daily security master
+# (special_pre_open.build_special_pre_open). A first build seeds this many
+# trading days back.
+SPECIAL_PRE_OPEN_DIR: Path = DATA_DIR / "special_pre_open"
+SPECIAL_PRE_OPEN_SEED_DAYS: int = 20
+# The security master lists every NSE capital-market security, about 38,000
+# rows (38,106 on 2026-10-15). Under 10,000 is a truncated or partial file,
+# whose missing rows could hide a special pre-open security.
+SPECIAL_PRE_OPEN_MIN_SECURITIES: int = 10_000
+
 # F&O quantity-freeze limits: the largest single order NSE takes per
 # underlying, from the daily contract file. A daily current snapshot.
 FNO_FREEZE_LIMITS_DIR: Path = DATA_DIR / "fno"

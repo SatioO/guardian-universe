@@ -357,6 +357,23 @@ CORPORATE_ACTIONS_HISTORY = DatasetSpec(
     derived=True,
 )
 
+SPECIAL_PRE_OPEN = DatasetSpec(
+    key="special_pre_open", file_prefix="special_pre_open",
+    base_dir=config.SPECIAL_PRE_OPEN_DIR,
+    source_label="nse-cm-security",
+    normalizer=lambda df: df,  # identity: build_special_pre_open shapes rows itself
+    make_fetcher=_no_fetcher,  # fetched inside the builder, not via run_daily
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="special_pre_open", schema_version=1,
+    # The securities NSE opens through a Special Pre-Open Session (an IPO's
+    # first day, a relisting, a restructuring's ex-date), keyed by the
+    # session they open in, from the security master NSE posts the evening
+    # before. ACCUMULATED by session (the newest file replaces its session's
+    # rows); `date` is the newest session covered. The desktop app settles
+    # these instruments' opening price at 09:55, not 09:12.
+    derived=True,
+)
+
 DATASETS: dict[str, DatasetSpec] = {
     "equities": EQUITIES, "indices": INDICES, "reference": REFERENCE,
     "sector_industry": SECTOR_INDUSTRY,
@@ -370,13 +387,14 @@ DATASETS: dict[str, DatasetSpec] = {
     "market_calendar": MARKET_CALENDAR,
     "corporate_actions": CORPORATE_ACTIONS,
     "corporate_actions_history": CORPORATE_ACTIONS_HISTORY,
+    "special_pre_open": SPECIAL_PRE_OPEN,
 }
 DATASET_ORDER: list[str] = [
     "equities", "indices", "reference", "sector_industry",
     "classification_registry", "classification_observations",
     "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
     "bse_fno_freeze_limits", "market_calendar", "corporate_actions",
-    "corporate_actions_history",
+    "corporate_actions_history", "special_pre_open",
 ]
 
 # Manifest names this producer published once and has since retired: the price

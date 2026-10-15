@@ -51,6 +51,7 @@ from pipeline.snapshot import create_snapshot, prune_snapshots
 from pipeline.sources.classification_baseline import BaselineRun, run_approved_baseline
 from pipeline.sources.nse_universe import RegistryStatus, registry_needs_baseline_migration
 from pipeline.sources.screener_collector import CollectionDeferred, ScreenerClassificationCollector
+from pipeline.special_pre_open import build_special_pre_open
 from pipeline.sync import sync_store
 
 Runner = Callable[[list[str]], int]
@@ -141,6 +142,8 @@ builders.BUILDERS["corporate_actions"] = builders.build_corporate_actions
 # every row's ISIN against the `reference` instrument list, bound here as
 # `universe_spec` (DATASET_ORDER runs `reference` first). Same import-time
 # binding WARNING as above.
+# special_pre_open fetches NSE's security master itself; registered bare.
+builders.BUILDERS["special_pre_open"] = build_special_pre_open
 builders.BUILDERS["corporate_actions_history"] = functools.partial(
     build_corporate_actions_history, universe_spec=datasets.DATASETS["reference"]
 )

@@ -11,6 +11,9 @@ on:
     - cron: "15 11 * * 1-5"   # 16:45 IST
     - cron: "0 12 * * 1-5"    # 17:30 IST
     - cron: "30 13 * * 1-5"   # 19:00 IST
+    # NSE posts tomorrow's security master (special_pre_open's source) at
+    # about 19:20-19:40 IST; this rung reads it, the 21:00 rung retries.
+    - cron: "15 14 * * 1-5"   # 19:45 IST
     - cron: "30 15 * * 1-5"   # 21:00 IST — final rung; alerts if still not landed
   workflow_dispatch:
     inputs:
@@ -146,6 +149,25 @@ jobs:
           n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number' || true)
           if [ -z "$n" ]; then
             gh issue create --title "Data pipeline: bhavcopy not published by 21:00 IST" --label pipeline-failure --body "$body"
+          else
+            gh issue comment "$n" --body "$body"
+          fi
+      - name: Alert if tomorrow's special pre-open list never landed (final rung)
+        # special_pre_open reports `not_yet` while NSE has not posted the
+        # evening's security master, so the 19:45 rung can no-op silently.
+        # On the last rung that means the desktop app opens tomorrow with no
+        # special pre-open list (it then holds no instrument back to 10:00).
+        if: github.event.schedule == '30 15 * * 1-5'
+        working-directory: ${{ github.workspace }}
+        run: |
+          f=pipeline/data/meta/last_run_status_special_pre_open.json
+          [ -e "$f" ] || exit 0
+          [ "$(jq -r '.status // "missing"' "$f")" = "not_yet" ] || exit 0
+          gh label create pipeline-failure --color B60205 --force >/dev/null 2>&1 || true
+          body="data-daily: NSE's security master for $(date -u +%F) was not posted by the final retry (21:00 IST), so tomorrow's special pre-open list is missing. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          n=$(gh issue list --label pipeline-failure --state open --json number -q '.[0].number' || true)
+          if [ -z "$n" ]; then
+            gh issue create --title "Data pipeline: special pre-open list not published by 21:00 IST" --label pipeline-failure --body "$body"
           else
             gh issue comment "$n" --body "$body"
           fi
