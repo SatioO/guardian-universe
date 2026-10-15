@@ -1,0 +1,225 @@
+source,purpose,actions
+nse-api,Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share,split fv 10>2
+nse-api,Bonus 3:4,bonus 3:4
+nse-api,Dividend - Rs 0.50 Per Sh,dividend rs 0.5
+nse-api,Interim Dividend - Rs 1.26 Per Share,dividend rs 1.26
+nse-api,Extra Ordinary General Meeting,other
+nse-api,Annual General Meeting,other
+nse-api,Dividend - Rs 1.78 Per Share,dividend rs 1.78
+nse-api,Annual General Meeting/Dividend - Rs 17 Per Share,other; dividend rs 17
+nse-api,Rights 2:7 @ Premium Rs 22/-,rights 2:7 prm 22
+nse-api,Interim Dividend - Rs 0.50 Per Sh,dividend rs 0.5
+nse-api,Interim Dividend - Re 1 Per Sh,dividend rs 1
+nse-api,Interm Dividend - Rs 10 Per Share,dividend rs 10
+nse-api,Special Dividend - Rs 192 Per Share,dividend rs 192
+nse-api,Buy Back,other
+nse-api,Rights 613:399,rights 613:399
+nse-api,Extra General Meeting,other
+nse-api,Annual General Meeting/Dividend - Rs 40 Per Share/Special Dividend - Rs 90 Per Share,other; dividend rs 40; dividend rs 90
+nse-api,Interim Dividend - Rs 0.40 Per Share/ Special Dividend - Rs 0.60 Per Share,dividend rs 0.4; dividend rs 0.6
+nse-api,Interim Dividend - Re 1 Per Share,dividend rs 1
+nse-api,Buyback,other
+nse-api,Annual General Meeting/ Dividend - Rs 36 Per Share,other; dividend rs 36
+nse-api,Annual General Meeting/Dividend - Re 1 Per Share,other; dividend rs 1
+nse-api,Rights 12:25@ Premium Rs 0.60/-,rights 12:25 prm 0.6
+nse-api,Face Value Split (Sub-Division) - From Rs 10 Per Share To Re 1 Per Share,split fv 10>1
+nse-api,Face Value Split (Sub-Division) - From Rs 5/- Per Share To Re 1/- Per Share,split fv 5>1
+nse-api,Extra-Ordinary General Meting,other
+nse-api,Demerger,demerger
+nse-api,Special Dividend - Re 1 Per Share,dividend rs 1
+nse-api,Interim Dividend - Re 1 Per Share/ Special Dividend - Rs 2 Per Share,dividend rs 1; dividend rs 2
+nse-api,Interim Divdend,dividend
+nse-api,Interim Divdend - Rs 2 Per Share,dividend rs 2
+nse-api,Interim Dividend - Rs. 8 Per Share,dividend rs 8
+nse-api,Interim Dividend - Rs 4 Per Share/Special Dividend - Rs 12 Per Share,dividend rs 4; dividend rs 12
+nse-api,Interim Dividend - Rs 6.25 Per Shar,dividend rs 6.25
+nse-api,Interest Dividend - Re 1 Per Share,dividend rs 1
+nse-api,Int Dividend - Rs 0.75 Per Share,dividend rs 0.75
+nse-api,Interim Dividend,dividend
+nse-api,Rights 3:10@ Premium Rs 220 Per Share,rights 3:10 prm 220
+nse-api,Dividend - Rs 3 Per Share/Special Dividend - Rs 2 Per Sh,dividend rs 3; dividend rs 2
+nse-api,Entra Ordinary General Meeting,other
+nse-api,Interim Dividend Re 1.58 Per Share,dividend rs 1.58
+nse-api,Annual General Meeting/Dividend - Rs 15 Per Share/ Special Dividend - Rs 7 Per Share,other; dividend rs 15; dividend rs 7
+nse-api,Rights Issue 4:17@ Premium Rs 390/-,rights 4:17 prm 390
+nse-api,Interim Dividend - Rs 25 Per Sh/Dividend - Rs 65 Per Share,dividend rs 25; dividend rs 65
+nse-api,Interim Dividend Rs 18 Per Share,dividend rs 18
+nse-api,Interim Dividend - Rs 2/- Per Share,dividend rs 2
+nse-api,Interim Dividend Rs - 2.10 Per Share,dividend rs 2.1
+nse-api,Rights 1:20 @ Premium Rs. 440/-,rights 1:20 prm 440
+nse-api,Interim Dividend - Re 1 Per Share/Special Dividend - Re 1 Per Share,dividend rs 1; dividend rs 1
+nse-api,Dividend- Rs 1.1 Per Share,dividend rs 1.1
+nse-api,Extra Ordinary Annual General Meeting,other
+nse-api,Annual General Meeting/Final Dividend- Re 1 Per Share/Special Dividend- Rs 0.40 Per Share,other; dividend rs 1; dividend rs 0.4
+nse-api,Annual General Meeting/Interim Dividend - Rs 6.50 Per Sh,other; dividend rs 6.5
+nse-api,Annual General Meeting/ Dividend - Re 1 Per Share,other; dividend rs 1
+nse-api,Bonus- 1:2,bonus 1:2
+nse-api,Annual General Meeting/Dividend - Rs 10 Per Share/Special Dividend- Rs 5 Per Share,other; dividend rs 10; dividend rs 5
+nse-api,Dividend - Rs 0.50 Per Share/Special Dividend - Rs 0.50 Per Share,dividend rs 0.5; dividend rs 0.5
+nse-api,Dividend - Re 1 Per Share,dividend rs 1
+nse-api,Dividend - Rs 30 Per Share/Special Dividend- Rs 60 Per Share,dividend rs 30; dividend rs 60
+nse-api,Interim Dividend- Rs 8 Per Share,dividend rs 8
+nse-api,Dividend - Re 1 Per Sh,dividend rs 1
+nse-api,Annual General Meeting/Special Dividend - Rs 15 Per Share/Dividend - Rs 15 Per Share,other; dividend rs 15; dividend rs 15
+nse-api,Annual General Meeting/Dividend - Rs. 9.50 Per Share,other; dividend rs 9.5
+nse-api,Annual General Meeting/Dividend - Rs 7 Per Sh,other; dividend rs 7
+nse-api,Capital Reduction Pursuant To Nclt Order,capital_reduction
+nse-api,Annual General Meeting/Dividend - Rs 2.70 Per Share/ Special Dividend- Rs 1.50 Per Share,other; dividend rs 2.7; dividend rs 1.5
+nse-api,Annual General Meeting/Dividend - Rs 145 Per Share/Special Dividend- 130 Per Share,other; dividend rs 145; dividend
+nse-api,Special Dividend - Rs 193 Per Sh,dividend rs 193
+nse-api,Dividend - Re 0.85 Per Share/ Special Dividend - Re 0.70 Per Share,dividend rs 0.85; dividend rs 0.7
+nse-api,Annual General Meeting/Dividend - Rs Per Share,other; dividend
+nse-api,Annual General Meeting/Interim Dividend - Rs 4 Per Share,other; dividend rs 4
+nse-api,Annual General Meetin/Dividend - Rs 0.70 Per Share,other; dividend rs 0.7
+nse-api,Annual General Meeting/Dividend - R E 1 Per Share,other; dividend
+nse-api,Annual General Meeting/Dividend - Rs 3 Per Share/Special Dividend Rs 3 Per Share,other; dividend rs 3; dividend rs 3
+nse-api,Annual General Meetingdividend - Rs 1.20 Per Share,dividend rs 1.2
+nse-api,Annual General Meeting/Dividend - Re 0.50 Per Sh,other; dividend rs 0.5
+nse-api,Interim Dividend - Re 1 Per Share/Special Dividend- Rs 5 Per Share,dividend rs 1; dividend rs 5
+nse-api,Annual General Meetingdividend - Re 1 Per Share,dividend rs 1
+nse-api,Annual General Meeting/Dividend-Rs 0.50 Per Share,other; dividend rs 0.5
+nse-api,Extra-Ordinary General Meeting,other
+nse-api,Special Interim Dividend - Rs 7.50 Per Share,dividend rs 7.5
+nse-api,Extra- Ordinary General Meeting,other
+nse-api,Interim Dividend - Rs 3.57 Per Share & Special Dividend - Rs 2 Per Share,dividend rs 3.57; dividend rs 2
+nse-api,Specia Ldividend - Rs 850 Per Share,dividend rs 850
+nse-api,Scheme Of Arrangement - Bonus Ncrps 1:10,scheme
+nse-api,Interim Dividend - Rs 8 Per Share Special Dividend - Rs 67 Per Share,dividend rs 8; dividend rs 67
+nse-api,Interim Dividend - Rs 15 Per Share & Special Dividend Rs 25 Per Share,dividend rs 15; dividend rs 25
+nse-api,Interim Dividend - Rs 09 Per Share / Special Dividend - Rs 13 Per Share,dividend rs 9; dividend rs 13
+nse-api,Rights 1:50 @ Premium Rs 690/- With 17 Warrants For 50 Equity Shares,rights 1:50 prm 690
+nse-api,Bonus Ncrps 1:116,other
+nse-api,Final Dividend - Rs 75 Per Share,dividend rs 75
+nse-api,Special Interim Dividend - Re 1 Per Share,dividend rs 1
+nse-api,Final Dividend - Rs 194/ Special Dividend - Rs 183 Per Share,dividend rs 194; dividend rs 183
+nse-api,Extra Oridinary General Meeting,other
+nse-api,Dividend - Rs 6.75 Per Share /Special Dividend - Rs 2.75 Per Share,dividend rs 6.75; dividend rs 2.75
+nse-api,Annual General Meeting/Dividend - Re 1 Per Share/ Special Dividend - Rs 14 Per Share,other; dividend rs 1; dividend rs 14
+nse-api,Dividend - Rs 3 Per Share/ Special Dividend - Rs 2.50 Per Share,dividend rs 3; dividend rs 2.5
+nse-api,Dividend - Rs12 Per Share,dividend rs 12
+nse-api,Annual General Meeting/Dividend - Rs 1.50 Per Share/ Special Dividend - Re 1 Per Share,other; dividend rs 1.5; dividend rs 1
+nse-api,Dividend - Rs 4 Per Share/ Special Dividend - Re 0.50 Per Share,dividend rs 4; dividend rs 0.5
+nse-api,Annual General Meeting/Dividend- Rs 2.70 Per Share,other; dividend rs 2.7
+nse-api,Dividend - Rs 180 Per Share/ Special Dividend Rs 145 Per Share,dividend rs 180; dividend rs 145
+nse-api,Rights 1:2 @ Premium Re 1.50/-,rights 1:2 prm 1.5
+nse-api,Annual General Meetingdividend - Re 1 Per Sh,dividend rs 1
+nse-api,Annual General Meeting/Dividend - Rs 2.50 Per Share/Special Dividend 2.50 Per Share,other; dividend rs 2.5; dividend
+nse-api,Annual General Meeting/Dividend - Rs 1.50 Per Share/Special Dividend - Re 1 Per Share,other; dividend rs 1.5; dividend rs 1
+nse-api,Annual General Meeting/Dividend - Rs 4.50 Per Share/Special Dividend -Rs 7.50 Per Share,other; dividend rs 4.5; dividend rs 7.5
+nse-api,Annual General Meeting/Dividend - Re 0.25 Per Share/Special Dividend Re 0.25 Per Share,other; dividend rs 0.25; dividend rs 0.25
+nse-api,Dividend - Rs.4.35 Per Share,dividend rs 4.35
+nse-api,Dividend - Re 0.75 Per Share/Special Dividend - Re 0.75 Per Share,dividend rs 0.75; dividend rs 0.75
+nse-api,Annual General Meeting//Dividend - Rs 0.50 Per Share,other; dividend rs 0.5
+nse-api,Inteim Dividend - Re 0.10 Per Share,dividend rs 0.1
+nse-api,Inteirm Dividend - Rs 30 Per Share,dividend rs 30
+nse-api,Face Value Split (Sub-Division) - From Rs10/- Per Share To Re 1/- Per Share,split fv 10>1
+nse-api,Face Value Split (Sub-Division) - From Rs10/- Per Share To Rs 5/- Per Share,split fv 10>5
+nse-api,Interim Dividend - Rs 1.30 Per Share/ Special Dividend - Re 1 Per Share,dividend rs 1.3; dividend rs 1
+nse-api,Special Dividend Rs -10 Per Share/Interim Dividend Rs - 26 Per Share,dividend rs 10; dividend rs 26
+nse-api,Annual General Meeting/Special Dividend - Rs 8 Per Share /Dividend - Rs 20 Per Share,other; dividend rs 8; dividend rs 20
+nse-api,Dividend - Rs 3 Per Share & Special Dividend - Rs 3 Per Share,dividend rs 3; dividend rs 3
+nse-api,Dividend - Rs 8.40 Per Share & Special Dividend Rs 1.65 Per Share,dividend rs 8.4; dividend rs 1.65
+nse-api,Annual General Meeting /Dividend - 1 Rs Per Share,other; dividend
+nse-api,Annual General Meeting/Special Dividend - Rs 1.25 Per Share/ Dividend - Rs 2.50 Per Share,other; dividend rs 1.25; dividend rs 2.5
+nse-api,Rights 6:55 @ Premium Rs 3,rights 6:55 prm 3
+nse-api,Special Dividend - Rs 525 Per Share/ Dividend - Rs 160 Per Share,dividend rs 525; dividend rs 160
+nse-api,Annual General Meeting/Dividend - Rs 8 Per Share & Special Dividend Rs 5 Per Share,other; dividend rs 8; dividend rs 5
+nse-api,Annual General Meeting/Dividend - Rs Per Sh/,other; dividend
+nse-api,Annual General Meeting/Dividend - Rs Re 1 Per Share,other; dividend rs 1
+nse-api,Annual General Meeting/Dividend - Rs10 Per Sh/,other; dividend rs 10
+nse-api,Dividend - Rs 19/ Special Dividend - Rs 3 Per Share,dividend rs 19; dividend rs 3
+nse-api,Dividend - Rs 3.75 Per Share/Special Dividend - Re 1 Per Share,dividend rs 3.75; dividend rs 1
+nse-api,Capital Reduction,capital_reduction
+nse-api,Dividend - Rs 0.40 Per Share/Special Dividend - Rs. 0.20 Per Share,dividend rs 0.4; dividend rs 0.2
+nse-api,Annual General Meeting / Dividend - Rs 56 Per Share,other; dividend rs 56
+nse-api,Annual General Meeting / Dividend - Rs 2.50 Per Sh,other; dividend rs 2.5
+nse-api,Annual General Me0etingdividend - Rs 1.2 Per Share,dividend
+nse-api,Extra Annual General Meeting,other
+nse-api,Rights 7:10 @ Prm Rs 102/-,rights 7:10 prm 102
+nse-api,Interimdividend - Re 0.50 Per Share,dividend rs 0.5
+nse-api,Interim Dividend - Rs Per 0.50 Share,dividend
+nse-api,Rights 11: 50 @ Premium Rs 0/-,rights 11:50 prm 0
+nse-api,Dividend - Rs 2.50 Per Share/Special Dividend - 1.25 Per Share,dividend rs 2.5; dividend
+nse-api,Consolidation Of Equity Shares From Re 1 Per Share To Rs 10 Per Share,consolidation fv 1>10
+nse-api,Dividend - Rs 35 Per Share & Special Dividend Of Rs 100 Per Share/ Special Dividend Of Rs 30,dividend rs 35; dividend rs 100; dividend rs 30
+nse-api,Annual General Meeting /Dividend - Rs 4 Per Share & Special Dividend - Rs 3 Per Share,other; dividend rs 4; dividend rs 3
+nse-api,Dividend - Rs 26 Per Share And Special Dividend Rs 22 Per Share,dividend rs 26; dividend rs 22
+nse-api,Dividend - Rs 160 Per Share & Special Dividend - Rs 375,dividend rs 160; dividend rs 375
+nse-api,Interim Dividend Rs 11 Per Share/ Special Dividend Rs 46 Per Share,dividend rs 11; dividend rs 46
+nse-api,Interim Dividend - Re 0.75 Per Share & Special Dividend Rs 1.25 Per Share,dividend rs 0.75; dividend rs 1.25
+nse-api,Intereim Dividend - Rs 3.50 Per Share,dividend rs 3.5
+nse-api,Dividend - Rs. 7.50 Per Share,dividend rs 7.5
+nse-api,Rights 161:250 @ Premium Re 0.45 /-,rights 161:250 prm 0.45
+nse-api,Interim Dividend - Rs. 0.01 Per Sh,dividend rs 0.01
+nse-api,Rights 1:9 @ Premium 91,rights 1:9 prm 91
+nse-api,Rights 3:2 @ Premium Re. 0.63/-,rights 3:2 prm 0.63
+nse-api,Dividend - Re 1 Per Share/Special Dividend - Rs 2 Per Share,dividend rs 1; dividend rs 2
+nse-api,Dividend - Rs 20 Per Share/Special Dividend - Rs 7.50,dividend rs 20; dividend rs 7.5
+nse-api,Dividend - Re 0.50 Per Share & Special Dividend - Re 0.50 Per Share,dividend rs 0.5; dividend rs 0.5
+nse-api,Dividend - Rs 2 Per Share & Special Dividend Re 1 Per Share,dividend rs 2; dividend rs 1
+nse-api,Rights - 7 Ccps And 7 Warrants:40,rights
+nse-api,Intdividend - Rs 160 Per Share,dividend rs 160
+nse-api,RIGHTS 6:25 @ PREMIUM RS 39.50 /-,rights 6:25 prm 39.5
+nse-book-closure,INTDIV - RS 17 PER SH,dividend rs 17
+nse-book-closure,INTERIM DIVIDEND,dividend
+nse-book-closure,INTDIV - RE 1 PER SH,dividend rs 1
+nse-book-closure,EOGM,other
+nse-book-closure,FVSPLT FRM RS 3 TO RE 1,split fv 3>1
+nse-book-closure,DIV - RS 8 PER SH,dividend rs 8
+nse-book-closure,FVSPLT FRM RS 10 TO RS 2,split fv 10>2
+nse-book-closure,INTDIV - RS10 PER SH,dividend rs 10
+nse-book-closure,EGM,other
+nse-book-closure,RIGHTS 1:2 @PRM RS 148,rights 1:2 prm 148
+nse-book-closure,FV SPLT FRM RS 216.75 TO,split
+nse-book-closure,AGM/DIV - RS 0.50 PER SH,other; dividend rs 0.5
+nse-book-closure,AGM/DIV - RS 12.50 PR SH,other; dividend rs 12.5
+nse-book-closure,AGM/DIV-RS1SPLDIV-RS0.75,other; dividend rs 1; dividend rs 0.75
+nse-book-closure,DIV - RE 1 PER SHARE,dividend rs 1
+nse-book-closure,AGM/DIVRS110/SPLDIVRS100,other; dividend rs 110; dividend rs 100
+nse-book-closure,AGM/DIV - RS 45PER SH,other; dividend rs 45
+nse-book-closure,AGM/DIV - RE 1 PER SH,other; dividend rs 1
+nse-book-closure,AGM/DIV - RS 5 PER SHARE,other; dividend rs 5
+nse-book-closure,DIV - RE 1 PER SH,dividend rs 1
+nse-book-closure,FV SPLT FRM RS10 TO RE 1,split fv 10>1
+nse-book-closure,AGM/DIV-RS 11.55 PER SH,other; dividend rs 11.55
+nse-book-closure,AGM/DIV - 13.5 RS PER SH,other; dividend
+nse-book-closure,DIV-RS30/SPLDIV-RS60,dividend rs 30; dividend rs 60
+nse-book-closure,AGM/DIV-RS15/SPLDIV-RS15,other; dividend rs 15; dividend rs 15
+nse-book-closure,AGM/DIV - RS12 PER SHARE,other; dividend rs 12
+nse-book-closure,DVSPDV - RS 35/RS 130,dividend
+nse-book-closure,AGM/DIV/SPDV - RS 10 & 5,other; dividend; dividend
+nse-book-closure,AGM/DIV-RE 0.75 PER SH,other; dividend rs 0.75
+nse-book-closure,DIV - 1.25 RS PER SH,dividend
+nse-book-closure,AGM/DIV - RS13.50 PER SH,other; dividend rs 13.5
+nse-book-closure,FV SPLT FRM RS 5 TO RE 1,split fv 5>1
+nse-book-closure,MERGER,scheme
+nse-book-closure,AGM/DIV RS 37.5 PER SH,other; dividend rs 37.5
+nse-book-closure,FVSPLT FRM RS 10 TO RE1,split fv 10>1
+nse-book-closure,AGM/DIV RS 3 SPLDV RS 3,other; dividend rs 3; dividend rs 3
+nse-book-closure,AGM/DIV-RS 2 SPLDIV-RS 2,other; dividend rs 2; dividend rs 2
+nse-book-closure,AGM/DIV-1.5/SPLDIV-0.75,other; dividend; dividend
+nse-book-closure,RIGHTS 1:7 @PRM RS 30/-,rights 1:7 prm 30
+nse-book-closure,AGM/DIV- RS 32.05 PER SH,other; dividend rs 32.05
+nse-book-closure,AGMDIV/SPDV RE 0.25&0.25,other; dividend; dividend
+nse-book-closure,BONUS 3:4,bonus 3:4
+nse-book-closure,FVSPLT FRM RS 10TO RS 2,split fv 10>2
+nse-book-closure,EXTRA GENERAL MEETING,other
+nse-book-closure,INTERM DIVIDEND,dividend
+nse-book-closure,CONV TO INDEX SCHEME,other
+nse-book-closure,SPLDIV - RS 15 PER SH,dividend rs 15
+nse-book-closure,CAPITAL REDUCTION,capital_reduction
+nse-book-closure,FVSPLT FRM RS10 TO RE1,split fv 10>1
+nse-book-closure,DIV - RS 3 PER SHARE,dividend rs 3
+nse-book-closure,RIGHTS1:1 @PRM RS 1.30/-,rights 1:1 prm 1.3
+nse-book-closure,AGM/DIV&SPLDV-RS1.5 & 1,other; dividend; dividend
+nse-book-closure,FVSPLT FRM RS10 TO RE 1,split fv 10>1
+nse-book-closure,FV SPLT FRM RS 5 TO RS 2,split fv 5>2
+nse-book-closure,INT&SPLDIV- RS 3.57&RS 2,dividend; dividend
+nse-book-closure,DIV-RE 1/SPLDIV-RS 2,dividend rs 1; dividend rs 2
+nse-book-closure,DIV - RS2.50 PER SH,dividend rs 2.5
+nse-book-closure,RIGHTS 3:2 @PRM RE 0.63,rights 3:2 prm 0.63
+nse-book-closure,DIV-RS 14/SPL DIV-RS 6,dividend rs 14; dividend rs 6
+nse-book-closure,RGHTS 97:1831@PRM RS 940,rights 97:1831 prm 940
+nse-book-closure,RIGHTS 1:17@PRM RS 502/-,rights 1:17 prm 502
+nse-book-closure,FVSPLT FRMRS 100 TO RE 1,split fv 100>1
+nse-book-closure,RGHTS 3:20 @PRM RS 150/-,rights 3:20 prm 150
