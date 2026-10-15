@@ -1528,3 +1528,113 @@ prices, so when in doubt, classify it.
 **An action NSE withdraws** stays in the table. The app's only response is a pause
 the trader resumes, so a stale row costs one click, while a deleted one could cost
 a false fire.
+
+## Corporate actions history (`corporate_actions_history`)
+
+`ca_history/ca_history_{YYYY}.parquet` (manifest name `corporate_actions_history`,
+schema v1, one file per ex-date year) lists **every** NSE corporate action on an
+equity share (main board EQ/BE/BZ and Emerge SM/ST/SZ) since 2021-10-01:
+dividends, meetings and buy-backs too, one row per action a purpose names. The
+trader's app joins a stock's history across a break (a bar wholly outside the
+price band) when an action for that ISIN falls on the break's day. It is **not**
+`corporate_actions`: every row of that one pauses a price alert.
+
+Columns: `symbol`, `series`, `isin` (see below), `isin_nse` (the ISIN NSE's API
+printed, when it is a valid one), `company`, `ex_date`, `record_date`, `purpose`
+(NSE's text, verbatim), `part` (0, 1, ... for the actions one purpose names),
+`kind` (`split`, `consolidation`, `bonus`, `rights`, `demerger`, `scheme`,
+`capital_reduction`, `dividend`, `other`), `ratio_new`/`ratio_held` (bonus,
+rights, scheme "a:b"), `fv_from`/`fv_to` (split, consolidation), `premium`
+(rights, Rs), `dividend_ps` (Rs per share), `source` (`nse-api` or
+`nse-book-closure`), `first_seen` (the day this pipeline first recorded the row),
+`date` (the run that last rewrote that year's file; the manifest reads it). A
+number is only ever read from the purpose's own text; one it does not state
+plainly is null, never guessed.
+
+**`isin` is the ISIN that traded under the symbol on the ex-date**, from
+`reference/instruments_all.parquet` (equity series only; an issuer's bonds trade
+under its symbol too). NSE's API prints a company's original ISIN on about a
+quarter of its rows (ONGC's INE213A01011, replaced in 2011; the pre-split ISIN
+on a split's own ex-date) and a 6-digit number on Emerge rows, so its value is
+kept as `isin_nse` and never trusted on its own. A share that did not trade on
+its ex-date takes the first listing within 31 days after it (a split's new ISIN
+often lists a few sessions later). A run that cannot resolve a row keeps the
+ISIN it already had. About 1% of rows stay null (symbols the instrument list
+never saw near that day); the status message counts them.
+
+### First fill (residential machine, once)
+
+NSE's corporate-actions API (`www.nseindia.com/api/corporates-corporateActions`)
+blocks datacenter IPs, as every `www.nseindia.com/api/*` does, so the history is
+filled from a machine NSE does not block, outside the data-daily cron window:
+```
+cd pipeline
+uv run python -m pipeline sync                      # the instrument list it resolves ISINs from
+uv run python -m pipeline backfill-corporate-actions   # --from 2021-10-01 --to today
+uv run python -m pipeline publish
+```
+It reads month windows of both indexes (`equities`, `sme`), 3 s apart: about
+130 requests, 7 minutes. Every window must parse before anything is written; a
+malformed answer, an HTML page, an ex-date outside its window or an ended month
+of the main board with no action at all fails the run with nothing written.
+Expect about 13,800 rows in 6 files, under 0.5 MB. `publish` checks the live
+release has not moved since `sync` (re-run all three if it has).
+
+### Daily (CI)
+
+`build_corporate_actions_history` runs in the Phase-2 loop after `reference`. It
+reads the book-closure file `bc{DDMMYYYY}.csv` in the PR bundles of the last 5
+trading days (`CA_HISTORY_CATCHUP_DAYS`) on the CI-safe archives host, adds an
+action no row holds yet (`source = nse-book-closure`, the file's 25-character
+purpose), and re-resolves every row's ISIN against the day's instrument list.
+The file lists an action from as little as two days before its ex-date, so the
+catch-up covers a run or two that never happened. Only year files whose rows
+changed are rewritten.
+
+| Outcome | Status | Files |
+|---|---|---|
+| no history yet (before the first fill is published) | `skipped_idempotent`, names the backfill | none written |
+| the day's bundle missing (404), not a zip, no well-formed `bc*.csv` | `skipped_idempotent` | kept |
+| an earlier catch-up day's bundle missing | `success`, the day named | written |
+| instrument list missing or unreadable | `skipped_idempotent` | kept |
+| a year file unreadable or missing a column | **`failed`** | kept |
+| a purpose the classifier does not recognise | `success`, the purpose named; kept as `other` | written |
+| non-trading day | `skipped_holiday` | kept |
+
+### Top-up (residential machine, weekly)
+
+Run it **once a week** (any day after the close, outside the cron window), from
+the first day of the previous month:
+```
+cd pipeline
+uv run python -m pipeline sync
+uv run python -m pipeline backfill-corporate-actions --from 2026-09-01
+uv run python -m pipeline publish
+```
+Within the window the API is the record. For the series the fetched indexes
+answer for, its current rows replace the table's earlier API rows (a corrected
+purpose replaces the old one, a withdrawn action goes, a row NSE left alone
+keeps its `first_seen`), and a book-closure row whose ex-date has passed goes
+unless the API lists it. Book-closure rows whose ex-date is still ahead stay:
+the API lists only a day or so ahead.
+
+**Between top-ups a consumer sees** the book-closure rows for the most recent
+actions: the right ex-date, kind and ISIN, but NSE's abbreviated purpose
+(`INTDIV - RS 12 PER SH`), and ratios only where those 25 characters hold them.
+An action that appears only in the book-closure file (its ex-date later moved,
+or it was worded differently) stays until the next top-up removes it. A week
+keeps both small; skipping top-ups for months leaves the purposes abbreviated
+and any withdrawn action in place.
+
+**A top-up refuses** a month whose API rows would shrink by more than a
+twentieth (and more than 3 rows): that is a truncated answer, not withdrawals.
+Re-run later. A top-up that does withdraw rows makes that year's file shorter,
+so `publish` stops at the shrink-guard. Read the backfill's `N rows replaced or
+withdrawn` and, if it is small and NSE really dropped those actions, publish
+with `--allow-shrink` (its warnings should name only `ca_history_*.parquet`).
+
+**A purpose not recognised.** Add its wording to
+`sources/nse_ca_history.classify` and a line to
+`tests/fixtures/nse_ca_purpose_forms.csv` (the test pins every real wording's
+kinds and numbers). A purpose the classifier misses is kept as `other`, which
+the app would not use to join a history, so when in doubt, classify it.

@@ -36,6 +36,11 @@ from pipeline import (
 )
 from pipeline import calendar as cal
 from pipeline.bootstrap import bootstrap_reference
+from pipeline.corporate_actions_history import (
+    ApiClient,
+    backfill_corporate_actions_history,
+    build_corporate_actions_history,
+)
 from pipeline.daily_update import RunStatus, run_daily
 from pipeline.errors import ReleaseError, UnexpectedFailure
 from pipeline.fetch import FetchResult
@@ -132,6 +137,13 @@ builders.BUILDERS["market_calendar"] = builders.build_market_calendar
 # corporate_actions fetches NSE's PR bundle itself; registered bare, its
 # keyword-only fetch/calendar/seed args carry defaults.
 builders.BUILDERS["corporate_actions"] = builders.build_corporate_actions
+# corporate_actions_history adds the PR bundle's book-closure rows and resolves
+# every row's ISIN against the `reference` instrument list, bound here as
+# `universe_spec` (DATASET_ORDER runs `reference` first). Same import-time
+# binding WARNING as above.
+builders.BUILDERS["corporate_actions_history"] = functools.partial(
+    build_corporate_actions_history, universe_spec=datasets.DATASETS["reference"]
+)
 
 
 def _plain_runner(cmd: list[str]) -> int:
@@ -195,6 +207,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace the synced instrument list instead of merging it in",
     )
+    # Residential only (NSE's API blocks datacenter IPs): fill or top up the
+    # corporate_actions_history dataset from NSE's corporate-actions API. See
+    # RUNBOOK.md 'Corporate actions history'.
+    ca = sub.add_parser("backfill-corporate-actions")
+    ca.add_argument("--from", dest="start", default=config.CA_HISTORY_START.isoformat())
+    ca.add_argument("--to", dest="end", default=None, help="last ex-date (default: today)")
     return p
 
 
@@ -731,6 +749,23 @@ def main(argv: list[str] | None = None) -> int:
         holidays, special = cal.load_trading_calendar(config.META_DIR)
         target = date.fromisoformat(args.date)
         return cmd_rebuild_day(target, holidays=holidays, special_sessions=special, via=args.via)
+    if args.cmd == "backfill-corporate-actions":
+        today = datetime.now(UTC).date()
+        start = date.fromisoformat(args.start)
+        end = date.fromisoformat(args.end) if args.end else today
+        if start > end:
+            print("backfill-corporate-actions: --from is after --to", file=sys.stderr)
+            return 2
+        status = backfill_corporate_actions_history(
+            datasets.CORPORATE_ACTIONS_HISTORY,
+            universe_spec=datasets.REFERENCE,
+            start=start,
+            end=end,
+            today=today,
+            get=ApiClient().get,
+        )
+        print(manifest.status_to_dict(status))
+        return 0 if status.status == "success" else 1
     if args.cmd == "bootstrap-reference":
         client = GhReleaseClient(repo=config.GITHUB_REPO, tag=args.tag)
         try:

@@ -310,3 +310,63 @@ Consistent across RELIANCE / HDFCBANK / JUSTDIAL: rows for `MQ2024-2025` (quarte
 
 ### 14.5 Rate-limit note
 8 requests over ~10 min incl. a 19.9 MB bulk and a 7.0 MB instance: no 429, no blocks. The FlagDur=6 bulk can be server-side slow (>90 s once) — backfill uses per-scrip FlagDur=7 (fast, small) instead.
+
+---
+
+## §15 Corporate actions history (2026-10-15, residential IP)
+
+Feeds `corporate_actions_history` (RUNBOOK "Corporate actions history"). Probed from
+a residential Mac: about 125 API requests 3 s apart, 20 PR bundles; no 429, no block.
+
+### 15.1 NSE corporate-actions API (the record; residential only)
+- `GET https://www.nseindia.com/api/corporates-corporateActions?index={equities|sme}&from_date=DD-MM-YYYY&to_date=DD-MM-YYYY`,
+  after one visit to `https://www.nseindia.com/companies-listing/corporate-filings-actions`
+  (its cookies), `Referer` that page, `Accept: application/json`. Datacenter IPs are
+  blocked (Akamai), as for every `www.nseindia.com/api/*`: never from Actions.
+- JSON list; 14 keys per row: `symbol, series, isin, comp, subject, exDate, recDate,
+  bcStartDate, bcEndDate, ndStartDate, ndEndDate, faceVal, ind, caBroadcastDate`.
+  Dates `dd-Mon-yyyy`, `-` for none. The window filters on `exDate`.
+- **Depth: reaches 2021-10 and beyond.** 61 month windows 2021-10..2026-10, all 200:
+  11,857 `equities` rows (EQ 11,039, GS 502, IV 245, RR 71) and 799 `sme` rows
+  (all SM). Busiest month 928 rows (2023-09); no cap seen. Quietest main-board
+  month 27 rows. The API lists only about a day ahead (max `exDate` 2026-10-16
+  on 2026-10-15).
+- **`isin` is not the traded ISIN.** On about a quarter of main-board rows it is
+  the company's original ISIN (ONGC INE213A01011; KSB's INE999A01015 still in
+  2025, after its 2024-07-25 split; NAUKRI's and UNITEDPOLY's pre-split ISIN on
+  their split's own ex-date). 3 rows carry `IN0000000000` (KSHITIJPOL). On
+  `index=sme` it is a 6-digit number, never an ISIN. The pipeline resolves `isin`
+  from its own instrument list and keeps a valid printed one as `isin_nse`.
+- `series` on `index=equities` is EQ for BE/BZ shares too; `symbol` is the
+  current one (Tata Motors' 2025-10-14 demerger is under TMPV).
+- Vocabulary: 224 distinct wordings (numbers aside) across both sources, pinned
+  with their kinds and numbers in `pipeline/tests/fixtures/nse_ca_purpose_forms.csv`.
+
+### 15.2 Book-closure file (daily, CI-safe)
+- `bc{DDMMYYYY}.csv` in `https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR{DDMMYY}.zip`
+  (the file `corporate_actions` reads too). Present back to 2021-10 at
+  least (`Bc011021.csv`, dates `dd/mm/yyyy`, purposes padded).
+- No ISIN; purpose cut to 25 characters (`RGHTS 3:20 @PRM RS 150/-`); one share
+  repeated per series (TCS as BE, BL, EQ, IQ, T0, TL). Look-ahead varies: 2 days
+  on 2026-10-14, up to 37 days in 2022. The daily run reads the last 5 trading
+  days' files.
+- Spot-check against the API: every EQ/BE/BZ action of `bc01102026.csv` and of
+  `bc14102026.csv` (9 of 9 main-board) is in the API with the same ex-date.
+
+### 15.3 Not used
+- **BSE:** `https://api.bseindia.com/BseIndiaAPI/api/DefaultData/w?...` (its
+  corporate-actions endpoint) answers 403 Access Denied (Akamai) even from the
+  residential IP, with and without a visit to `www.bseindia.com` first. NSE only.
+- G-secs (GS), InvITs (IV), REITs (RR) and the book-closure file's bond and fund
+  series: out of scope (equity shares only).
+
+### 15.4 Reaching the release
+The first fill and each weekly top-up run on a residential machine
+(`sync`, `backfill-corporate-actions`, `publish`); the daily CI run syncs the
+published year files and adds the book-closure rows. Until the first fill is
+published, the daily run skips (`no history yet`). Never published by an agent.
+
+### 15.5 Not confirmed
+Completeness of the API against NSE's site beyond the book-closure spot-checks;
+how often NSE rewrites old rows (a top-up replaces them); the API's behaviour on
+windows longer than a month (the pipeline asks by month).

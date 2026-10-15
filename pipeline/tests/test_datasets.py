@@ -25,6 +25,7 @@ def test_equities_spec_fields():
         "classification_registry", "classification_observations",
         "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
         "bse_fno_freeze_limits", "market_calendar", "corporate_actions",
+        "corporate_actions_history",
     ]
 
 
@@ -74,6 +75,7 @@ def test_all_specs_follows_dataset_order():
         datasets.CLASSIFICATION_OBSERVATIONS, datasets.FUNDAMENTALS,
         datasets.INDEX_CONSTITUENTS, datasets.CAS_ELIGIBLE, datasets.FNO_FREEZE_LIMITS,
         datasets.BSE_FNO_FREEZE_LIMITS, datasets.MARKET_CALENDAR, datasets.CORPORATE_ACTIONS,
+        datasets.CORPORATE_ACTIONS_HISTORY,
     ]
 
 
@@ -88,7 +90,7 @@ def test_published_specs_are_every_kept_list_and_no_price_dataset():
         "reference", "sector_industry", "classification_registry",
         "classification_observations", "fundamentals", "index_constituents",
         "cas_eligible", "fno_freeze_limits", "bse_fno_freeze_limits", "market_calendar",
-        "corporate_actions",
+        "corporate_actions", "corporate_actions_history",
     ]
     assert not {s.manifest_name for s in specs} & datasets.RETIRED_MANIFEST_NAMES
 
