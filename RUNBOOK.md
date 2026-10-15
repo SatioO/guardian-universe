@@ -1643,3 +1643,93 @@ with `--allow-shrink` (its warnings should name only `ca_history_*.parquet`).
 `tests/fixtures/nse_ca_purpose_forms.csv` (the test pins every real wording's
 kinds and numbers). A purpose the classifier misses is kept as `other`, which
 the app would not use to join a history, so when in doubt, classify it.
+
+## Special pre-open (`special_pre_open`)
+
+`special_pre_open_all.parquet` (manifest name `special_pre_open`, schema v1) lists
+the securities NSE opens through a Special Pre-Open Session (SPOS), keyed by the
+session they open in. A security in SPOS runs order entry 09:00-09:45 with a random
+close from minute 35, matching to 09:55, and trades from 10:00. Every other
+security keeps the regular 09:00-09:15 auction. NSE runs SPOS for:
+
+- an IPO's first day, main board or SME;
+- a relisting's first day, and a direct listing;
+- a restructured stock's ex-date or a scheme's new listing;
+- an investment company until its price is discovered.
+
+The source is NSE's FAQ on Special Pre-Open Session, v6.1, October 2025. The
+desktop app settles these instruments' opening price at the end of their own
+auction, not at 09:12.
+
+**Source.** NSE's capital-market security master,
+`nsearchives.nseindia.com/content/cm/NSE_CM_security_{DDMMYYYY}.csv.gz`, on the
+CI-safe archives host. NSE posts the file named for day D in the evening of D
+(19:20-19:40 IST seen), and it describes the next trading session. Its
+`CallAuctnInd` column says how each security opens:
+
+| Value | Opens through |
+|---|---|
+| 1 | the regular pre-open |
+| 2 | SPOS for a listing |
+| 3 | SPOS for a restructuring or scheme |
+| 4, 5 | the periodic call auctions for illiquid and SME securities, which are not SPOS |
+
+All 39 rows flagged 2 or 3 across 22 files (October 2025 to October 2026)
+opened through SPOS on the next trading day or listed that day. They include
+HINDUNILVR (5 Dec 2025, NSE/CMTR/71508), VEDL (30 Apr 2026, NSE/CMTR/73856) and
+TATAMOTORS (14 Oct 2025).
+
+**Columns:**
+
+- `session_date`: the session the security opens in;
+- `symbol`, `series`, `isin`;
+- `kind`: `listing` or `restructuring`;
+- `base_price`;
+- `file_date`: the master the row came from;
+- `source`: `nse-cm-security`;
+- `date`: the newest session any file has covered. It is the same on every row.
+
+A session with no SPOS security has no rows, so `date` is how a reader tells
+"none on that day" from "not built yet". A list whose `date` is before today says
+nothing about today, and the app then holds no instrument back.
+
+**`base_price`** is NSE's base price for a listing, the issue price of an IPO.
+The master's `IssePric` column is empty, but `PricRg` is NSE's dummy operating
+band around the base (FAQ Q15), so either bound gives the base:
+
+- main board (`EQ`, `BE`, `BZ`): -50% to +100%;
+- SME (`SM`, `ST`, `SZ`): -20% to +90%.
+
+The base is published only when both bounds give the same price to the paisa.
+Otherwise it is null, as it is for any other series and for every restructuring
+row. It matched the listing day's `PrvsClsgPric` in the UDiFF bhavcopy for all
+24 listings checked (LGEINDIA 1140, its issue price).
+
+**The build.** `special_pre_open.build_special_pre_open` runs in the daily
+Phase-2 loop on trading days. It reads the master named for the run's day and
+replaces that session's rows wholesale, so an evening correction of the same
+file wins. Other sessions' rows stay. A first build (no prior file) also reads
+the 20 trading days before it (`SPECIAL_PRE_OPEN_SEED_DAYS`), best effort.
+
+**When it runs.** The data-daily rungs run before 19:45 IST, and those runs
+find no master yet (`not_yet`). The 19:45 IST rung reads the master and the
+21:00 rung retries. If the 21:00 rung still finds no master, it opens a
+`pipeline-failure` issue.
+
+| Outcome | Status | File |
+|---|---|---|
+| the day's master is not posted yet (404) | `not_yet` | prior kept |
+| not the master (an HTML page, missing columns), under 10,000 securities (`SPECIAL_PRE_OPEN_MIN_SECURITIES`), or a `CallAuctnInd` value never seen before | `failed` (red job) | prior kept |
+| non-trading day | `skipped_holiday` | untouched |
+
+**A `CallAuctnInd` value never seen before.** Find out from NSE's circulars what
+the value means before mapping it in `sources/nse_cm_security.KIND_OF_INDICATOR`,
+or listing it as a known non-SPOS value in `_KNOWN_INDICATORS`. Guessing either
+way is wrong:
+
+- a security wrongly listed here is held back to 10:00 in the app;
+- a security missed here is settled at 09:12 and reported as having no
+  discovery.
+
+**BSE** runs its own SPOS for the same securities (FAQ Q9). This list is NSE's
+only: no BSE file has been found.
