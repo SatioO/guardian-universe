@@ -8,6 +8,7 @@ dependencies = [
     "pyarrow>=16",
     "pandera>=0.20",
     "requests>=2.32",
+    "pypdf>=6.0,<7",
 ]
 
 [project.scripts]

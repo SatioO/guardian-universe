@@ -14,9 +14,10 @@ from datetime import date
 
 import pandas as pd
 import pytest
+import responses
 
 from pipeline import builders, datasets
-from pipeline.sources import nse_constituents
+from pipeline.sources import nse_constituents, nse_index_announcements
 
 HEADER = b"Company Name,Industry,Symbol,Series,ISIN Code\n"
 
@@ -134,6 +135,11 @@ def _build(spec, target, frame, **kw):
     """One builder run with the test calendar; `frame` is a frame or a fetch."""
     fetch = frame if callable(frame) else (lambda _d: frame)
     kw.setdefault("min_rows", 10)
+    # No network: no press releases and an empty symbol master unless a test
+    # gives them; an overrides seed that does not exist.
+    kw.setdefault("fetch_announcements", lambda _s: nse_index_announcements.Announcements())
+    kw.setdefault("symbol_master", dict)
+    kw.setdefault("overrides_path", spec.base_dir.parent / "no_overrides.csv")
     return builders.build_index_constituents(
         spec, target, fetch_lists=fetch, calendar=_calendar, **kw
     )
@@ -396,3 +402,327 @@ def test_the_housing_header_variant_is_accepted():
     assert len(_parse(variant)) == 6
     with pytest.raises(nse_constituents.MalformedConstituentCsv):
         _parse(b"Firm,Industry,Symbol,Series,ISIN Code\n" + _csv(6)[len(HEADER):])
+
+
+# ── NSE's announced effective dates (the press-release ledger) ─────────────
+
+A = nse_index_announcements
+N50 = "IDX:NIFTY50"
+FILLER = [f"F{i}" for i in range(48)]
+
+
+def _list(key: str, name: str, symbols: list[str], *, companies: dict[str, str] | None = None):
+    """One index's basket; each stock's ISIN derives from its symbol."""
+    companies = companies or {}
+    return pd.DataFrame(
+        [
+            {
+                "index_key": key, "index_name": name, "family": "broad",
+                "rotation_list": False, "display_label": name,
+                "instrument_key": _isin(s), "symbol": s, "isin": _isin(s),
+                "company": companies.get(s, f"{s} Ltd."), "industry": "Fin", "series": "EQ",
+                "source_file": "ind_nifty50list.csv",
+            }
+            for s in symbols
+        ],
+        columns=nse_constituents.CONSTITUENT_COLUMNS,
+    )
+
+
+def _isin(symbol: str) -> str:
+    import hashlib
+
+    return "INE" + hashlib.sha1(symbol.encode()).hexdigest()[:7].upper() + "01"
+
+
+def _n50(*symbols: str) -> pd.DataFrame:
+    return _list(N50, "Nifty 50", [*FILLER, *symbols])
+
+
+def _change(symbol, action, eff, *, ref="ind_prs10082026", announced=date(2026, 8, 10),
+            index="Nifty 50", company="", seq=1):
+    return A.Change(ref, seq, announced, eff, index, action, symbol, company or f"{symbol} Ltd.")
+
+
+REVIEW_0930 = [
+    _change("WIPRO", A.EXCLUDE, date(2026, 9, 30), seq=1),
+    _change("BSE", A.INCLUDE, date(2026, 9, 30), seq=2),
+]
+MASTER = {"BSE": (_isin("BSE"), "EQ"), "WIPRO": (_isin("WIPRO"), "EQ")}
+
+
+def _ann(changes=(), **kw):
+    return lambda _s: A.Announcements(changes=list(changes), **kw)
+
+
+def _symbols(spec, key=N50) -> set[str]:
+    out = _read(spec)
+    return set(out[out["index_key"] == key]["symbol"])
+
+
+def _effective(spec, key=N50) -> tuple[object, object]:
+    out = _read(spec)
+    rows = out[out["index_key"] == key][["effective_from", "change_ref"]].drop_duplicates()
+    assert len(rows) == 1
+    eff, ref = rows.iloc[0]
+    return (None if pd.isna(eff) else pd.Timestamp(eff).date()), (None if pd.isna(ref) else ref)
+
+
+def test_a_change_nse_s_list_has_not_caught_up_with_applies_on_its_effective_date(spec):
+    # 09-30: NSE's CSV still lists WIPRO (it did at 22:09 IST on 09-29). The
+    # review is effective from 09-30, so the list says BSE.
+    _build(spec, date(2026, 9, 29), _n50("WIPRO", "HDFCBANK"), min_rows=10)
+    st = _build(spec, date(2026, 9, 30), _n50("WIPRO", "HDFCBANK"), min_rows=10,
+                fetch_announcements=_ann(REVIEW_0930), symbol_master=lambda: MASTER)
+    assert st.status == "success", st.message
+    assert {"BSE", "HDFCBANK"} <= _symbols(spec) and "WIPRO" not in _symbols(spec)
+    out = _read(spec)
+    bse = out[out["symbol"] == "BSE"].iloc[0]
+    assert (bse["isin"], bse["source_file"]) == (_isin("BSE"), "ind_prs10082026.pdf")
+    assert _effective(spec) == (date(2026, 9, 30), "ind_prs10082026")
+    assert "applied ahead of NSE's list: 2: IDX:NIFTY50 +BSE (ind_prs10082026)" in st.message
+
+
+def test_a_change_nse_s_list_shows_early_is_held_until_its_effective_date(spec):
+    # 09-29: NSE's CSV already says BSE. For session 09-29 WIPRO is still in.
+    _build(spec, date(2026, 9, 28), _n50("WIPRO", "HDFCBANK"), min_rows=10)
+    st = _build(spec, date(2026, 9, 29), _n50("BSE", "HDFCBANK"), min_rows=10,
+                fetch_announcements=_ann(REVIEW_0930), symbol_master=lambda: MASTER)
+    assert st.status == "success", st.message
+    assert "WIPRO" in _symbols(spec) and "BSE" not in _symbols(spec)
+    out = _read(spec)
+    assert out[out["symbol"] == "WIPRO"].iloc[0]["isin"] == _isin("WIPRO")
+    assert _effective(spec) == (None, None)
+    assert "held until effective" in st.message
+    # On the effective date the same CSV is simply right.
+    st = _build(spec, date(2026, 9, 30), _n50("BSE", "HDFCBANK"), min_rows=10,
+                fetch_announcements=_ann(REVIEW_0930), symbol_master=lambda: MASTER)
+    assert "BSE" in _symbols(spec) and "WIPRO" not in _symbols(spec)
+    assert "applied ahead" not in st.message and "held" not in st.message
+
+
+def test_a_later_release_for_the_same_date_overrides_the_original(spec):
+    # A mid-review correction: 08-10 announces X in from 09-30; 09-15 takes
+    # it back. NSE's CSV followed the original.
+    original = _change("XCORP", A.INCLUDE, date(2026, 9, 30))
+    correction = _change("XCORP", A.EXCLUDE, date(2026, 9, 30), ref="ind_prs15092026",
+                         announced=date(2026, 9, 15))
+    st = _build(spec, date(2026, 9, 30), _n50("XCORP", "HDFCBANK"), min_rows=10,
+                fetch_announcements=_ann([correction, original]),
+                symbol_master=lambda: {"XCORP": (_isin("XCORP"), "EQ")})
+    assert "XCORP" not in _symbols(spec), st.message
+    assert _effective(spec) == (date(2026, 9, 30), "ind_prs15092026")
+
+
+def test_an_ad_hoc_exclusion_between_reviews_counts_from_its_own_date(spec):
+    # ind_prs12102026: CCAVENUE out of Nifty Microcap 250 from 10-13.
+    key, name = "IDX:NIFTYMICROCAP250", "Nifty Microcap 250"
+    out_1013 = _change("CCAVENUE", A.EXCLUDE, date(2026, 10, 13), ref="ind_prs12102026",
+                       announced=date(2026, 10, 12), index=name)
+    base = [f"M{i}" for i in range(20)]
+    _build(spec, date(2026, 10, 9), _list(key, name, [*base, "CCAVENUE"]), min_rows=10)
+    # 10-12: NSE's list already dropped it; on 10-12 it is still a member.
+    _build(spec, date(2026, 10, 12), _list(key, name, base), min_rows=10,
+           fetch_announcements=_ann([out_1013]))
+    assert "CCAVENUE" in _symbols(spec, key)
+    # 10-13: NSE's list still has it (a lagging file); it is out.
+    _build(spec, date(2026, 10, 13), _list(key, name, [*base, "CCAVENUE"]), min_rows=10,
+           fetch_announcements=_ann([out_1013]))
+    assert "CCAVENUE" not in _symbols(spec, key)
+    assert _effective(spec, key) == (date(2026, 10, 13), "ind_prs12102026")
+
+
+def test_a_list_read_before_the_effective_date_changes_on_it_without_a_new_read(spec):
+    # Read on 09-29 (pre-review); on 09-30 Nifty 50's file could not be read,
+    # so its rows are carried, and the review still lands on them.
+    other = _list("IDX:NIFTYBANK", "Nifty Bank", [f"B{i}" for i in range(12)])
+    _build(spec, date(2026, 9, 29), pd.concat([_n50("WIPRO", "HDFCBANK"), other]), min_rows=10)
+    st = _build(spec, date(2026, 9, 30), other, min_rows=10,
+                fetch_announcements=_ann(REVIEW_0930), symbol_master=lambda: MASTER)
+    assert "carried (not read this run): IDX:NIFTY50" in st.message
+    assert "BSE" in _symbols(spec) and "WIPRO" not in _symbols(spec)
+    # The membership is announced, not read: its date stays the last read.
+    assert _dates(spec)[N50] == date(2026, 9, 29)
+    # And through a total outage of NSE's lists, too.
+    spec2 = dataclasses.replace(spec, base_dir=spec.base_dir.parent / "outage")
+    _build(spec2, date(2026, 9, 29), _n50("WIPRO", "HDFCBANK"), min_rows=10)
+
+    def _down(_d):
+        raise RuntimeError("niftyindices unreachable")
+
+    st = _build(spec2, date(2026, 9, 30), _down, fetch_announcements=_ann(REVIEW_0930),
+                symbol_master=lambda: MASTER)
+    assert st.status == "success", st.message
+    assert "every index carried" in st.message
+    assert "BSE" in _symbols(spec2) and "WIPRO" not in _symbols(spec2)
+
+
+def test_a_release_s_index_name_without_index_finds_the_catalog_s_name(spec):
+    # NSE's releases say "Nifty Healthcare"; the catalog says "Nifty Healthcare Index".
+    key, name = "IDX:NIFTYHEALTHCAREINDEX", "Nifty Healthcare Index"
+    base = [f"H{i}" for i in range(19)]
+    change = _change("GLAND", A.INCLUDE, date(2026, 9, 30), index="Nifty Healthcare")
+    _build(spec, date(2026, 9, 30), _list(key, name, base), min_rows=10,
+           fetch_announcements=_ann([change]),
+           symbol_master=lambda: {"GLAND": (_isin("GLAND"), "EQ")})
+    assert "GLAND" in _symbols(spec, key)
+
+
+def test_a_date_revision_moves_the_announced_change(spec):
+    # ind_prs16092025: MWL's exclusion moved from 09-19 to 09-18.
+    key, name = "IDX:NIFTYSMEEMERGE", "NIFTY SME EMERGE"
+    base = [f"E{i}" for i in range(20)]
+    first = _change("MWL", A.EXCLUDE, date(2025, 9, 19), ref="ind_prs12092025",
+                    announced=date(2025, 9, 12), index="Nifty SME Emerge")
+    revision = A.Revision("ind_prs16092025", date(2025, 9, 16), A.EXCLUDE, "MWL",
+                          "Nifty SME Emerge", date(2025, 9, 19), date(2025, 9, 18))
+    st = _build(spec, date(2025, 9, 18), _list(key, name, [*base, "MWL"]), min_rows=10,
+                fetch_announcements=_ann([first], revisions=[revision]))
+    assert "MWL" not in _symbols(spec, key), st.message
+
+
+def test_a_company_named_without_a_symbol_is_matched_to_its_member_row(spec):
+    # ind_prs20072026 prints no symbol for Allcargo Global.
+    key, name = "IDX:NIFTYMICROCAP250", "Nifty Microcap 250"
+    base = [f"M{i}" for i in range(20)]
+    change = _change("", A.EXCLUDE, date(2026, 7, 22), ref="ind_prs20072026",
+                     announced=date(2026, 7, 20), index=name, company="Allcargo Global Ltd.")
+    lst = _list(key, name, [*base, "ALLCARGOG"], companies={"ALLCARGOG": "ALLCARGO GLOBAL LIMITED"})
+    _build(spec, date(2026, 7, 22), lst, min_rows=10, fetch_announcements=_ann([change]))
+    assert "ALLCARGOG" not in _symbols(spec, key)
+
+
+def test_an_unparsed_release_fails_the_run_until_an_override_reads_it(spec, tmp_path):
+    st = _build(spec, date(2026, 9, 30), _n50("WIPRO"), min_rows=10,
+                fetch_announcements=_ann(unparsed=["ind_prs02102026"]))
+    assert st.status == "failed"
+    assert "UNPARSED releases (add a row to seeds/index_change_overrides.csv): ind_prs02102026" \
+        in st.message
+    # Still written: the alert is about the release, not the list.
+    assert _dates(spec)[N50] == date(2026, 9, 30)
+    seed = tmp_path / "overrides.csv"
+    seed.write_text("press_release,index_name,action,symbol,effective_from,note\n"
+                    "ind_prs02102026,,ignore,,,dissemination timing only\n")
+    st = _build(spec, date(2026, 9, 30), _n50("WIPRO"), min_rows=10,
+                fetch_announcements=_ann(unparsed=["ind_prs02102026"]), overrides_path=seed)
+    assert st.status == "success", st.message
+
+
+def test_overrides_cancel_an_announced_change_and_add_one_nse_wrote_only_in_prose(spec, tmp_path):
+    seed = tmp_path / "overrides.csv"
+    seed.write_text(
+        "press_release,index_name,action,symbol,effective_from,note\n"
+        "ind_prs10082026,Nifty 50,cancel,BSE,,withdrawn on 09-25\n"
+        "ind_prs25092026,Nifty 50,include,TVSMOTOR,2026-09-30,named in prose only\n"
+    )
+    st = _build(spec, date(2026, 9, 30), _n50("WIPRO"), min_rows=10,
+                fetch_announcements=_ann(REVIEW_0930), overrides_path=seed,
+                symbol_master=lambda: {**MASTER, "TVSMOTOR": (_isin("TVSMOTOR"), "EQ")})
+    syms = _symbols(spec)
+    assert "BSE" not in syms and "TVSMOTOR" in syms and "WIPRO" not in syms, st.message
+    assert _effective(spec) == (date(2026, 9, 30), "ind_prs25092026")
+
+
+def test_the_last_review_is_remembered_after_its_release_leaves_the_window(spec):
+    _build(spec, date(2026, 9, 30), _n50("WIPRO"), min_rows=10,
+           fetch_announcements=_ann(REVIEW_0930), symbol_master=lambda: MASTER)
+    assert _effective(spec) == (date(2026, 9, 30), "ind_prs10082026")
+    # 10-20: the release is past the grace window and no longer read.
+    _build(spec, date(2026, 10, 20), _n50("BSE"), min_rows=10)
+    assert _effective(spec) == (date(2026, 9, 30), "ind_prs10082026")
+
+
+def test_a_change_past_the_grace_window_leaves_nse_s_list_alone(spec):
+    # 10-12 is 12 days after 09-30: NSE's CSV is authoritative again, even
+    # if a stale release were still handed in.
+    st = _build(spec, date(2026, 10, 12), _n50("WIPRO"), min_rows=10,
+                fetch_announcements=_ann(REVIEW_0930), symbol_master=lambda: MASTER)
+    assert "WIPRO" in _symbols(spec) and "BSE" not in _symbols(spec), st.message
+
+
+def test_a_list_that_still_lags_its_release_after_three_sessions_is_named(spec):
+    st = _build(spec, date(2026, 10, 6), _n50("WIPRO"), min_rows=10,
+                fetch_announcements=_ann(REVIEW_0930), symbol_master=lambda: MASTER)
+    # 10-01, 10-05, 10-06 behind 09-30 (10-02 is a holiday): 3, not yet.
+    assert "NSE's list lags" not in st.message
+    st = _build(spec, date(2026, 10, 7), _n50("WIPRO"), min_rows=10,
+                fetch_announcements=_ann(REVIEW_0930), symbol_master=lambda: MASTER)
+    assert "NSE's list lags its release: 2: IDX:NIFTY50 +BSE" in st.message
+
+
+def test_the_published_file_carries_the_v2_date_columns_with_stable_types(spec):
+    _build(spec, date(2026, 9, 30), _n50("WIPRO"), min_rows=10)  # no change in force
+    out = _read(spec)
+    assert list(out.columns)[-2:] == ["effective_from", "change_ref"]
+    import pyarrow.parquet as pq
+
+    schema = pq.read_schema(spec.base_dir / "index_constituents_all.parquet")
+    assert str(schema.field("effective_from").type).startswith("timestamp")
+    assert str(schema.field("change_ref").type) in {"string", "large_string"}
+    assert datasets.INDEX_CONSTITUENTS.schema_version == 2
+
+
+@responses.activate
+def test_the_fetch_reads_the_window_s_releases_and_names_a_non_pdf_as_unparsed():
+    from tests.test_nse_index_announcements import _tiny_pdf
+
+    responses.add(responses.GET, "https://www.nseindia.com/", status=200)
+    item = (
+        '<div class="pressItem" data-date="{d}"><p>{d}</p>'
+        "<a href='/Press_Release/{ref}.pdf'>{title}</a></div>"
+    )
+    page = "".join(item.format(d=d, ref=ref, title=title) for d, ref, title in [
+        ("Sep 25, 2026", "ind_prs25092026", "Replacements in Nifty IPO w.e.f. September 30, 2026"),
+        ("Sep 24, 2026", "ind_prs24092026", "Inclusions in Nifty IPO w.e.f. September 29, 2026"),
+        ("Sep 28, 2026", "ind_prs28092026", "Revision in Nifty AA- Short Duration bond index"),
+    ])
+    responses.add(responses.GET, A.PRESS_RELEASE_INDEX_URL, body=page, status=200)
+    pdf = _tiny_pdf([
+        "These changes shall become effective from September 30, 2026.",
+        "The following company is being excluded:",
+        "Sr. No. Company Name Symbol",
+        "1 Old Listing Ltd. OLDLIST",
+    ])
+    responses.add(responses.GET, "https://niftyindices.com/Press_Release/ind_prs25092026.pdf",
+                  body=pdf, status=200)
+    responses.add(responses.GET, "https://niftyindices.com/Press_Release/ind_prs24092026.pdf",
+                  body=b"<html>maintenance</html>", status=200)
+    ann = builders._fetch_index_announcements(date(2026, 9, 30))
+    assert ann.read == ["ind_prs25092026"]
+    assert ann.unparsed == ["ind_prs24092026"]
+    assert [(c.index_name, c.symbol) for c in ann.changes] == [("Nifty IPO", "OLDLIST")]
+    # The bond release is never fetched (responses would raise on an unknown URL).
+    assert all("28092026" not in c.request.url for c in responses.calls)
+
+
+def test_the_constituents_master_resolves_reit_invit_and_sme_members(tmp_path, monkeypatch):
+    # BAGMANE (a REIT, series RR) joined Nifty 500 on 09-30; the CAS master
+    # keeps only EQ/BE/BZ and would leave it without an ISIN.
+    ref = dataclasses.replace(datasets.DATASETS["reference"], base_dir=tmp_path)
+    pd.DataFrame({
+        "symbol": ["BAGMANE", "CUBEINVIT", "SMEX", "HDFCBANK"],
+        "series": ["RR", "IV", "SM", "EQ"],
+        "isin": ["INE2OVN25015", "INE0NR623014", "INE000S01011", "INE040A01034"],
+        "last_seen": pd.to_datetime(["2026-10-12"] * 4),
+    }).to_parquet(tmp_path / f"{ref.file_prefix}_all.parquet", index=False)
+    monkeypatch.setitem(datasets.DATASETS, "reference", ref)
+    master = builders._constituents_symbol_master()
+    assert master["BAGMANE"] == ("INE2OVN25015", "RR")
+    assert set(master) == {"BAGMANE", "CUBEINVIT", "SMEX", "HDFCBANK"}
+    assert set(builders._cas_symbol_isins(ref)) == {"HDFCBANK"}
+
+
+def test_the_committed_overrides_seed_is_well_formed():
+    import csv as _csv
+
+    path = builders.config.CONSTITUENTS_OVERRIDES_PATH
+    with path.open(newline="") as f:
+        reader = _csv.DictReader(f)
+        assert reader.fieldnames == [
+            "press_release", "index_name", "action", "symbol", "effective_from", "note"]
+        rows = list(reader)
+    for r in rows:
+        assert r["action"] in {"include", "exclude", "cancel", "ignore"}, r
+        assert r["press_release"].startswith("ind_prs"), r
+        if r["action"] in {"include", "exclude"}:
+            date.fromisoformat(r["effective_from"])

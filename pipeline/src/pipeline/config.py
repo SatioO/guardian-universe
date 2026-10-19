@@ -173,6 +173,18 @@ CONSTITUENTS_SHRINK_FLOOR: float = 0.5
 # rung is right; carrying it for a week is how the 09-29 list stayed live
 # until 10-19 with no alert.
 CONSTITUENTS_STALE_SESSIONS: int = 3
+# NSE Indices' press releases date each membership change (see
+# sources/nse_index_announcements.py). Inside the grace window an announced
+# change decides membership at its effective date, whatever NSE's CSV says
+# that day; past it, NSE's CSV is authoritative again. The lookback bounds
+# which releases are read at all: NSE announces at most about seven weeks
+# ahead (08-10 for the 09-30 review).
+CONSTITUENTS_ANNOUNCEMENT_GRACE_DAYS: int = 10
+CONSTITUENTS_ANNOUNCEMENT_LOOKBACK_DAYS: int = 120
+# How a human reads a release the parser cannot (a correction written only in
+# prose, a new layout). Columns: press_release, index_name, action
+# (include|exclude|cancel|ignore), symbol, effective_from, note.
+CONSTITUENTS_OVERRIDES_PATH: Path = PROJECT_ROOT / "seeds" / "index_change_overrides.csv"
 
 # CAS-eligible stocks: NSE's Closing Auction Session (live 2026-08-03) covers
 # every cash stock with derivative contracts, so the list is the stock block of

@@ -75,3 +75,11 @@ locally dispatched run.
 Append a row, and take `family` from the index's own page URL rather than
 judging it by name — the classification is NSE's to make, not ours. If NSE's page does not link a CSV, the index has no published
 basket and does not belong here — do not invent a filename.
+
+## `index_change_overrides.csv`
+
+How a human reads an NSE Indices press release the parser cannot (see the
+RUNBOOK, "NSE's announced effective dates"). Header only until one is needed.
+Columns: `press_release` (NSE's id, `ind_prsDDMMYYYY[_n]`), `index_name`
+(NSE's spelling), `action` (`include` | `exclude` | `cancel` | `ignore`),
+`symbol`, `effective_from` (ISO date, for include/exclude), `note`.

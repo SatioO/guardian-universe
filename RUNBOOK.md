@@ -1297,10 +1297,11 @@ Screener provenance are still retained on every successful collection.
 ## Index constituents (`index_constituents`)
 
 `constituents/index_constituents_all.parquet` (manifest name
-`index_constituents`, schema v1) lists the members of every catalogued NSE
+`index_constituents`, schema v2) lists the members of every catalogued NSE
 index (`seeds/index_constituents_catalog.csv`, 134 indices; see
 `seeds/README-index-constituents.md`). Membership is NSE's own per-index CSV
-(`niftyindices.com/IndexConstituent/…`, then the `nsearchives` mirror).
+(`niftyindices.com/IndexConstituent/…`, then the `nsearchives` mirror); WHEN
+a change counts is NSE Indices' press releases (below).
 
 `builders.build_index_constituents` runs in the daily Phase-2 loop and reads
 every list on **every rung**; there is no TTL (since 2026-10-19).
@@ -1310,6 +1311,60 @@ every list on **every rung**; there is no TTL (since 2026-10-19).
   run date, so a holiday or weekend run carries the previous session. An index
   carried forward keeps the session it was last read, so the app's per-index
   age is real. The manifest `latest_date` is the file's maximum, S.
+- **`effective_from` / `change_ref`** (schema v2, appended last, per index):
+  the effective date and press release (`ind_prs10082026`) of the latest
+  announced change in force at S. Remembered from the prior file once the
+  release leaves the window; null until the producer has seen one (indices
+  whose last change predates 2026-10-19 stay null until their next one).
+
+### NSE's announced effective dates (the press-release ledger)
+NSE posts its CSVs on its own schedule (the 09-29 list still had WIPRO at
+22:09 IST, the evening before the review took effect). Every run also reads
+the press-release index (`niftyindices.com/press-release`) and the few
+membership releases (Replacement / Inclusion / Exclusion titles, fixed income
+excluded) announced in the last 120 days whose `w.e.f.` date is on or after
+S - 10 days (`CONSTITUENTS_ANNOUNCEMENT_LOOKBACK_DAYS`,
+`CONSTITUENTS_ANNOUNCEMENT_GRACE_DAYS`), through the shared retry and backoff,
+and reads each PDF with `pypdf` (`sources/nse_index_announcements.py`).
+
+- Per (index, stock), the last announced change effective on or before S
+  decides; a later release wins a tie (a mid-review correction); with only
+  future changes the stock is in its pre-change state. Inside the window this
+  overrides NSE's CSV both ways: a change the CSV has not caught up with is
+  **applied** (an added row takes its ISIN from the symbol master, series EQ,
+  BE, BZ, SM, ST, RR or IV; `source_file` names the release), and a change
+  the CSV shows early is **held** until its date. It also lands on carried
+  rows, so a list read before an effective date changes on it, even through
+  an outage of NSE's lists. Past the window NSE's CSV is authoritative again.
+- On 2026-10-19 five of 1,385 announced (index, stock) states disagreed with
+  NSE's own CSV after the window (Nifty Housing: KARURVYSYA; Nifty MidSmall
+  India Consumption: four swaps of `ind_prs15092026`). An applied change still
+  needed more than 3 sessions after its date is named under `NSE's list lags
+  its release`: check the index page, NSE's CSV or its release is wrong.
+- Layouts read: "N) <Index>" sections with excluded / included tables (and
+  "also applicable to <Index>"), a lettered heading naming one index, a
+  single-index release (index from the title), one company out of an "Index
+  Name" table (matched to the member by company name), and a date revision.
+  Demerger dummy inclusions ("Corporate Action Adjustment" titles) are not
+  membership titles: NSE's CSV carries them.
+
+| Ledger outcome | Status |
+|---|---|
+| changes applied / held | `success`, listed (`announced, applied ahead of NSE's list`, `held until effective`) |
+| an announced stock with no ISIN (not yet in the symbol master) | `success`, listed under `no ISIN to apply`; NSE's CSV decides |
+| press-release index or a PDF unreachable | `success`, `announcements unavailable`; the next rung retries |
+| a membership release no layout reads, or a PDF that is not a PDF | **`failed`**, `UNPARSED releases`; the file is still written |
+
+**Reading an UNPARSED release.** Open the PDF the status names and add rows
+to `pipeline/seeds/index_change_overrides.csv`
+(`press_release,index_name,action,symbol,effective_from,note`):
+- `ignore`: read, no membership effect (e.g. a methodology note);
+- `include` / `exclude` with `index_name`, `symbol`, `effective_from`
+  (ISO date): a change NSE wrote only in prose; it beats the parsed text for
+  the same date;
+- `cancel` with `index_name` and/or `symbol` blank for "all": drops a parsed
+  change (an announcement NSE withdrew).
+Any row naming a release marks it read. Commit the seed; the next rung reads it.
 
 | Outcome | Status | File |
 |---|---|---|

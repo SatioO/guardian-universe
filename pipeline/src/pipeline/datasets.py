@@ -202,7 +202,8 @@ INDEX_CONSTITUENTS = DatasetSpec(
     normalizer=lambda df: df,  # identity: build_index_constituents shapes rows itself
     make_fetcher=_no_fetcher,  # fetched inside the builder, not via run_daily
     abs_rowcount_range=(0, 10**9),
-    manifest_name="index_constituents", schema_version=1,
+    # v2 (2026-10-19): `effective_from` and `change_ref` appended, per index.
+    manifest_name="index_constituents", schema_version=2,
     # A SNAPSHOT, so a single full-rewrite `_all.parquet` rather than
     # year-partitioned: membership has no accumulating date dimension, it has
     # an as-of. `derived` keeps it out of the OHLC-shaped Phase-1 fetch loop

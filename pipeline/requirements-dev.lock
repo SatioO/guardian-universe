@@ -20,6 +20,7 @@ pyarrow==24.0.0
 pydantic==2.13.4
 pydantic-core==2.46.4
 pygments==2.20.0
+pypdf==6.21.1
 pytest==9.1.1
 pytest-cov==7.1.0
 python-dateutil==2.9.0.post0
