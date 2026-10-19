@@ -32,6 +32,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import replace as _dc_replace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -53,6 +54,7 @@ from pipeline.sources import (
     nse_corporate_actions,
     nse_fo_contract,
     nse_fo_mktlots,
+    nse_index_announcements,
     nse_sector,
 )
 from pipeline.sources.classification_registry import ClassificationRegistryRecord
@@ -889,6 +891,325 @@ def _sessions_after(last: date, session: date, holidays: set[date], special: set
     return n
 
 
+# ── index constituents: NSE's announced effective dates ────────────────────
+
+_ANN = nse_index_announcements
+# Appended after `catalog_rev` (schema v2): per index, the effective date and
+# press release of the latest announced change in force at the list's session.
+_CONSTITUENT_DATE_COLUMNS: list[str] = ["effective_from", "change_ref"]
+_OVERRIDE_ACTIONS = frozenset({"include", "exclude", "cancel", "ignore"})
+# Series an index member trades in, in preference order: NSE's lists carry
+# SME (SM, ST), REIT (RR) and InvIT (IV) members beside the equity series.
+_CONSTITUENT_SERIES: tuple[str, ...] = ("EQ", "BE", "BZ", "SM", "ST", "RR", "IV")
+
+
+def _fetch_index_announcements(
+    session_day: date,
+    *,
+    grace_days: int = config.CONSTITUENTS_ANNOUNCEMENT_GRACE_DAYS,
+    lookback_days: int = config.CONSTITUENTS_ANNOUNCEMENT_LOOKBACK_DAYS,
+) -> nse_index_announcements.Announcements:
+    """Read the press-release index and the few releases that can matter to
+    `session_day`, through the shared retry and backoff. A fetch failure is
+    transient and reported as `unavailable`; a PDF that is not a release, or
+    a release no layout reads, is `unparsed`."""
+    http = requests.Session()
+    http.headers.update({"User-Agent": _BROWSER_UA})
+    try:
+        page = _fetch_with_retry(
+            http, _ANN.PRESS_RELEASE_INDEX_URL, session_day,
+            parse=lambda b: b.decode("utf-8", errors="replace"),
+        )
+    except Exception as e:  # noqa: BLE001 - transient: the run goes on CSV-only
+        return _ANN.Announcements(unavailable=[f"press-release index: {e}"])
+    releases = _ANN.select_releases(
+        _ANN.parse_press_release_index(page), session_day,
+        grace_days=grace_days, lookback_days=lookback_days,
+    )
+    parsed: list[nse_index_announcements.ParsedRelease] = []
+    unavailable: list[str] = []
+    malformed: list[str] = []
+    for rel in releases:
+        try:
+            text = _fetch_with_retry(http, rel.url, session_day, parse=_ANN.pdf_text)
+        except _ANN.MalformedAnnouncement:
+            malformed.append(rel.ref)
+            continue
+        except Exception as e:  # noqa: BLE001 - transient; the next rung retries
+            unavailable.append(f"{rel.ref}: {e}")
+            continue
+        try:
+            parsed.append(_ANN.parse_release_text(text, rel))
+        except Exception:  # noqa: BLE001 - a text no layout survives is unparsed, loudly
+            malformed.append(rel.ref)
+    out = _ANN.collect(parsed)
+    out.unparsed.extend(malformed)
+    out.unavailable.extend(unavailable)
+    return out
+
+
+def _read_index_change_overrides(path: Path) -> list[dict[str, str]]:
+    """The committed overrides seed; rows with an unknown action are ignored
+    (the seed's own test pins every committed row's action)."""
+    if not path.exists():
+        return []
+    import csv as _csv
+
+    with path.open(newline="") as f:
+        rows = [
+            {k: (v or "").strip() for k, v in row.items() if k is not None}
+            for row in _csv.DictReader(f)
+        ]
+    return [r for r in rows if r.get("press_release") and r.get("action") in _OVERRIDE_ACTIONS]
+
+
+def _with_overrides(
+    ann: nse_index_announcements.Announcements, overrides: list[dict[str, str]]
+) -> tuple[list[nse_index_announcements.Change], list[str]]:
+    """The announced changes after a human's overrides, and the releases still
+    unparsed (any override row for a release marks it read)."""
+    norm = nse_constituents.normalize_index_name
+    changes = list(ann.changes)
+    for o in overrides:
+        if o["action"] != "cancel":
+            continue
+        changes = [
+            c for c in changes
+            if not (
+                c.ref == o["press_release"]
+                and (not o.get("index_name") or norm(c.index_name) == norm(o["index_name"]))
+                and (not o.get("symbol") or c.symbol == o["symbol"].upper())
+            )
+        ]
+    for i, o in enumerate(overrides):
+        if o["action"] not in (_ANN.INCLUDE, _ANN.EXCLUDE):
+            continue
+        try:
+            eff = date.fromisoformat(o.get("effective_from", ""))
+        except ValueError:
+            continue
+        # announced_on = date.max: a human's reading beats NSE's parsed text
+        # for the same effective date.
+        changes.append(_ANN.Change(
+            o["press_release"], 100_000 + i, date.max, eff, o.get("index_name", ""),
+            o["action"], o.get("symbol", "").upper(), o.get("note", ""),
+        ))
+    for rev in ann.revisions:
+        changes = [
+            _dc_replace(c, effective_from=rev.new)
+            if (c.symbol == rev.symbol and c.action == rev.action and c.effective_from == rev.old
+                and (rev.index_name is None or norm(c.index_name) == norm(rev.index_name)))
+            else c
+            for c in changes
+        ]
+    read = {o["press_release"] for o in overrides}
+    return changes, [r for r in ann.unparsed if r not in read]
+
+
+def _index_lookup(df: pd.DataFrame) -> dict[str, str]:
+    """normalized index name -> index_key, for the indices in the list. NSE's
+    releases drop a trailing "Index" the catalog keeps ("Nifty Healthcare"
+    vs "Nifty Healthcare Index"), so both spellings resolve."""
+    norm = nse_constituents.normalize_index_name
+    out: dict[str, str] = {}
+    for name, key in zip(df["index_name"], df["index_key"], strict=True):
+        n = norm(str(name))
+        out.setdefault(n, str(key))
+        out.setdefault(n.removesuffix("INDEX"), str(key))
+    return out
+
+
+@dataclass
+class _LedgerReport:
+    applied: list[str]
+    held: list[str]
+    unresolved: list[str]
+    lagging: list[str]
+    uncatalogued: int
+
+
+def _apply_announcements(
+    df: pd.DataFrame,
+    prior: pd.DataFrame | None,
+    changes: list[nse_index_announcements.Change],
+    session: date,
+    master: dict[str, tuple[str, str]],
+    *,
+    grace_days: int,
+    lookback_days: int,
+    lag_sessions: int,
+    holidays: set[date],
+    special: set[date],
+) -> tuple[pd.DataFrame, dict[str, tuple[date, str]], _LedgerReport]:
+    """Make each announced change decide membership at session S.
+
+    Per (index, stock), the last change effective on or before S gives the
+    state (a later release wins a tie, so a mid-review correction overrides
+    the original). With only future changes, the stock is in the state before
+    the first one. Where NSE's list disagrees, the list is corrected: a change
+    NSE's CSV has not caught up with is applied; one it shows before its
+    effective date is held back. The baseline may be a fetched list or a
+    carried one, so a list read before the effective date still changes on it.
+
+    Returns the corrected list, per index_key the (effective_from, change_ref)
+    of the latest change in force at S, and the counts for the status.
+    """
+    norm = nse_constituents.normalize_index_name
+    lookup = _index_lookup(df)
+    floor = session - timedelta(days=grace_days)
+    in_window: dict[tuple[str, str], list[nse_index_announcements.Change]] = {}
+    uncatalogued = 0
+    for c in changes:
+        if c.effective_from < floor:
+            continue
+        if c.announced_on != date.max and c.effective_from > c.announced_on + timedelta(
+            days=lookback_days
+        ):
+            continue  # an implausible date: NSE announces weeks ahead, not years
+        n = norm(c.index_name)
+        key = lookup.get(n) or lookup.get(n.removesuffix("INDEX"))
+        if key is None:
+            uncatalogued += 1
+            continue
+        stock = c.symbol or f"company:{_ANN.company_key(c.company)}"
+        in_window.setdefault((key, stock), []).append(c)
+
+    # Rows to borrow a stock's details from: this index's prior rows first,
+    # then the stock in any index.
+    pool = df if prior is None else pd.concat([df, prior.reindex(columns=df.columns)])
+    def _records(frame: pd.DataFrame) -> list[dict[str, object]]:
+        return [{str(k): v for k, v in r.items()} for r in frame.to_dict("records")]
+
+    by_symbol: dict[str, dict[str, object]] = {}
+    for rec in _records(pool):
+        by_symbol.setdefault(str(rec["symbol"]), rec)
+    templates: dict[str, dict[str, object]] = {}
+    for rec in _records(df):
+        templates.setdefault(str(rec["index_key"]), rec)
+    prior_rows: dict[tuple[str, str], dict[str, object]] = {}
+    for rec in ([] if prior is None else _records(prior)):
+        prior_rows.setdefault((str(rec["index_key"]), str(rec["symbol"])), rec)
+    company_symbols: dict[tuple[str, str], str] = {}
+    for key, sym, comp in zip(pool["index_key"], pool["symbol"], pool["company"], strict=True):
+        company_symbols.setdefault((str(key), _ANN.company_key(str(comp))), str(sym))
+
+    report = _LedgerReport([], [], [], [], uncatalogued)
+    in_force: dict[str, tuple[date, str, date]] = {}
+    drop: set[tuple[str, str]] = set()
+    add: list[dict[str, object]] = []
+    members = {(str(k), str(s)) for k, s in zip(df["index_key"], df["symbol"], strict=True)}
+    for (key, stock), cs in sorted(in_window.items()):
+        cs.sort(key=lambda c: (c.effective_from, c.announced_on, c.ref, c.seq))
+        past = [c for c in cs if c.effective_from <= session]
+        for c in past:
+            best = in_force.get(key)
+            if best is None or (c.effective_from, c.announced_on) >= (best[0], best[2]):
+                in_force[key] = (c.effective_from, c.ref, c.announced_on)
+        decisive = past[-1] if past else cs[0]
+        want = (decisive.action == _ANN.INCLUDE) if past else (decisive.action != _ANN.INCLUDE)
+        symbol = stock
+        if stock.startswith("company:"):
+            symbol = company_symbols.get((key, stock.removeprefix("company:")), "")
+            if not symbol:
+                if want:
+                    report.unresolved.append(f"{key} {decisive.company}")
+                continue
+        present = (key, symbol) in members
+        if want == present:
+            continue
+        label = f"{key} {'+' if want else '-'}{symbol} ({decisive.ref})"
+        (report.applied if past else report.held).append(label)
+        behind = _sessions_after(decisive.effective_from, session, holidays, special)
+        if past and behind > lag_sessions:
+            report.lagging.append(label)
+        if not want:
+            drop.add((key, symbol))
+            continue
+        tmpl = templates[key]
+        row: dict[str, object] = {c: tmpl[c] for c in df.columns}
+        if (key, symbol) in prior_rows:
+            src = prior_rows[(key, symbol)]
+            row.update({c: src[c] for c in ("instrument_key", "isin", "company", "industry",
+                                             "series", "source_file")})
+        elif symbol in by_symbol:
+            src = by_symbol[symbol]
+            row.update({c: src[c] for c in ("instrument_key", "isin", "company", "industry",
+                                             "series")})
+            row["source_file"] = f"{decisive.ref}.pdf"
+        elif symbol in master:
+            isin, series = master[symbol]
+            row.update(instrument_key=isin, isin=isin, series=series, industry="",
+                       company=decisive.company, source_file=f"{decisive.ref}.pdf")
+        else:
+            report.unresolved.append(f"{key} {symbol}")
+            (report.applied if past else report.held).remove(label)
+            if label in report.lagging:
+                report.lagging.remove(label)
+            continue
+        row["symbol"] = symbol
+        add.append(row)
+
+    if drop:
+        keep = [
+            (str(k), str(s)) not in drop
+            for k, s in zip(df["index_key"], df["symbol"], strict=True)
+        ]
+        df = df[keep]
+    if add:
+        df = pd.concat([df, pd.DataFrame(add, columns=df.columns)], ignore_index=True)
+    return df, {k: (v[0], v[1]) for k, v in in_force.items()}, report
+
+
+def _effective_columns(
+    out: pd.DataFrame, prior: pd.DataFrame | None, in_force: dict[str, tuple[date, str]]
+) -> pd.DataFrame:
+    """Per index, `effective_from` / `change_ref`: the change in force this
+    run, else the prior file's values (so the last review is remembered once
+    its release leaves the lookback), else null."""
+    remembered: dict[str, tuple[pd.Timestamp, object]] = {}
+    if prior is not None and set(_CONSTITUENT_DATE_COLUMNS) <= set(prior.columns):
+        for key, eff, ref in zip(prior["index_key"], prior["effective_from"], prior["change_ref"],
+                                 strict=True):
+            if pd.notna(eff):
+                remembered.setdefault(str(key), (pd.Timestamp(eff), ref))
+    eff_col: list[object] = []
+    ref_col: list[object] = []
+    for key in out["index_key"]:
+        k = str(key)
+        if k in in_force:
+            eff_col.append(pd.Timestamp(in_force[k][0]))
+            ref_col.append(in_force[k][1])
+        elif k in remembered:
+            eff_col.append(remembered[k][0])
+            ref_col.append(remembered[k][1])
+        else:
+            eff_col.append(pd.NaT)
+            ref_col.append(None)
+    out = out.copy()
+    out["effective_from"] = pd.to_datetime(pd.Series(eff_col, index=out.index, dtype="object"))
+    out["change_ref"] = pd.Series(ref_col, index=out.index, dtype="object").astype("string")
+    return out
+
+
+def _stale_indices(
+    frame: pd.DataFrame, session: date, holidays: set[date], special: set[date], limit: int
+) -> list[str]:
+    """Indices whose NSE list was last read more than `limit` sessions ago."""
+    out = []
+    for key, d in frame.groupby("index_key")["date"].max().items():
+        behind = _sessions_after(pd.Timestamp(d).date(), session, holidays, special)
+        if behind > limit:
+            out.append(f"{key} ({behind} sessions)")
+    return sorted(out)
+
+
+def _some(items: list[str], limit: int = 25) -> str:
+    """A status list that stays readable: a review applies hundreds."""
+    shown = ", ".join(items[:limit])
+    more = f", ... (+{len(items) - limit} more)" if len(items) > limit else ""
+    return f"{len(items)}: {shown}{more}"
+
+
 def build_index_constituents(
     spec: DatasetSpec,
     target: date,
@@ -898,6 +1219,11 @@ def build_index_constituents(
     min_rows: int = config.CONSTITUENTS_MIN_ROWS,
     shrink_floor: float = config.CONSTITUENTS_SHRINK_FLOOR,
     stale_sessions: int = config.CONSTITUENTS_STALE_SESSIONS,
+    fetch_announcements: Callable[[date], nse_index_announcements.Announcements] | None = None,
+    symbol_master: Callable[[], dict[str, tuple[str, str]]] | None = None,
+    overrides_path: Path | None = None,
+    grace_days: int = config.CONSTITUENTS_ANNOUNCEMENT_GRACE_DAYS,
+    lookback_days: int = config.CONSTITUENTS_ANNOUNCEMENT_LOOKBACK_DAYS,
 ) -> RunStatus:
     """Fetch every catalogued index's published basket and full-rewrite
     `index_constituents_all.parquet`.
@@ -923,6 +1249,14 @@ def build_index_constituents(
     Never silently stale: an index not read for more than `stale_sessions`
     sessions makes the run `failed`, naming it. The file is still written
     with everything fresh.
+
+    NSE's announced effective dates (`_apply_announcements`): NSE's CSV says
+    who is in an index, its press releases say when. Inside the grace window
+    an announced change decides membership at S, applied when the CSV lags
+    and held back when the CSV shows it early. `effective_from` /
+    `change_ref` name the latest change in force per index. A membership
+    release no layout reads makes the run `failed`, naming it, until a row in
+    `seeds/index_change_overrides.csv` says how to read it.
     """
     spec.base_dir.mkdir(parents=True, exist_ok=True)
     out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
@@ -942,18 +1276,23 @@ def build_index_constituents(
                 message=f"published list is as of {published}, after {session}; kept",
             )
 
+    fetch_problem: str | None = None
     try:
         df = (fetch_lists or _fetch_all_constituent_lists)(target)
     except Exception as e:  # noqa: BLE001 - any failure -> fail-closed
-        return _constituents_fail_closed(spec, target, out_path, prior_rows, f"fetch failed: {e}")
-
-    if df.empty:
-        return _constituents_fail_closed(spec, target, out_path, prior_rows, "parsed 0 valid rows")
-    if len(df) < min_rows:
-        return _constituents_fail_closed(
-            spec, target, out_path, prior_rows,
-            f"parsed {len(df)} rows < floor {min_rows} (suspected partial run)",
-        )
+        fetch_problem = f"fetch failed: {e}"
+    else:
+        if df.empty:
+            fetch_problem = "parsed 0 valid rows"
+        elif len(df) < min_rows:
+            fetch_problem = f"parsed {len(df)} rows < floor {min_rows} (suspected partial run)"
+    if fetch_problem is not None:
+        if prior is None or prior.empty:
+            return _constituents_fail_closed(spec, target, out_path, prior_rows, fetch_problem)
+        # Nothing usable was read, so every index is carried. NSE's announced
+        # changes still apply to the carried list below: a list read before an
+        # effective date changes on that date, even through an outage.
+        df = pd.DataFrame(columns=nse_constituents.CONSTITUENT_COLUMNS)
     df = df.assign(date=pd.Timestamp(session))
 
     # Per-index shrink guard, then carry forward every index this run could
@@ -976,6 +1315,34 @@ def build_index_constituents(
             carried_keys = sorted(set(carry["index_key"]) - held_keys)
             df = pd.concat([df, carry.reindex(columns=df.columns)], ignore_index=True)
 
+    try:
+        ann = (fetch_announcements or _fetch_index_announcements)(session)
+    except Exception as e:  # noqa: BLE001 - transient: the run goes on CSV-only
+        ann = nse_index_announcements.Announcements(unavailable=[f"announcements: {e}"])
+    changes, unparsed = _with_overrides(
+        ann, _read_index_change_overrides(overrides_path or config.CONSTITUENTS_OVERRIDES_PATH)
+    )
+    df, in_force, ledger = _apply_announcements(
+        df, prior, changes, session, (symbol_master or _constituents_symbol_master)(),
+        grace_days=grace_days, lookback_days=lookback_days, lag_sessions=stale_sessions,
+        holidays=holidays, special=special,
+    )
+
+    if fetch_problem is not None and not (ledger.applied or ledger.held):
+        # Nothing read and nothing announced to apply: keep the file as it is.
+        # Still loud once it is stale or a release went unread.
+        assert prior is not None
+        stale = _stale_indices(prior, session, holidays, special, stale_sessions)
+        why = [f"{fetch_problem}; retained prior file"]
+        if stale:
+            why.append(f"STALE > {stale_sessions} sessions: {', '.join(stale)}")
+        if unparsed:
+            why.append(f"UNPARSED releases: {', '.join(sorted(unparsed))}")
+        return RunStatus(
+            "failed" if stale or unparsed else "skipped_idempotent", target,
+            symbol_count=prior_rows or 0, source=spec.source_label, message="; ".join(why),
+        )
+
     dupes = df.duplicated(subset=["index_key", "instrument_key"]).sum()
     if dupes:
         return _constituents_fail_closed(
@@ -991,34 +1358,54 @@ def build_index_constituents(
     # One value for the whole file: which seed built it (provenance).
     out["catalog_rev"] = _catalog_rev()
     out = out[[*nse_constituents.CONSTITUENT_COLUMNS, "date", "catalog_rev"]]
+    out = _effective_columns(out, prior, in_force)
     _write_atomic(out, out_path)
 
-    last_read = out.groupby("index_key")["date"].max()
-    stale = []
-    for key, d in last_read.items():
-        behind = _sessions_after(pd.Timestamp(d).date(), session, holidays, special)
-        if behind > stale_sessions:
-            stale.append(f"{key} ({behind} sessions)")
+    stale = _stale_indices(out, session, holidays, special, stale_sessions)
 
     parts = [f"{out['index_key'].nunique()} indices as of {session}"]
+    if fetch_problem is not None:
+        parts.append(f"NSE's lists not read ({fetch_problem}); every index carried")
     if held:
         parts.append(f"held (shrink-guard): {', '.join(sorted(held))}")
     if carried_keys:
         parts.append(f"carried (not read this run): {', '.join(carried_keys)}")
     if stale:
-        parts.append(f"STALE > {stale_sessions} sessions: {', '.join(sorted(stale))}")
+        parts.append(f"STALE > {stale_sessions} sessions: {', '.join(stale)}")
+    if ledger.applied:
+        parts.append(f"announced, applied ahead of NSE's list: {_some(ledger.applied)}")
+    if ledger.held:
+        parts.append(f"announced, held until effective: {_some(ledger.held)}")
+    if ledger.lagging:
+        parts.append(f"NSE's list lags its release: {_some(ledger.lagging)}")
+    if ledger.unresolved:
+        parts.append(f"announced, no ISIN to apply: {_some(ledger.unresolved)}")
+    if ann.unavailable:
+        parts.append(f"announcements unavailable: {'; '.join(ann.unavailable)}")
+    if unparsed:
+        parts.append(
+            f"UNPARSED releases (add a row to seeds/index_change_overrides.csv): "
+            f"{', '.join(sorted(unparsed))}"
+        )
+    parts.append(f"{len(ann.read)} releases read")
     # "success", not "ok": data-daily's secondary-status allowlist is
     # success|skipped_holiday|skipped_idempotent|not_yet, and an invented word
     # here failed the publish gate on a build that had actually WORKED.
     # `failed` on staleness reds the job (an alert) without blocking the
     # publish of the file just written.
     return RunStatus(
-        "failed" if stale else "success",
+        "failed" if stale or unparsed else "success",
         target,
         symbol_count=len(out),
         source=spec.source_label,
         message="; ".join(parts),
     )
+
+
+def _constituents_symbol_master() -> dict[str, tuple[str, str]]:
+    from pipeline import datasets as _datasets
+
+    return _symbol_master(_datasets.DATASETS["reference"], _CONSTITUENT_SERIES)
 
 
 def _constituents_fail_closed(
@@ -1087,8 +1474,15 @@ _CAS_EQUITY_SERIES: tuple[str, ...] = ("EQ", "BE", "BZ")
 
 
 def _cas_symbol_isins(universe_spec: DatasetSpec) -> dict[str, str]:
-    """symbol -> current ISIN, from the pipeline's own symbol master (the
-    `reference` dataset's `instruments_all.parquet`).
+    """symbol -> current ISIN; see `_symbol_master`."""
+    return {sym: isin for sym, (isin, _series) in _symbol_master(universe_spec).items()}
+
+
+def _symbol_master(
+    universe_spec: DatasetSpec, series: tuple[str, ...] = _CAS_EQUITY_SERIES
+) -> dict[str, tuple[str, str]]:
+    """symbol -> (current ISIN, series), from the pipeline's own symbol master
+    (the `reference` dataset's `instruments_all.parquet`).
 
     The master is SCD2 and ISINs move under a symbol (a face-value split
     re-issues the ISIN: 360ONE has two EQ rows), and symbols get reused, so the
@@ -1103,16 +1497,18 @@ def _cas_symbol_isins(universe_spec: DatasetSpec) -> dict[str, str]:
         df = pd.read_parquet(path, columns=["symbol", "series", "isin", "last_seen"])
     except Exception:  # noqa: BLE001 - unreadable master -> empty; coverage gate fails closed
         return {}
-    df = df[df["series"].isin(_CAS_EQUITY_SERIES)]
+    df = df[df["series"].isin(series)]
     df = df.assign(
         symbol=df["symbol"].astype(str).str.strip().str.upper(),
         isin=df["isin"].fillna("").astype(str).str.strip().str.upper(),
-        _rank=df["series"].map({s: i for i, s in enumerate(_CAS_EQUITY_SERIES)}),
+        _rank=df["series"].map({s: i for i, s in enumerate(series)}),
     )
     df = df[df["isin"].str.len() == 12]
     df = df.sort_values(["last_seen", "_rank"], ascending=[False, True], kind="mergesort")
     df = df.drop_duplicates(subset=["symbol"], keep="first")
-    return dict(zip(df["symbol"], df["isin"], strict=True))
+    return {
+        s: (i, str(se)) for s, i, se in zip(df["symbol"], df["isin"], df["series"], strict=True)
+    }
 
 
 def _cas_trading_day(target: date) -> bool:
