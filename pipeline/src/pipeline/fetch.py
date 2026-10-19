@@ -35,7 +35,7 @@ import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 import pandas as pd
 import requests
@@ -55,6 +55,9 @@ _TIMEOUT = 30
 # when that fallback is the one that actually serves the day.
 Fallback = tuple[str, Callable[[date], pd.DataFrame]]
 Parser = Callable[[bytes], pd.DataFrame]
+# What a parse returns: a frame for every dataset fetcher, the page text for
+# NSE Indices' press-release index and releases.
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -71,8 +74,8 @@ class Fetcher(Protocol):
 
 
 def _fetch_with_retry(
-    session: requests.Session, url: str, d: date, *, parse: Parser
-) -> pd.DataFrame:
+    session: requests.Session, url: str, d: date, *, parse: Callable[[bytes], _T]
+) -> _T:
     """Shared warm-session + retry contract used by every NSE fetcher.
 
     Best-effort warm-up: NSE deposits anti-bot cookies on the session here.
