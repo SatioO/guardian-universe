@@ -156,14 +156,23 @@ CONSTITUENTS_DIR: Path = DATA_DIR / "constituents"
 # follow no derivable rule, so the catalog is committed rather than computed —
 # harvested from each index's own page. See the seeds README.
 CONSTITUENTS_CATALOG_PATH: Path = PROJECT_ROOT / "seeds" / "index_constituents_catalog.csv"
-# Weekly, matching the cadence the desktop cache already used. Index
-# rebalances are semi-annual (March/September) with ad-hoc corporate-action
-# changes between, so a 7-day window bounds staleness without polling a
-# near-static resource daily.
-CONSTITUENTS_REFRESH_TTL_DAYS: int = 7
+# No TTL: NSE's lists are read on every run. A weekly TTL left the list a
+# week behind each review, and NSE changes some index almost every week
+# (Nifty IPO inclusions, ad hoc replacements), not only in March/September.
 # Floor across ALL indices in one run. The per-index floor lives in
 # nse_constituents.MIN_MEMBERS; this catches a run where most fetches failed.
 CONSTITUENTS_MIN_ROWS: int = 2000
+# Per-index shrink guard: a fetched basket under this fraction of the index's
+# prior member count is read as truncated, and the index keeps its prior rows.
+# A review shrinks an index by far less (Nifty IPO 152 -> 114, Nifty Cement
+# 16 -> 12 on 2026-09-30). There is no whole-file guard: a total smaller than
+# the prior file is what a genuine reconstitution looks like.
+CONSTITUENTS_SHRINK_FLOOR: float = 0.5
+# An index whose NSE list has not been read for more than this many trading
+# sessions fails the run, naming it. Carrying a basket forward over one bad
+# rung is right; carrying it for a week is how the 09-29 list stayed live
+# until 10-19 with no alert.
+CONSTITUENTS_STALE_SESSIONS: int = 3
 
 # CAS-eligible stocks: NSE's Closing Auction Session (live 2026-08-03) covers
 # every cash stock with derivative contracts, so the list is the stock block of
