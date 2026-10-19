@@ -121,6 +121,22 @@ def test_url_construction_handles_the_one_index_that_is_a_full_path():
 # ── builder ─────────────────────────────────────────────────────────────────
 
 TARGET = date(2026, 7, 30)
+# NSE closed on Friday 2026-10-02 (Gandhi Jayanti): the calendar the builder
+# tests run on, so session arithmetic never depends on the committed file.
+HOLIDAYS = {date(2026, 10, 2)}
+
+
+def _calendar() -> tuple[set[date], set[date]]:
+    return HOLIDAYS, set()
+
+
+def _build(spec, target, frame, **kw):
+    """One builder run with the test calendar; `frame` is a frame or a fetch."""
+    fetch = frame if callable(frame) else (lambda _d: frame)
+    kw.setdefault("min_rows", 10)
+    return builders.build_index_constituents(
+        spec, target, fetch_lists=fetch, calendar=_calendar, **kw
+    )
 
 
 def _frame(indices: dict[str, int]) -> pd.DataFrame:
@@ -139,6 +155,15 @@ def _frame(indices: dict[str, int]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=nse_constituents.CONSTITUENT_COLUMNS)
 
 
+def _read(spec) -> pd.DataFrame:
+    return pd.read_parquet(spec.base_dir / "index_constituents_all.parquet")
+
+
+def _dates(spec) -> dict[str, date]:
+    out = _read(spec)
+    return {k: pd.Timestamp(d).date() for k, d in out.groupby("index_key")["date"].max().items()}
+
+
 @pytest.fixture
 def spec(tmp_path):
     # DatasetSpec is frozen; replace() is how the sector tests rebind base_dir.
@@ -146,152 +171,135 @@ def spec(tmp_path):
 
 
 def test_a_healthy_run_writes_the_parquet_with_a_date_column(spec):
-    st = builders.build_index_constituents(
-        spec, TARGET, fetch_lists=lambda _d: _frame({"IDX:A": 30, "IDX:B": 20}), min_rows=10
-    )
+    st = _build(spec, TARGET, _frame({"IDX:A": 30, "IDX:B": 20}))
     assert st.status == "success"
-    out = pd.read_parquet(spec.base_dir / "index_constituents_all.parquet")
+    out = _read(spec)
     # REQUIRED: build_manifest reads columns=["date"]; a missing column raises
     # ArrowInvalid and aborts the publish for EVERY dataset, not just this one.
     assert "date" in out.columns
     assert out["date"].nunique() == 1
     assert len(out) == 50
+    assert out["catalog_rev"].nunique() == 1
 
 
 def test_a_failed_fetch_keeps_the_prior_file_rather_than_emptying_it(spec):
-    builders.build_index_constituents(
-        spec, TARGET, fetch_lists=lambda _d: _frame({"IDX:A": 30}), min_rows=10
-    )
+    _build(spec, TARGET, _frame({"IDX:A": 30}))
 
     def _boom(_d):
         raise RuntimeError("host unreachable")
 
-    st = builders.build_index_constituents(
-        spec, date(2026, 8, 20), fetch_lists=_boom, min_rows=10
-    )
+    st = _build(spec, date(2026, 7, 31), _boom)
     assert st.status == "skipped_idempotent"
     assert "retained prior" in st.message
-    assert len(pd.read_parquet(spec.base_dir / "index_constituents_all.parquet")) == 30
+    assert len(_read(spec)) == 30
 
 
 def test_with_no_prior_file_a_failure_is_loud(spec):
     def _boom(_d):
         raise RuntimeError("host unreachable")
 
-    st = builders.build_index_constituents(spec, TARGET, fetch_lists=_boom, min_rows=10)
-    assert st.status == "failed"
+    assert _build(spec, TARGET, _boom).status == "failed"
 
 
-def test_an_index_missing_from_this_run_carries_its_prior_rows_forward(spec):
-    builders.build_index_constituents(
-        spec, TARGET, fetch_lists=lambda _d: _frame({"IDX:A": 30, "IDX:B": 20}), min_rows=10
-    )
+def test_an_index_missing_from_this_run_carries_its_prior_rows_and_its_own_date(spec):
+    _build(spec, date(2026, 9, 29), _frame({"IDX:A": 30, "IDX:B": 20}))
     # B was unreachable this time. It must NOT vanish — a drill into B would
-    # otherwise show an empty basket, which reads as a real answer.
-    st = builders.build_index_constituents(
-        spec, date(2026, 8, 20), fetch_lists=lambda _d: _frame({"IDX:A": 30}), min_rows=10
-    )
+    # otherwise show an empty basket, which reads as a real answer. And it must
+    # not claim today's date: its membership was last read on 09-29.
+    st = _build(spec, date(2026, 9, 30), _frame({"IDX:A": 30}))
     assert st.status == "success"
-    out = pd.read_parquet(spec.base_dir / "index_constituents_all.parquet")
-    assert set(out["index_key"]) == {"IDX:A", "IDX:B"}
+    assert "carried (not read this run): IDX:B" in st.message
+    assert _dates(spec) == {"IDX:A": date(2026, 9, 30), "IDX:B": date(2026, 9, 29)}
 
 
-def test_a_shrink_is_held_back(spec):
-    builders.build_index_constituents(
-        spec, TARGET, fetch_lists=lambda _d: _frame({"IDX:A": 40}), min_rows=10
-    )
-    # Same index, fewer members, and nothing to carry forward: the publish
-    # shrink-guard would block the shared release, so hold it here.
-    st = builders.build_index_constituents(
-        spec, date(2026, 8, 20), fetch_lists=lambda _d: _frame({"IDX:A": 20}), min_rows=10
-    )
-    assert st.status == "skipped_idempotent"
-    assert "shrink-guard" in st.message
+def test_a_genuine_reconstitution_that_shrinks_the_file_is_written(spec):
+    # 2026-09-30, as NSE published it: Nifty IPO 152 -> 114, Nifty Cement
+    # 16 -> 12. The whole-file guard read the smaller total as a partial run
+    # and kept the pre-review list live from 10-06 to 10-19.
+    _build(spec, date(2026, 9, 29), _frame({"IDX:IPO": 152, "IDX:CEMENT": 16, "IDX:N50": 50}))
+    st = _build(spec, date(2026, 9, 30), _frame({"IDX:IPO": 114, "IDX:CEMENT": 12, "IDX:N50": 50}))
+    assert st.status == "success", st.message
+    out = _read(spec)
+    sizes = out.groupby("index_key").size().to_dict()
+    assert sizes == {"IDX:CEMENT": 12, "IDX:IPO": 114, "IDX:N50": 50}
+    assert set(_dates(spec).values()) == {date(2026, 9, 30)}
 
 
-def test_an_empty_or_thin_run_never_overwrites(spec):
-    empty = pd.DataFrame(columns=nse_constituents.CONSTITUENT_COLUMNS)
-    assert builders.build_index_constituents(
-        spec, TARGET, fetch_lists=lambda _d: empty, min_rows=10
-    ).status == "failed"
-    assert builders.build_index_constituents(
-        spec, TARGET, fetch_lists=lambda _d: _frame({"IDX:A": 5}), min_rows=100
-    ).status == "failed"
+def test_a_basket_under_half_its_prior_size_keeps_the_prior_and_is_named(spec):
+    _build(spec, date(2026, 9, 29), _frame({"IDX:A": 40, "IDX:B": 30}))
+    st = _build(spec, date(2026, 9, 30), _frame({"IDX:A": 12, "IDX:B": 30}))
+    assert st.status == "success"
+    assert "held (shrink-guard): IDX:A 40->12" in st.message
+    out = _read(spec)
+    assert out.groupby("index_key").size().to_dict() == {"IDX:A": 40, "IDX:B": 30}
+    # The held basket is the prior one, so it keeps the prior's session.
+    assert _dates(spec) == {"IDX:A": date(2026, 9, 29), "IDX:B": date(2026, 9, 30)}
 
 
-def test_an_edited_seed_beats_the_ttl_even_when_the_parquet_is_newer(spec, tmp_path, monkeypatch):
-    # THE CI shape: checkout writes the seed FIRST, the sync step downloads
-    # the prior parquet AFTER, so the parquet's mtime always wins and an
-    # mtime-based "seed newer" check can never fire. The content hash must.
-    import os
-    import time
+def test_a_basket_under_the_member_floor_is_held_even_without_a_prior(spec):
+    st = _build(spec, date(2026, 9, 29), _frame({"IDX:A": 30, "IDX:TINY": 4}))
+    assert "IDX:TINY 0->4" in st.message
+    assert set(_read(spec)["index_key"]) == {"IDX:A"}
 
-    from pipeline import config as cfg
 
-    seed = tmp_path / "catalog.csv"
-    seed.write_text("index_name,csv_path\nNifty Bank,ind_niftybanklist.csv\n")
-    monkeypatch.setattr(cfg, "CONSTITUENTS_CATALOG_PATH", seed)
+def test_an_index_unread_for_more_than_three_sessions_fails_the_run_naming_it(spec):
+    _build(spec, date(2026, 9, 29), _frame({"IDX:A": 30, "IDX:B": 20}))
+    # 09-30, 10-01 and 10-05 (10-02 is a holiday): three sessions behind is
+    # one bad stretch of rungs, still fine.
+    st = _build(spec, date(2026, 10, 5), _frame({"IDX:A": 30}))
+    assert st.status == "success", st.message
+    # The fourth session is a list nobody is reading any more: loud.
+    st = _build(spec, date(2026, 10, 6), _frame({"IDX:A": 30}))
+    assert st.status == "failed"
+    assert "STALE > 3 sessions: IDX:B (4 sessions)" in st.message
+    # Still written with everything fresh: an alert, not a held publish.
+    assert _dates(spec) == {"IDX:A": date(2026, 10, 6), "IDX:B": date(2026, 9, 29)}
 
-    builders.build_index_constituents(
-        spec, TARGET, fetch_lists=lambda _d: _frame({"IDX:A": 30}), min_rows=10
-    )
 
-    # Edit the seed, then make the parquet STRICTLY NEWER — the CI ordering.
-    seed.write_text("index_name,csv_path\nNifty Bank,ind_niftybanklist.csv\n# curated\n")
-    out = spec.base_dir / "index_constituents_all.parquet"
-    now = time.time()
-    os.utime(seed, (now - 60, now - 60))
-    os.utime(out, (now, now))
+def test_a_holiday_or_weekend_run_dates_the_list_with_the_previous_session(spec):
+    _build(spec, date(2026, 10, 2), _frame({"IDX:A": 30}))  # NSE holiday (Fri)
+    assert _dates(spec) == {"IDX:A": date(2026, 10, 1)}
+    _build(spec, date(2026, 10, 4), _frame({"IDX:A": 30}))  # Sunday
+    assert _dates(spec) == {"IDX:A": date(2026, 10, 1)}
 
+
+def test_every_run_reads_nse_again_even_the_day_after_a_build(spec):
+    # No TTL. The weekly one is half of why the 09-30 review never arrived:
+    # the 09-29 build made every run until 10-06 skip the fetch.
+    _build(spec, date(2026, 9, 29), _frame({"IDX:A": 30}))
     ran = {"fetched": False}
 
     def fetch(_d):
         ran["fetched"] = True
-        return _frame({"IDX:A": 30})
+        return _frame({"IDX:A": 31})
 
-    st = builders.build_index_constituents(
-        spec, date(2026, 8, 1), fetch_lists=fetch, ttl_days=7, min_rows=10
-    )
-    assert ran["fetched"], "content change must beat the TTL regardless of mtimes"
+    st = _build(spec, date(2026, 9, 30), fetch)
+    assert ran["fetched"]
     assert st.status == "success"
+    assert len(_read(spec)) == 31
 
 
-def test_a_pre_catalog_rev_parquet_rebuilds_rather_than_skipping(spec, tmp_path, monkeypatch):
-    # The exact stranding this fixes: the published file predates the
-    # catalog_rev column, the TTL sees it as fresh, and without the rebuild
-    # the new columns would sit unpublished until the file aged out.
-    from pipeline import config as cfg
+def test_a_back_dated_run_never_moves_the_published_list_backwards(spec):
+    _build(spec, date(2026, 9, 30), _frame({"IDX:A": 30}))
+    # A real frame, not a raising fetch: a raise would be swallowed by the
+    # fail-closed path and prove nothing.
+    calls = []
 
-    seed = tmp_path / "catalog.csv"
-    seed.write_text("index_name,csv_path\nNifty Bank,ind_niftybanklist.csv\n")
-    monkeypatch.setattr(cfg, "CONSTITUENTS_CATALOG_PATH", seed)
+    def fetch(d):
+        calls.append(d)
+        return _frame({"IDX:A": 31})
 
-    spec.base_dir.mkdir(parents=True, exist_ok=True)
-    legacy = _frame({"IDX:A": 30})
-    legacy["date"] = pd.Timestamp(TARGET)  # fresh as-of, no catalog_rev column
-    legacy.to_parquet(spec.base_dir / "index_constituents_all.parquet", index=False)
-
-    st = builders.build_index_constituents(
-        spec, date(2026, 8, 1), fetch_lists=lambda _d: _frame({"IDX:A": 30}),
-        ttl_days=7, min_rows=10,
-    )
-    assert st.status == "success"
-    out = pd.read_parquet(spec.base_dir / "index_constituents_all.parquet")
-    assert "catalog_rev" in out.columns
-
-
-def test_the_weekly_ttl_makes_the_daily_cron_a_no_op(spec):
-    builders.build_index_constituents(
-        spec, TARGET, fetch_lists=lambda _d: _frame({"IDX:A": 30}), min_rows=10
-    )
-
-    def _must_not_run(_d):
-        raise AssertionError("fetched inside the TTL")
-
-    st = builders.build_index_constituents(
-        spec, date(2026, 8, 1), fetch_lists=_must_not_run, ttl_days=7, min_rows=10
-    )
+    st = _build(spec, date(2026, 9, 29), fetch)
     assert st.status == "skipped_idempotent"
+    assert calls == []
+    assert _dates(spec) == {"IDX:A": date(2026, 9, 30)}
+    assert len(_read(spec)) == 30
+
+
+def test_an_empty_or_thin_run_never_overwrites(spec):
+    empty = pd.DataFrame(columns=nse_constituents.CONSTITUENT_COLUMNS)
+    assert _build(spec, TARGET, empty).status == "failed"
+    assert _build(spec, TARGET, _frame({"IDX:A": 5}), min_rows=100).status == "failed"
 
 
 def test_the_committed_catalog_resolves_and_covers_the_thematics():

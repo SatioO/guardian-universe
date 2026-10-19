@@ -1294,6 +1294,51 @@ quarterly mode to resume. Scanner sector data is published only after the
 active-universe coverage and taxonomy gates pass; registry state and raw
 Screener provenance are still retained on every successful collection.
 
+## Index constituents (`index_constituents`)
+
+`constituents/index_constituents_all.parquet` (manifest name
+`index_constituents`, schema v1) lists the members of every catalogued NSE
+index (`seeds/index_constituents_catalog.csv`, 134 indices; see
+`seeds/README-index-constituents.md`). Membership is NSE's own per-index CSV
+(`niftyindices.com/IndexConstituent/…`, then the `nsearchives` mirror).
+
+`builders.build_index_constituents` runs in the daily Phase-2 loop and reads
+every list on **every rung**; there is no TTL (since 2026-10-19).
+
+- **`date` is per index:** the NSE trading session whose membership the rows
+  give. An index read this run is dated S, the last session on or before the
+  run date, so a holiday or weekend run carries the previous session. An index
+  carried forward keeps the session it was last read, so the app's per-index
+  age is real. The manifest `latest_date` is the file's maximum, S.
+
+| Outcome | Status | File |
+|---|---|---|
+| all lists read | `success`, `N indices as of S` | rewritten |
+| an index's fetch failed or its CSV is malformed | `success`, names it under `carried` | its prior rows (and prior `date`) kept |
+| a basket under 5 members, or under 50% of that index's prior count (`CONSTITUENTS_SHRINK_FLOOR`) | `success`, names it under `held (shrink-guard)` | its prior rows kept |
+| any index not read for more than 3 sessions (`CONSTITUENTS_STALE_SESSIONS`) | **`failed`**, names it under `STALE` | still written with everything fresh |
+| whole fetch failed, 0 rows, or < 2000 rows (`CONSTITUENTS_MIN_ROWS`) | `skipped_idempotent` (`failed` on a first run) | prior kept |
+| the published list is for a later session than this run's (a back-dated `daily --date`) | `skipped_idempotent` | kept, nothing fetched |
+
+- **No whole-file shrink guard, and the publish row check skips this
+  dataset** (`DatasetSpec.rows_may_shrink`, set on `index_constituents` only).
+  A review makes the file smaller: on 2026-09-30 Nifty IPO went 152 -> 114
+  and Nifty Cement 16 -> 12. The old whole-file guard read that as a partial
+  run, returned a quiet `skipped_idempotent` on every rung, and kept the
+  09-29 pre-review list (WIPRO in Nifty 50, none of the 27 Nifty 500 swaps)
+  live until the fix. A file missing locally and a `latest_trading_date`
+  regression still stop the publish.
+- **A `STALE` failure** means NSE stopped serving an index's list (a 404, a
+  renamed file) or it keeps failing the shrink floor. Check the index's page
+  on niftyindices.com: fix its catalog row, or remove the row if NSE retired
+  the index. The job stays red until the index is read again.
+- **Known: demerger placeholders.** NSE lists dummy securities with non-ISIN
+  codes in a few indices while a demerger is pending (`DUMMYHEG` /
+  `DUM545A01024`, `DUMMYINXGN`, `DUMMYINGL1`). They are published as NSE
+  lists them; Breadth drops non-ISIN members.
+- **Snapshots** taken before the fix (`data-snapshot-202610`) hold the 09-29
+  list. A restore from one is corrected by the next daily run.
+
 ## CAS-eligible stocks (`cas_eligible`)
 
 `cas_eligible_all.parquet` (manifest name `cas_eligible`, schema v1) lists every

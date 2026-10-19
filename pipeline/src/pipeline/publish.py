@@ -91,6 +91,7 @@ def check_no_shrink(
     *,
     owned: set[str] | None = None,
     allow_shrink: bool = False,
+    rows_may_shrink: frozenset[str] = frozenset(),
 ) -> None:
     """Guard against a publish that would drop data from the live release.
 
@@ -113,6 +114,11 @@ def check_no_shrink(
     almost-always-accidental checks: an owned file/dataset that vanishes
     locally, and a `latest_trading_date` regression, both stay hard errors
     regardless.
+
+    `rows_may_shrink` names datasets (`DatasetSpec.rows_may_shrink`) whose
+    row count may fall on any run without an operator: their builder guards
+    content itself. Only the row-count check is skipped for them, and only
+    for them; the two hard errors above still apply.
     """
     if live is None:
         return
@@ -134,6 +140,8 @@ def check_no_shrink(
                 raise UnexpectedFailure(
                     f"shrink-guard: {lf['name']} is on the live release but missing locally"
                 )
+            if live_ds["name"] in rows_may_shrink:
+                continue
             if "rows" in lf and nf["rows"] < lf["rows"]:
                 msg = f"shrink-guard: {lf['name']} rows {nf['rows']} < live {lf['rows']}"
                 if allow_shrink:
@@ -493,7 +501,10 @@ def publish_dataset(
     # Guards first (they judge what this runner produced), then the carries
     # (they restore what it doesn't).
     check_cas(live, synced)
-    check_no_shrink(new_manifest, live, owned=owned, allow_shrink=allow_shrink)
+    check_no_shrink(
+        new_manifest, live, owned=owned, allow_shrink=allow_shrink,
+        rows_may_shrink=frozenset(s.manifest_name for s in specs if s.rows_may_shrink),
+    )
     carry_forward_deltas(new_manifest, live, existing=existing)
     carry_forward_foreign_datasets(
         new_manifest, live, owned=owned, existing=existing, retired=retired

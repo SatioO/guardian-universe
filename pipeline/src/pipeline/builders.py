@@ -857,22 +857,6 @@ def _catalog_rev() -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
 
 
-def _stored_catalog_rev(out_path: Path) -> str | None:
-    """The seed hash the stored parquet was built from.
-
-    `None` for a missing file, an unreadable file, or a pre-`catalog_rev`
-    build — all of which must compare unequal to the current hash, so the
-    rebuild fires and the file catches up to the schema.
-    """
-    if not out_path.exists():
-        return None
-    try:
-        col = pd.read_parquet(out_path, columns=["catalog_rev"])
-        return None if col.empty else str(col["catalog_rev"].iloc[0])
-    except Exception:  # noqa: BLE001 - column absent or file unreadable
-        return None
-
-
 def _constituents_prior(out_path: Path) -> pd.DataFrame | None:
     if not out_path.exists():
         return None
@@ -882,54 +866,81 @@ def _constituents_prior(out_path: Path) -> pd.DataFrame | None:
         return None
 
 
+def _constituents_calendar() -> tuple[set[date], set[date]]:
+    """(holidays, special sessions) of NSE, from the run's own market calendar
+    (META_DIR/market_calendar.json), as `_cas_trading_day` reads it."""
+    return cal.load_trading_calendar(config.META_DIR)
+
+
+def _session_on_or_before(d: date, holidays: set[date], special: set[date]) -> date:
+    if cal.is_trading_day(d, holidays, special):
+        return d
+    return cal.previous_trading_day(d, holidays, special)
+
+
+def _sessions_after(last: date, session: date, holidays: set[date], special: set[date]) -> int:
+    """How many trading sessions fall in (last, session]."""
+    n = 0
+    cur = session
+    while cur > last:
+        if cal.is_trading_day(cur, holidays, special):
+            n += 1
+        cur -= timedelta(days=1)
+    return n
+
+
 def build_index_constituents(
     spec: DatasetSpec,
     target: date,
     *,
     fetch_lists: Callable[[date], pd.DataFrame] | None = None,
-    ttl_days: int = config.CONSTITUENTS_REFRESH_TTL_DAYS,
+    calendar: Callable[[], tuple[set[date], set[date]]] | None = None,
     min_rows: int = config.CONSTITUENTS_MIN_ROWS,
+    shrink_floor: float = config.CONSTITUENTS_SHRINK_FLOOR,
+    stale_sessions: int = config.CONSTITUENTS_STALE_SESSIONS,
 ) -> RunStatus:
     """Fetch every catalogued index's published basket and full-rewrite
     `index_constituents_all.parquet`.
 
-    Weekly TTL: index rebalances are semi-annual (March/September) with ad-hoc
-    corporate-action changes between, so re-fetching ~134 CSVs daily would poll
-    a near-static resource for nothing. Within the TTL this is a no-op.
+    `date` is per index: the trading session whose membership the rows give.
+    An index read from NSE this run is dated S, the last NSE session on or
+    before `target` (a holiday run never stamps a non-session). An index
+    carried forward keeps the session it was last read, so its age is real.
+
+    NSE's lists are read on every run. There is no TTL: a weekly one put the
+    list a week behind each review.
 
     Fail-closed, at TWO levels, because the two failures are different:
-      - PER INDEX: a failed fetch or malformed payload keeps that index's prior
-        rows and is counted, never published as an empty basket. An index whose
-        drill silently empties looks like a real (empty) answer to a user.
-      - PER RUN: zero rows, a total under `min_rows`, or a shrink against the
-        stored file holds the whole write back — the same wall
-        build_sector_industry puts up, and the publish shrink-guard besides.
+      - PER INDEX: a failed fetch or malformed payload, or a basket under
+        `MIN_MEMBERS` or under `shrink_floor` of that index's prior count,
+        keeps that index's prior rows and names it. An index whose drill
+        silently empties looks like a real (empty) answer to a user.
+      - PER RUN: zero rows or a total under `min_rows` holds the whole write
+        back. There is no whole-file shrink guard: a genuine reconstitution
+        makes the total smaller (2026-09-30: 10,376 -> 10,333 rows), and that
+        guard kept the pre-review list live for three weeks.
+
+    Never silently stale: an index not read for more than `stale_sessions`
+    sessions makes the run `failed`, naming it. The file is still written
+    with everything fresh.
     """
     spec.base_dir.mkdir(parents=True, exist_ok=True)
     out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
+    holidays, special = (calendar or _constituents_calendar)()
+    session = _session_on_or_before(target, holidays, special)
     prior = _constituents_prior(out_path)
     prior_rows = None if prior is None else len(prior)
 
-    # The TTL exists to avoid re-fetching ~134 CSVs daily; it must NOT pin the
-    # CATALOG's metadata. Curation (rotation_list, display_label) is seed data
-    # that reaches the parquet only through a rebuild, so an edited seed beats
-    # the TTL — otherwise a curation change would sit invisible for a week.
-    #
-    # CONTENT-based, not mtime-based, because mtime cannot work in CI: the
-    # checkout writes the seed FIRST, then the sync step downloads the prior
-    # parquet, so the parquet is always newer and an mtime check never fires
-    # exactly where the rebuild matters. The published file carries the hash
-    # of the seed that built it; any seed edit changes the hash and beats the
-    # TTL on the next run, in CI and locally alike.
-    seed_changed = _stored_catalog_rev(out_path) != _catalog_rev()
-    if _sector_is_fresh(out_path, target, ttl_days) and not seed_changed:
-        return RunStatus(
-            "skipped_idempotent",
-            target,
-            symbol_count=prior_rows or 0,
-            source=spec.source_label,
-            message=f"within {ttl_days}-day TTL; not re-fetched",
-        )
+    # A back-dated `daily --date` must not restamp today's lists with an
+    # older session, nor move the published file backwards.
+    if prior is not None and not prior.empty:
+        published = pd.to_datetime(prior["date"]).max().date()
+        if published > session:
+            return RunStatus(
+                "skipped_idempotent", target, symbol_count=prior_rows or 0,
+                source=spec.source_label,
+                message=f"published list is as of {published}, after {session}; kept",
+            )
 
     try:
         df = (fetch_lists or _fetch_all_constituent_lists)(target)
@@ -943,20 +954,27 @@ def build_index_constituents(
             spec, target, out_path, prior_rows,
             f"parsed {len(df)} rows < floor {min_rows} (suspected partial run)",
         )
+    df = df.assign(date=pd.Timestamp(session))
 
-    # Carry forward any index the run could not reach, so one unreachable host
-    # never deletes a basket that was fine yesterday.
+    # Per-index shrink guard, then carry forward every index this run could
+    # not use, so one unreachable host never deletes a basket that was fine
+    # yesterday. Carried rows keep their own `date`.
+    prior_counts = (
+        {} if prior is None else prior.groupby("index_key").size().to_dict()
+    )
+    held: list[str] = []
+    for key, n in df.groupby("index_key").size().items():
+        before = prior_counts.get(key)
+        if n < nse_constituents.MIN_MEMBERS or (before is not None and n < shrink_floor * before):
+            held.append(f"{key} {before or 0}->{n}")
+    held_keys = {h.split(" ", 1)[0] for h in held}
+    df = df[~df["index_key"].isin(held_keys)]
+    carried_keys: list[str] = []
     if prior is not None:
-        missing = set(prior["index_key"]) - set(df["index_key"])
-        if missing:
-            carried = prior[prior["index_key"].isin(missing)]
-            df = pd.concat([df, carried], ignore_index=True)
-
-    if prior_rows is not None and len(df) < prior_rows:
-        return _constituents_fail_closed(
-            spec, target, out_path, prior_rows,
-            f"parsed {len(df)} rows < prior {prior_rows} (shrink-guard)",
-        )
+        carry = prior[~prior["index_key"].isin(set(df["index_key"]))]
+        if not carry.empty:
+            carried_keys = sorted(set(carry["index_key"]) - held_keys)
+            df = pd.concat([df, carry.reindex(columns=df.columns)], ignore_index=True)
 
     dupes = df.duplicated(subset=["index_key", "instrument_key"]).sum()
     if dupes:
@@ -969,21 +987,37 @@ def build_index_constituents(
     # missing column raises ArrowInvalid and aborts the publish for EVERY
     # dataset, not just this one.
     out = df.copy()
-    out["date"] = pd.Timestamp(target)
-    # One value for the whole file: which seed built it. This is what the next
-    # run compares against to decide whether an edited catalog beats the TTL.
+    out["date"] = pd.to_datetime(out["date"])
+    # One value for the whole file: which seed built it (provenance).
     out["catalog_rev"] = _catalog_rev()
     out = out[[*nse_constituents.CONSTITUENT_COLUMNS, "date", "catalog_rev"]]
     _write_atomic(out, out_path)
+
+    last_read = out.groupby("index_key")["date"].max()
+    stale = []
+    for key, d in last_read.items():
+        behind = _sessions_after(pd.Timestamp(d).date(), session, holidays, special)
+        if behind > stale_sessions:
+            stale.append(f"{key} ({behind} sessions)")
+
+    parts = [f"{out['index_key'].nunique()} indices as of {session}"]
+    if held:
+        parts.append(f"held (shrink-guard): {', '.join(sorted(held))}")
+    if carried_keys:
+        parts.append(f"carried (not read this run): {', '.join(carried_keys)}")
+    if stale:
+        parts.append(f"STALE > {stale_sessions} sessions: {', '.join(sorted(stale))}")
     # "success", not "ok": data-daily's secondary-status allowlist is
     # success|skipped_holiday|skipped_idempotent|not_yet, and an invented word
     # here failed the publish gate on a build that had actually WORKED.
+    # `failed` on staleness reds the job (an alert) without blocking the
+    # publish of the file just written.
     return RunStatus(
-        "success",
+        "failed" if stale else "success",
         target,
         symbol_count=len(out),
         source=spec.source_label,
-        message=f"{out['index_key'].nunique()} indices",
+        message="; ".join(parts),
     )
 
 
