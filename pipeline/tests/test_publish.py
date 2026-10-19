@@ -1007,3 +1007,67 @@ def test_publish_refuses_without_a_reference_list(tmp_path: Path):
         publish_dataset(specs=[ref], meta_dir=meta, stage_dir=stage,
                         client=FakeReleaseClient(exists=True), generated_at="g", now=NOW,
                         retired=RETIRED)
+
+
+def _one_file(name: str, rows: int) -> dict[str, Any]:
+    return {"name": name, "baseline": [{"name": f"{name}_all.parquet", "rows": rows,
+                                        "sha256": f"s{rows}", "bytes": 1, "asset": f"a{rows}"}],
+            "deltas": []}
+
+
+def test_a_rows_may_shrink_dataset_shrinks_and_every_other_dataset_is_still_guarded():
+    # A review shrinks index_constituents (10,376 -> 10,353 on 2026-09-30).
+    # Its row check is skipped by name; the same shrink on cas_eligible in the
+    # SAME call still raises, and so does a constituents file gone missing.
+    flagged = frozenset({"index_constituents"})
+    live = {"latest_trading_date": "2026-10-16", "datasets": [
+        _one_file("index_constituents", 10376), _one_file("cas_eligible", 210)]}
+    shrunk = {"latest_trading_date": "2026-10-16", "datasets": [
+        _one_file("index_constituents", 10353), _one_file("cas_eligible", 210)]}
+    check_no_shrink(shrunk, live, rows_may_shrink=flagged)  # no raise
+    with pytest.raises(UnexpectedFailure, match="index_constituents_all.parquet rows 10353"):
+        check_no_shrink(shrunk, live)
+    both = {"latest_trading_date": "2026-10-16", "datasets": [
+        _one_file("index_constituents", 10353), _one_file("cas_eligible", 200)]}
+    with pytest.raises(UnexpectedFailure, match="cas_eligible_all.parquet rows 200 < live 210"):
+        check_no_shrink(both, live, rows_may_shrink=flagged)
+    lost = {"latest_trading_date": "2026-10-16", "datasets": [
+        {"name": "index_constituents", "baseline": [], "deltas": []},
+        _one_file("cas_eligible", 210)]}
+    with pytest.raises(UnexpectedFailure, match="missing locally"):
+        check_no_shrink(lost, live, rows_may_shrink=flagged)
+    regressed = {**shrunk, "latest_trading_date": "2026-10-15"}
+    with pytest.raises(UnexpectedFailure, match="regress"):
+        check_no_shrink(regressed, live, rows_may_shrink=flagged)
+
+
+def test_only_index_constituents_may_shrink_without_an_operator():
+    flagged = {s.manifest_name for s in datasets.all_specs() if s.rows_may_shrink}
+    assert flagged == {"index_constituents"}
+
+
+def test_publish_lets_a_smaller_constituents_list_replace_the_live_one(tmp_path: Path):
+    # Through publish_dataset: the flag reaches the guard from the specs.
+    ohlc, meta, stage = _store(tmp_path, ["2026-07-03"])
+    cons = tmp_path / "constituents"
+    cons.mkdir()
+    spec = dataclasses.replace(datasets.INDEX_CONSTITUENTS, base_dir=cons)
+
+    def write(n: int) -> None:
+        pd.DataFrame({"index_key": ["IDX:A"] * n, "instrument_key": [f"INE{i}" for i in range(n)],
+                      "date": pd.to_datetime(["2026-07-03"] * n)}).to_parquet(
+            cons / "index_constituents_all.parquet", index=False)
+
+    write(30)
+    _synced(meta, None)
+    fake = FakeReleaseClient(exists=False, now_iso="2026-07-05T16:00:00Z")
+    publish_dataset(specs=[*specs_for(ohlc), spec], meta_dir=meta, stage_dir=stage,
+                    client=fake, generated_at="2026-07-05T16:00:00+00:00", now=NOW)
+    write(20)
+    _synced(meta, "2026-07-05T16:00:00+00:00")
+    publish_dataset(specs=[*specs_for(ohlc), spec], meta_dir=meta, stage_dir=stage,
+                    client=fake, generated_at="2026-07-05T17:00:00+00:00", now=NOW)
+    assert_release_consistent(fake)
+    live = json.loads(fake.assets["manifest.json"])
+    by_name = {d["name"]: d for d in live["datasets"]}
+    assert dataset_files(by_name["index_constituents"])[0]["rows"] == 20

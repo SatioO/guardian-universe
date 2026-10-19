@@ -62,6 +62,12 @@ class DatasetSpec:
     # An unpublished one is an internal input: built or fetched into a
     # run-local store, read by builders, then discarded with the runner.
     published: bool = True
+    # The publish shrink-guard's ROW-COUNT check skips this dataset: its
+    # builder guards content itself and a smaller file is routine. Only
+    # index_constituents sets it (NSE shrinks some index almost every week; a
+    # review shrank the file 10,376 -> 10,353). A file missing locally and a
+    # latest_trading_date regression stay hard errors for it.
+    rows_may_shrink: bool = False
 
 
 def _load_isin_map() -> dict[tuple[str, str], str]:
@@ -197,12 +203,16 @@ INDEX_CONSTITUENTS = DatasetSpec(
     make_fetcher=_no_fetcher,  # fetched inside the builder, not via run_daily
     abs_rowcount_range=(0, 10**9),
     manifest_name="index_constituents", schema_version=1,
-    # A slow-moving SNAPSHOT, so a single full-rewrite `_all.parquet` rather
-    # than year-partitioned: membership has no accumulating date dimension, it
-    # has an as-of. `derived` keeps it out of the OHLC-shaped Phase-1 fetch
-    # loop and out of the per-trading-day freshness check (it refreshes
-    # weekly), while still running each daily cycle via the Phase-2 BUILDERS.
+    # A SNAPSHOT, so a single full-rewrite `_all.parquet` rather than
+    # year-partitioned: membership has no accumulating date dimension, it has
+    # an as-of. `derived` keeps it out of the OHLC-shaped Phase-1 fetch loop
+    # and out of the per-trading-day freshness check (the builder has its own
+    # staleness alert), while still running each daily cycle via the Phase-2
+    # BUILDERS.
     derived=True,
+    # The builder's per-index guard protects this file; a review legitimately
+    # shrinks it, and the release-wide row check would block every dataset.
+    rows_may_shrink=True,
 )
 
 CAS_ELIGIBLE = DatasetSpec(
