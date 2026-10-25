@@ -6,8 +6,12 @@
   ],
   "venues": {
     "NSE": {
-      "source": "NSE Capital Market trading-holiday circulars: 2025 CMTR65587; 2026 CMTR71775, amended by CMTR72260 (2026-01-15)",
+      "source": "NSE Capital Market trading-holiday circulars: 2025 CMTR65587; 2026 CMTR71775, amended by CMTR72260 (2026-01-15); 2021-2024 verified against NSE's archive (a bhavcopy present or absent for every day, 2026-10-25), special-session hours from the cited circulars",
       "coveredYears": [
+        2021,
+        2022,
+        2023,
+        2024,
         2025,
         2026
       ],
@@ -24,7 +28,6 @@
           "2021-08-19",
           "2021-09-10",
           "2021-10-15",
-          "2021-11-04",
           "2021-11-05",
           "2021-11-19"
         ],
@@ -117,20 +120,76 @@
       },
       "sessions": [
         {
+          "date": "2021-11-04",
+          "label": "muhurat-2021 (Diwali Laxmi Pujan — Thursday evening Muhurat trading on a listed closure; NSE published a bhavcopy)",
+          "preOpen": "18:00",
+          "open": "18:15",
+          "close": "19:15",
+          "source": "NSE/CMTR/50050 (2021-10-21): pre-open 18:00, normal market 18:15-19:15; https://nsearchives.nseindia.com/content/circulars/CMTR50050.pdf"
+        },
+        {
+          "date": "2022-10-24",
+          "label": "muhurat-2022 (Diwali Laxmi Pujan — Monday evening Muhurat trading; NSE published a bhavcopy)",
+          "preOpen": "18:00",
+          "open": "18:15",
+          "close": "19:15",
+          "source": "NSE/CMTR/54023 (2022-10-11): pre-open 18:00, normal market 18:15-19:15; https://nsearchives.nseindia.com/content/circulars/CMTR54023.pdf"
+        },
+        {
           "date": "2023-11-12",
-          "label": "muhurat-2023 (Diwali Laxmi Pujan — Sunday evening Muhurat trading; NSE published a bhavcopy)"
+          "label": "muhurat-2023 (Diwali Laxmi Pujan — Sunday evening Muhurat trading; NSE published a bhavcopy)",
+          "preOpen": "18:00",
+          "open": "18:15",
+          "close": "19:15",
+          "source": "NSE/CMTR/59124 (2023-10-27): pre-open 18:00, normal market 18:15-19:15; https://nsearchives.nseindia.com/content/circulars/CMTR59124.pdf"
         },
         {
           "date": "2024-01-20",
-          "label": "special-session-2024-01-20 (Saturday NSE special live/DR session; bhavcopy published — derived from NSE archive)"
+          "label": "session-2024-01-20 (Saturday regular full session from the primary site; the planned DR-site drill was withdrawn; bhavcopy published)",
+          "preOpen": "09:00",
+          "open": "09:15",
+          "close": "15:30",
+          "source": "NSE/MSD/60340 (2024-01-19): withdraws NSE/MSD/59999, 60300 and 60318 and sets regular trading sessions at regular market timings (pre-open 09:00, 09:15-15:30, as NSE/MSD/66381); https://nsearchives.nseindia.com/content/circulars/MSD60340.pdf"
         },
         {
           "date": "2024-03-02",
-          "label": "special-session-2024-03-02 (Saturday NSE special live/DR session; bhavcopy published — derived from NSE archive)"
+          "label": "special-session-2024-03-02 primary site (Saturday NSE special live session with intra-day switch-over to the DR site; bhavcopy published)",
+          "preOpen": "09:00",
+          "open": "09:15",
+          "close": "10:00",
+          "source": "NSE/MSD/60677 (2024-02-14), CM segment primary site: pre-open 09:00, normal market 09:15-10:00; https://nsearchives.nseindia.com/content/circulars/MSD60677.pdf"
+        },
+        {
+          "date": "2024-03-02",
+          "label": "special-session-2024-03-02 DR site (Saturday NSE special live session with intra-day switch-over to the DR site; bhavcopy published)",
+          "preOpen": "11:15",
+          "open": "11:30",
+          "close": "12:30",
+          "source": "NSE/MSD/60677 (2024-02-14), CM segment DR site: pre-open 11:15, normal market 11:30-12:30; https://nsearchives.nseindia.com/content/circulars/MSD60677.pdf"
         },
         {
           "date": "2024-05-18",
-          "label": "special-session-2024-05-18 (Saturday NSE special live/DR session; bhavcopy published — derived from NSE archive)"
+          "label": "special-session-2024-05-18 primary site (Saturday NSE special live session with intra-day switch-over to the DR site; bhavcopy published)",
+          "preOpen": "09:00",
+          "open": "09:15",
+          "close": "10:00",
+          "source": "NSE/MSD/61893 (2024-05-07), CM segment primary site: pre-open 09:00, normal market 09:15-10:00; https://nsearchives.nseindia.com/content/circulars/MSD61893.pdf"
+        },
+        {
+          "date": "2024-05-18",
+          "label": "special-session-2024-05-18 DR site (Saturday NSE special live session with intra-day switch-over to the DR site; bhavcopy published)",
+          "preOpen": "11:15",
+          "open": "11:30",
+          "close": "12:30",
+          "source": "NSE/MSD/61893 (2024-05-07), CM segment DR site: pre-open 11:15, normal market 11:30-12:30; https://nsearchives.nseindia.com/content/circulars/MSD61893.pdf"
+        },
+        {
+          "date": "2024-11-01",
+          "label": "muhurat-2024 (Diwali Laxmi Pujan — Friday evening Muhurat trading; NSE published a bhavcopy)",
+          "preOpen": "17:45",
+          "open": "18:00",
+          "close": "19:00",
+          "source": "NSE/CMTR/64628 (2024-10-19): pre-open 17:45, normal market 18:00-19:00; https://nsearchives.nseindia.com/content/circulars/CMTR64628.pdf"
         },
         {
           "date": "2025-02-01",
