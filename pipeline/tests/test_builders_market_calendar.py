@@ -96,10 +96,42 @@ def test_the_committed_calendar_carries_each_venues_closures_and_partial_days():
 def test_only_verified_years_are_covered():
     rows = _committed().rows()
     covered = {(r.venue, r.day.year) for r in rows if r.kind == "covered"}
-    assert covered == {("NSE", 2025), ("NSE", 2026), ("BSE", 2025), ("BSE", 2026), ("MCX", 2026)}
-    # Older NSE closures are published, but their years stay unknown to the
-    # app: their special sessions' hours are not verified.
+    assert covered == {
+        *(("NSE", year) for year in range(2021, 2027)),
+        ("BSE", 2025),
+        ("BSE", 2026),
+        ("MCX", 2026),
+    }
     assert _find(rows, "NSE", "2024-01-22", "closed")
+
+
+def test_nse_2021_to_2024_special_sessions_carry_their_circular_hours():
+    rows = _committed().rows()
+    # Muhurat 2021 traded on a listed closure: the session replaces it.
+    assert _find(rows, "NSE", "2021-11-04", "closed") == []
+    for day in ("2021-11-04", "2022-10-24", "2023-11-12"):
+        (muhurat,) = _find(rows, "NSE", day, "session")
+        assert (
+            _hm(muhurat.pre_open_seconds),
+            _hm(muhurat.open_seconds),
+            _hm(muhurat.close_seconds),
+        ) == (
+            "18:00",
+            "18:15",
+            "19:15",
+        ), day
+    # The DR drill planned for 2024-01-20 was withdrawn: a regular full day.
+    (regular,) = _find(rows, "NSE", "2024-01-20", "session")
+    assert (_hm(regular.open_seconds), _hm(regular.close_seconds)) == ("09:15", "15:30")
+    # The DR drills: a primary-site window, then a DR-site window.
+    for day in ("2024-03-02", "2024-05-18"):
+        windows = _find(rows, "NSE", day, "session")
+        assert [(_hm(w.open_seconds), _hm(w.close_seconds)) for w in windows] == [
+            ("09:15", "10:00"),
+            ("11:30", "12:30"),
+        ], day
+    (muhurat_2024,) = _find(rows, "NSE", "2024-11-01", "session")
+    assert (_hm(muhurat_2024.open_seconds), _hm(muhurat_2024.close_seconds)) == ("18:00", "19:00")
 
 
 # ── validation ──────────────────────────────────────────────────────────────
