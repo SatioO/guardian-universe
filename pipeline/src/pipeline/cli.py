@@ -113,6 +113,9 @@ class ClassificationCollectionReport:
 builders.BUILDERS["reference"] = functools.partial(
     builders.build_reference, source_spec=datasets.DATASETS[datasets.DATASET_ORDER[0]]
 )
+# bse_reference fetches BSE's daily bhavcopies itself; registered bare, its
+# keyword-only fetch/calendar/window args carry defaults.
+builders.BUILDERS["bse_reference"] = builders.build_bse_reference
 # sector_industry fetches its own external CSV (no store `source_spec` to bind);
 # registered directly. Its keyword-only fetch/TTL/floor args carry defaults, so
 # it still satisfies BUILDERS' `Callable[[DatasetSpec, date], RunStatus]`.
@@ -210,6 +213,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace the synced instrument list instead of merging it in",
     )
+    # Re-read BSE's bhavcopies for the last N BSE sessions and merge them into
+    # bse_instruments_all (RUNBOOK.md 'BSE instrument list').
+    bb = sub.add_parser("backfill-bse-instruments")
+    bb.add_argument("--days", type=int, required=True)
+    bb.add_argument("--date", default=None, help="last day to read (default: today)")
     # Residential only (NSE's API blocks datacenter IPs): fill or top up the
     # corporate_actions_history dataset from NSE's corporate-actions API. See
     # RUNBOOK.md 'Corporate actions history'.
@@ -766,6 +774,16 @@ def main(argv: list[str] | None = None) -> int:
             end=end,
             today=today,
             get=ApiClient().get,
+        )
+        print(manifest.status_to_dict(status))
+        return 0 if status.status == "success" else 1
+    if args.cmd == "backfill-bse-instruments":
+        end = date.fromisoformat(args.date) if args.date else datetime.now(UTC).date()
+        holidays, special = builders.bse_calendar()
+        status = builders.build_bse_reference(
+            datasets.BSE_REFERENCE,
+            end,
+            days=cal.trading_days_back(end, args.days, holidays, special),
         )
         print(manifest.status_to_dict(status))
         return 0 if status.status == "success" else 1

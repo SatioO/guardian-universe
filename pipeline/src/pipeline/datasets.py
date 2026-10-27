@@ -176,6 +176,22 @@ REFERENCE = DatasetSpec(
     derived=True,
 )
 
+BSE_REFERENCE = DatasetSpec(
+    key="bse_reference", file_prefix="bse_instruments", base_dir=config.REFERENCE_DIR,
+    source_label="bse-cm-udiff",
+    normalizer=lambda df: df,  # identity: builders.build_bse_reference shapes rows itself
+    make_fetcher=_no_fetcher,  # BSE's bhavcopies are fetched inside the builder
+    abs_rowcount_range=(0, 10**9),
+    manifest_name="bse_reference", schema_version=1,
+    # The BSE twin of `reference`: one row per BSE listing version with its
+    # scrip code (the exchange token brokers report for a BSE order) and ISIN,
+    # from BSE's daily bhavcopy, merged onto the published list each run. The
+    # desktop app reads a scrip code as an alias of the NSE listing with the
+    # same ISIN. `derived` keeps it out of the NSE-shaped Phase-1 fetch loop;
+    # the Phase-2 BUILDERS loop runs it each daily cycle.
+    derived=True,
+)
+
 SECTOR_INDUSTRY = DatasetSpec(
     key="sector_industry", file_prefix="sector_industry", base_dir=config.SECTOR_DIR,
     source_label="nse-sector",
@@ -387,6 +403,7 @@ SPECIAL_PRE_OPEN = DatasetSpec(
 
 DATASETS: dict[str, DatasetSpec] = {
     "equities": EQUITIES, "indices": INDICES, "reference": REFERENCE,
+    "bse_reference": BSE_REFERENCE,
     "sector_industry": SECTOR_INDUSTRY,
     "classification_registry": CLASSIFICATION_REGISTRY,
     "classification_observations": CLASSIFICATION_OBSERVATIONS,
@@ -401,7 +418,7 @@ DATASETS: dict[str, DatasetSpec] = {
     "special_pre_open": SPECIAL_PRE_OPEN,
 }
 DATASET_ORDER: list[str] = [
-    "equities", "indices", "reference", "sector_industry",
+    "equities", "indices", "reference", "bse_reference", "sector_industry",
     "classification_registry", "classification_observations",
     "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
     "bse_fno_freeze_limits", "market_calendar", "corporate_actions",
