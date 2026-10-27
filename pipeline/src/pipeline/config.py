@@ -267,6 +267,15 @@ BSE_FNO_FREEZE_LIMITS_MIN_ROWS: int = 100
 # 1.2% and peaked at 10.3% (May 2024); 0.2% on 2026-10-12.
 REFERENCE_PRIOR_MAX_NEW_SHARE: float = 0.25
 
+# BSE instrument list (builders.build_bse_reference), from BSE's daily
+# bhavcopy. A first build (no published list) reads this many BSE sessions;
+# a daily run reads every session since the list's newest, refusing past
+# this many (a backfill then catches it up). 5,170 scrips on 2026-10-26: a
+# file under the floor is truncated.
+BSE_REFERENCE_SEED_DAYS: int = 30
+BSE_REFERENCE_MAX_CATCHUP_DAYS: int = 30
+BSE_BHAVCOPY_MIN_ROWS: int = 2000
+
 
 def dataset_path(year: int, base: Path, *, prefix: str = "ohlc") -> Path:
     """Path to a dataset's year-partitioned parquet file: {prefix}_{YYYY}.parquet."""
@@ -281,3 +290,4 @@ def ohlc_path(year: int, base: Path | None = None) -> Path:
 # Distribution (P1a): rolling GitHub Release served by GitHub's CDN.
 GITHUB_REPO = "SatioO/guardian-universe"
 RELEASE_TAG = "data-latest"
+

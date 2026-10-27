@@ -48,6 +48,7 @@ from pipeline.datasets import DatasetSpec
 from pipeline.errors import NotYetPublished, UnexpectedFailure
 from pipeline.fetch import _BROWSER_UA, _MAX_RETRIES, _TIMEOUT, _fetch_with_retry
 from pipeline.sources import (
+    bse_cm_bhavcopy,
     bse_eqd_contract,
     classification_publication,
     nse_constituents,
@@ -349,6 +350,292 @@ def rebuild_reference(
     out = _shape_reference(versions, trading_calendar)
     _write_atomic(out, out_path)
     return RunStatus("success", target, symbol_count=len(out), source="derived", message=note)
+
+
+# ── BSE instrument list ─────────────────────────────────────────────────────
+# `bse_instruments_all.parquet`: the BSE twin of `instruments_all.parquet`,
+# one row per BSE listing version with its scrip code and ISIN, so the desktop
+# app can read a BSE scrip code (the exchange token Kite and Dhan report) as
+# an alias of the NSE listing with the same ISIN.
+
+# A listing version: a change of ISIN, scrip id or group starts a new row,
+# as a change of series does on NSE's list. The scrip code is BSE's identity
+# and stays across them.
+_BSE_REFERENCE_KEY = ["scrip_code", "isin", "symbol", "group"]
+_BSE_REFERENCE_VERSION_COLUMNS = [*_BSE_REFERENCE_KEY, "name", "first_seen", "last_seen"]
+_BSE_REFERENCE_COLUMNS = [
+    "scrip_code",
+    "isin",
+    "symbol",
+    "name",
+    "group",
+    "status",
+    "first_seen",
+    "last_seen",
+    "valid_from",
+    "valid_to",
+    "date",
+]
+# instruments_all's types (its dates are timestamp[ns]), pinned.
+_BSE_REFERENCE_SCHEMA = pa.schema(
+    [
+        ("scrip_code", pa.int64()),
+        ("isin", pa.string()),
+        ("symbol", pa.string()),
+        ("name", pa.string()),
+        ("group", pa.string()),
+        ("status", pa.string()),
+        ("first_seen", pa.timestamp("ns")),
+        ("last_seen", pa.timestamp("ns")),
+        ("valid_from", pa.timestamp("ns")),
+        ("valid_to", pa.timestamp("ns")),
+        ("date", pa.timestamp("ns")),
+    ]
+)
+_BSE_REFERENCE_BACKFILL_HINT = (
+    "run `python -m pipeline backfill-bse-instruments --days N` "
+    "(RUNBOOK.md 'BSE instrument list')"
+)
+
+
+def bse_calendar() -> tuple[set[date], set[date]]:
+    """(holidays, special_sessions) of BSE, from the one market calendar."""
+    return market_calendar.load(config.META_DIR / market_calendar.FILENAME).trading_inputs("BSE")
+
+
+def _fetch_bse_bhavcopy(day: date) -> bse_cm_bhavcopy.BhavcopyDay:
+    """BSE's bhavcopy for `day`, parsed. bseindia.com refuses python-requests'
+    own User-Agent (403) and serves the file to a browser's. A 404, or BSE's
+    HTML page served with 200, is `NotYetPublished`; any other status is
+    retried, then raised."""
+    last = ""
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": _BROWSER_UA})
+        for attempt in range(_MAX_RETRIES):
+            resp = session.get(bse_cm_bhavcopy.bhavcopy_url(day), timeout=_TIMEOUT)
+            if resp.status_code == 404:
+                raise NotYetPublished(f"404 for BSE bhavcopy {day.isoformat()}")
+            if resp.status_code == 200:
+                return bse_cm_bhavcopy.parse_bhavcopy(resp.content, day)
+            last = f"HTTP {resp.status_code}"
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(2**attempt)
+    raise UnexpectedFailure(f"BSE bhavcopy {day.isoformat()}: {last}")
+
+
+def _bse_reference_prior(out_path: Path) -> tuple[pd.DataFrame | None, str]:
+    """The published BSE list, or None. A reason comes back only for a file
+    that exists and is unusable: the run then refuses rather than seed over
+    it (no file at all is a first build)."""
+    if not out_path.exists():
+        return None, ""
+    try:
+        prior = pd.read_parquet(out_path)
+    except Exception as e:  # noqa: BLE001 - an unreadable prior is unusable, not a crash
+        return None, f"prior BSE instrument list unreadable: {e}"
+    missing = [c for c in _BSE_REFERENCE_VERSION_COLUMNS if c not in prior.columns]
+    if missing:
+        return None, f"prior BSE instrument list lacks columns {missing}"
+    if prior.empty:
+        return None, "prior BSE instrument list is empty"
+    if prior[["first_seen", "last_seen"]].isna().any().any():
+        return None, "prior BSE instrument list has undated rows"
+    return prior, ""
+
+
+def _bse_versions(frame: pd.DataFrame) -> pd.DataFrame:
+    """One row per version in `frame` (day rows or versions): the earliest
+    first_seen, the latest last_seen, and the name of the latest sighting.
+    A null ISIN or group is part of the key, not dropped."""
+    frame = frame.sort_values("last_seen", kind="mergesort")
+    return frame.groupby(_BSE_REFERENCE_KEY, as_index=False, dropna=False).agg(
+        name=("name", "last"), first_seen=("first_seen", "min"), last_seen=("last_seen", "max")
+    )
+
+
+def _shape_bse_reference(
+    versions: pd.DataFrame, holidays: set[date], special: set[date]
+) -> pd.DataFrame:
+    """instruments_all's rules: `active` when last_seen falls among the latest
+    `_ACTIVE_WINDOW` sessions ending at the newest last_seen in the list;
+    valid_from/valid_to are first_seen/last_seen; `date` is last_seen."""
+    latest = pd.Timestamp(versions["last_seen"].max()).date()
+    active_dates = {
+        pd.Timestamp(d) for d in cal.trading_days_back(latest, _ACTIVE_WINDOW, holidays, special)
+    }
+    out = versions.copy()
+    out["status"] = out["last_seen"].apply(lambda d: "active" if d in active_dates else "inactive")
+    out["valid_from"] = out["first_seen"]
+    out["valid_to"] = out["last_seen"]
+    out["date"] = out["last_seen"]
+    out["scrip_code"] = out["scrip_code"].astype("int64")
+    return (
+        out[_BSE_REFERENCE_COLUMNS]
+        .sort_values(["scrip_code", "first_seen", "last_seen"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+
+
+def build_bse_reference(
+    spec: DatasetSpec,
+    target: date,
+    *,
+    fetch_day: Callable[[date], bse_cm_bhavcopy.BhavcopyDay] = _fetch_bse_bhavcopy,
+    trading_calendar: Callable[[], tuple[set[date], set[date]]] = bse_calendar,
+    days: list[date] | None = None,
+    seed_days: int = config.BSE_REFERENCE_SEED_DAYS,
+    max_catchup_days: int = config.BSE_REFERENCE_MAX_CATCHUP_DAYS,
+    min_rows: int = config.BSE_BHAVCOPY_MIN_ROWS,
+    max_new_share: float = config.REFERENCE_PRIOR_MAX_NEW_SHARE,
+) -> RunStatus:
+    """Update `bse_instruments_all.parquet` from BSE's daily bhavcopies: one
+    row per `(scrip_code, isin, symbol, group)` version, with the sessions it
+    first and last traded in, merged onto the published list like
+    `build_reference` merges NSE's sessions.
+
+    Which days it reads (BSE's own calendar):
+      - daily (`days` None): every BSE session after the list's newest
+        last_seen, up to `target`, so a day the producer did not run is read
+        on the next run; more than `max_catchup_days` behind fails (backfill);
+      - first build (no published list): the `seed_days` sessions ending at
+        `target`, so first_seen starts there;
+      - `days` given (`backfill-bse-instruments`): those days, merged in
+        again; a day BSE did not post is skipped and named.
+
+    Days are read oldest first and merged only up to the first that cannot
+    be read, so the list's newest last_seen never moves past a hole: the
+    target day not posted yet is `not_yet`, an earlier day is `failed`, and
+    either way the next run reads from there. A file under `min_rows` rows
+    counts as unreadable (truncated).
+
+    Fail-closed on the prior, as build_reference: an unusable published list
+    is `failed` and nothing is written, and one that lacks more than
+    `max_new_share` of the versions read is truncated, not churn.
+    """
+    spec.base_dir.mkdir(parents=True, exist_ok=True)
+    out_path = spec.base_dir / f"{spec.file_prefix}_all.parquet"
+    source = bse_cm_bhavcopy.SOURCE
+
+    prior, why = _bse_reference_prior(out_path)
+    if why:
+        return RunStatus(
+            "failed", target, source=source,
+            message=f"{why}; nothing written -- {_BSE_REFERENCE_BACKFILL_HINT}",
+        )
+    prior_rows = 0 if prior is None else len(prior)
+    holidays, special = trading_calendar()
+
+    backfill = days is not None
+    if days is None:
+        if not cal.is_trading_day(target, holidays, special_sessions=special):
+            return RunStatus(
+                "skipped_holiday", target, symbol_count=prior_rows, source=source,
+                message="not a BSE trading day",
+            )
+        if prior is None:
+            days = cal.trading_days_back(target, seed_days, holidays, special)
+        else:
+            newest = pd.Timestamp(prior["last_seen"].max()).date()
+            days = []
+            day = target
+            while day > newest:
+                if len(days) == max_catchup_days:
+                    return RunStatus(
+                        "failed", target, symbol_count=prior_rows, source=source,
+                        message=(
+                            f"list is more than {max_catchup_days} BSE sessions behind "
+                            f"(newest {newest.isoformat()}); nothing written -- "
+                            f"{_BSE_REFERENCE_BACKFILL_HINT}"
+                        ),
+                    )
+                days.append(day)
+                day = cal.previous_trading_day(day, holidays, special)
+            days.sort()
+            if not days:
+                return RunStatus(
+                    "skipped_idempotent", target, symbol_count=prior_rows, source=source,
+                    message=f"already holds {newest.isoformat()}",
+                )
+
+    frames: list[pd.DataFrame] = []
+    skipped: list[str] = []
+    stopped: tuple[date, str, bool] | None = None  # (day, why, not yet posted)
+    dropped = unreadable = 0
+    for day in sorted(days):
+        try:
+            got = fetch_day(day)
+        except NotYetPublished as e:
+            if backfill:
+                skipped.append(day.isoformat())
+                continue
+            stopped = (day, str(e), True)
+            break
+        except Exception as e:  # noqa: BLE001 - any fetch/parse failure stops at this day
+            stopped = (day, f"BSE bhavcopy {day.isoformat()}: {e}", False)
+            break
+        if len(got.frame) < min_rows:
+            stopped = (
+                day,
+                f"BSE bhavcopy {day.isoformat()} has {len(got.frame)} rows < floor "
+                f"{min_rows} (truncated?)",
+                False,
+            )
+            break
+        frames.append(got.frame)
+        dropped += got.dropped_rows
+        unreadable += got.unreadable_isins
+
+    def unmerged(status: str, why: str) -> RunStatus:
+        return RunStatus(
+            status, target, symbol_count=prior_rows, source=source,
+            message=f"{why}; nothing new merged" + ("; prior kept" if prior_rows else ""),
+        )
+
+    if not frames:
+        if stopped is None:
+            return unmerged("failed", f"no BSE bhavcopy posted for {', '.join(skipped)}")
+        day, reason, not_posted = stopped
+        return unmerged("not_yet" if not_posted and day == target else "failed", reason)
+
+    sessions = pd.concat(frames, ignore_index=True)
+    fresh = _bse_versions(sessions.assign(first_seen=sessions["date"], last_seen=sessions["date"]))
+    unseen = len(fresh)
+    if prior is not None:
+        known = pd.MultiIndex.from_frame(prior[_BSE_REFERENCE_KEY])
+        unseen = int((~pd.MultiIndex.from_frame(fresh[_BSE_REFERENCE_KEY]).isin(known)).sum())
+        if unseen > max_new_share * len(fresh):
+            return unmerged(
+                "failed",
+                f"prior BSE instrument list lacks {unseen} of the {len(fresh)} versions read "
+                f"(over the {max_new_share:.0%} limit): truncated or broken -- "
+                f"{_BSE_REFERENCE_BACKFILL_HINT}",
+            )
+        prior_versions = prior[_BSE_REFERENCE_VERSION_COLUMNS].assign(
+            first_seen=pd.to_datetime(prior["first_seen"]),
+            last_seen=pd.to_datetime(prior["last_seen"]),
+        )
+        fresh = _bse_versions(pd.concat([prior_versions, fresh], ignore_index=True))
+
+    out = _shape_bse_reference(fresh, holidays, special)
+    _write_atomic_typed(out, out_path, _BSE_REFERENCE_SCHEMA)
+
+    read = sorted({pd.Timestamp(d).date() for d in sessions["date"].unique()})
+    span = read[0].isoformat() if len(read) == 1 else f"{read[0]} to {read[-1]}"
+    summary = f"{len(out)} versions, {unseen} new, from {len(read)} BSE sessions ({span})"
+    if dropped:
+        summary += f"; {dropped} rows without a scrip code or symbol dropped"
+    if unreadable:
+        summary += f"; {unreadable} unreadable ISINs nulled"
+    if skipped:
+        summary += f"; not posted, skipped: {', '.join(skipped)}"
+    if stopped is not None:
+        day, reason, not_posted = stopped
+        status = "not_yet" if not_posted and day == target else "failed"
+        return RunStatus(
+            status, target, symbol_count=len(out), source=source,
+            message=f"{summary}; stopped at {day.isoformat()}: {reason}",
+        )
+    return RunStatus("success", target, symbol_count=len(out), source=source, message=summary)
 
 
 def _write_atomic(df: pd.DataFrame, target: Path) -> None:

@@ -109,7 +109,7 @@ def test_reference_spec_fields():
     assert s.published is True
     assert datasets.DATASETS["reference"] is s
     assert datasets.DATASET_ORDER == [
-        "equities", "indices", "reference", "sector_industry",
+        "equities", "indices", "reference", "bse_reference", "sector_industry",
         "classification_registry", "classification_observations",
         "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
         "bse_fno_freeze_limits", "market_calendar", "corporate_actions",

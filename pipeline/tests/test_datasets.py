@@ -21,7 +21,7 @@ def test_equities_spec_fields():
     # publish, but never published itself since 2026-10-13.
     assert s.published is False
     assert datasets.DATASET_ORDER == [
-        "equities", "indices", "reference", "sector_industry",
+        "equities", "indices", "reference", "bse_reference", "sector_industry",
         "classification_registry", "classification_observations",
         "fundamentals", "index_constituents", "cas_eligible", "fno_freeze_limits",
         "bse_fno_freeze_limits", "market_calendar", "corporate_actions",
@@ -70,7 +70,7 @@ def test_manifest_names_are_unique():
 
 def test_all_specs_follows_dataset_order():
     assert datasets.all_specs() == [
-        datasets.EQUITIES, datasets.INDICES, datasets.REFERENCE,
+        datasets.EQUITIES, datasets.INDICES, datasets.REFERENCE, datasets.BSE_REFERENCE,
         datasets.SECTOR_INDUSTRY, datasets.CLASSIFICATION_REGISTRY,
         datasets.CLASSIFICATION_OBSERVATIONS, datasets.FUNDAMENTALS,
         datasets.INDEX_CONSTITUENTS, datasets.CAS_ELIGIBLE, datasets.FNO_FREEZE_LIMITS,
@@ -87,7 +87,7 @@ def test_published_specs_are_every_kept_list_and_no_price_dataset():
     assert specs == [s for s in datasets.all_specs() if s not in prices]
     assert specs[0] is datasets.REFERENCE
     assert [s.manifest_name for s in specs] == [
-        "reference", "sector_industry", "classification_registry",
+        "reference", "bse_reference", "sector_industry", "classification_registry",
         "classification_observations", "fundamentals", "index_constituents",
         "cas_eligible", "fno_freeze_limits", "bse_fno_freeze_limits", "market_calendar",
         "corporate_actions", "corporate_actions_history", "special_pre_open",
@@ -174,7 +174,7 @@ def test_derived_defaults_false_for_existing_specs():
 
 
 def test_external_defaults_false_for_existing_specs():
-    for key in ("equities", "indices", "reference", "sector_industry"):
+    for key in ("equities", "indices", "reference", "bse_reference", "sector_industry"):
         assert datasets.DATASETS[key].external is False, key
 
 

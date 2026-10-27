@@ -127,6 +127,52 @@ link a listing's old and new versions.
   (it gains the column); `bootstrap-reference` reads price files that predate
   it, with every token null.
 
+## BSE instrument list (`bse_reference`, 2026-10-27)
+`reference/bse_instruments_all.parquet` (manifest `bse_reference`,
+`schema_version` 1) is the BSE twin of `instruments_all.parquet`: one row per
+BSE listing version with `scrip_code` (BSE's scrip code, the exchange token
+Kite and Dhan report for a BSE order, e.g. 543711 for SULA), `isin`, `symbol`
+(BSE's scrip id), `name`, `group` (BSE's group: A, B, T, X, XT, Z, M, F for
+debt, ...), `status`, `first_seen`, `last_seen`, `valid_from`, `valid_to` and
+`date`. The desktop app reads a scrip code as an alias of the NSE listing
+with the same ISIN.
+
+- **Source:** BSE's daily UDiFF bhavcopy,
+  `https://www.bseindia.com/download/BhavCopy/Equity/BhavCopy_BSE_CM_0_0_0_<yyyymmdd>_F_0000.CSV`
+  (`FinInstrmId`, `ISIN`, `TckrSymb`, `SctySrs`, `FinInstrmNm`), one row per
+  scrip traded that day (5,170 on 2026-10-26). A browser User-Agent is needed
+  (python-requests' own gets 403). A day BSE has not posted comes back as its
+  HTML home page with HTTP 200, read as "not posted".
+- **Versions:** instruments_all's rules. A change of ISIN, scrip id or group
+  starts a new row under the same scrip code; `active` is a last_seen within
+  the newest 10 BSE sessions of the list. BSE moves scrips between groups
+  often (57 moves in 21-26 Oct 2026), so a scrip code routinely has several
+  rows: match on `(scrip_code, isin)`.
+- **Which days a run reads** (BSE's own calendar in `market_calendar.json`):
+  every BSE session after the list's newest `last_seen`, up to the run's date,
+  so days the producer did not run are read on the next run. Days merge
+  oldest first and only up to the first that cannot be read, so the list never
+  skips a day:
+  - today not posted yet: `not_yet` (the earlier days are merged);
+  - an earlier day unreadable (an outage, a file under 2,000 rows, a format
+    change): `failed`, which reds the job; the next run starts from that day;
+  - more than 30 sessions behind: `failed`, nothing read; run the backfill.
+- **First build:** with no published list, the run reads the last 30 BSE
+  sessions, so `first_seen` starts there (published 2026-10-27; no history
+  before it). An unreadable or mis-shaped published list is `failed`, never
+  rebuilt over; one lacking more than 25% of the versions a run reads is
+  refused as truncated.
+- **Backfill or extend the history** (any machine: bseindia.com serves
+  GitHub's runners too): re-reads the last N BSE sessions and merges them in, so
+  `first_seen` reaches further back. Days BSE did not post are skipped and
+  named. UDiFF files exist from at least 2024-01-02.
+  ```
+  cd pipeline
+  python -m pipeline sync
+  python -m pipeline backfill-bse-instruments --days 250 [--date YYYY-MM-DD]
+  python -m pipeline publish
+  ```
+
 ## Bootstrap the historical baseline (local, one-time)
 Historical: the price store is run-local since 2026-10-13 (see above), so a
 backfill only matters inside a reference bootstrap. NSE blocks datacenter IPs,
