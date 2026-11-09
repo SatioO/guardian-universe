@@ -71,13 +71,20 @@ def test_the_committed_calendar_holds_the_verified_special_sessions():
     )
 
 
-def test_a_session_awaiting_its_hours_is_named_and_not_sent_to_the_app():
+def test_muhurat_2026_carries_its_circular_hours():
     calendar = _committed()
-    # Muhurat 2026: NSE lists the day; its timings are notified later.
-    assert calendar.sessions_awaiting_hours() == ["NSE 2026-11-08"]
-    assert _find(calendar.rows(), "NSE", "2026-11-08", "session") == []
-    # ...but the pipeline's own calendar trades it already.
-    assert date(2026, 11, 8) in calendar.trading_inputs("NSE")[1]
+    # Muhurat 2026 (Sunday 8 November): the circulars of 2026-10-19 gave the
+    # equity hours, pre-open 14:05-14:20 and the session 14:20-15:30.
+    assert calendar.sessions_awaiting_hours() == []
+    rows = calendar.rows()
+    for venue in ("NSE", "BSE"):
+        (row,) = _find(rows, venue, "2026-11-08", "session")
+        assert (_hm(row.pre_open_seconds), _hm(row.open_seconds), _hm(row.close_seconds)) == (
+            "14:05",
+            "14:20",
+            "15:30",
+        ), venue
+        assert date(2026, 11, 8) in calendar.trading_inputs(venue)[1], venue
 
 
 def test_the_committed_calendar_carries_each_venues_closures_and_partial_days():
