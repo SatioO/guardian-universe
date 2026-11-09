@@ -217,7 +217,11 @@
         },
         {
           "date": "2026-11-08",
-          "label": "Muhurat 2026 (Diwali Laxmi Pujan): NSE CMTR71775 lists it, timings to be notified; add hours when the circular is out"
+          "label": "muhurat-2026 (Diwali Laxmi Pujan — Sunday afternoon Muhurat trading, Samvat 2083; NSE publishes a bhavcopy)",
+          "preOpen": "14:05",
+          "open": "14:20",
+          "close": "15:30",
+          "source": "NSE and BSE Muhurat circulars of 2026-10-19 (equity: pre-open 14:05-14:20, session 14:20-15:30; equity derivatives run to 15:40)"
         }
       ]
     },
@@ -287,6 +291,14 @@
           "open": "09:15",
           "close": "15:30",
           "source": "NSE CMTR72349 (standard timings 09:15-15:30, pre-open 09:00); BSE notice of 2026-01-16; MCX circular of 2026-01-16 (09:00-17:00)"
+        },
+        {
+          "date": "2026-11-08",
+          "label": "muhurat-2026 (Diwali Laxmi Pujan — Sunday afternoon Muhurat trading, Samvat 2083; NSE publishes a bhavcopy)",
+          "preOpen": "14:05",
+          "open": "14:20",
+          "close": "15:30",
+          "source": "NSE and BSE Muhurat circulars of 2026-10-19 (equity: pre-open 14:05-14:20, session 14:20-15:30; equity derivatives run to 15:40)"
         }
       ]
     },
